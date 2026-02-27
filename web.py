@@ -409,7 +409,7 @@ def generate(
     config = {
         "promptgen": {"style": STYLE_MAP.get(style, "anime")},
         "tts": {"voice": voice_id, "rate": RATE_MAP.get(rate, "+0%")},
-        "imagegen": {"backend": BACKEND_MAP.get(image_backend, "siliconflow")},
+        "imagegen": {"backend": BACKEND_MAP.get(image_backend, "pollinations")},
         "llm": {"provider": LLM_MAP.get(llm_backend, "auto")},
         "video": {
             "crf": QUALITY_MAP.get(quality, 18),
@@ -719,12 +719,12 @@ def create_ui() -> gr.Blocks:
                     image_backend = gr.Dropdown(
                         label="图片生成后端",
                         choices=BACKEND_CHOICES,
-                        value="SiliconFlow",
+                        value=_QUICK_IMG_TO_DROPDOWN.get(_default_img, "Pollinations(免费)"),
                     )
                     llm_backend = gr.Dropdown(
                         label="LLM 后端",
                         choices=LLM_CHOICES,
-                        value="自动检测",
+                        value=_QUICK_LLM_TO_DROPDOWN.get(_default_llm, "自动检测"),
                     )
                     quality_radio = gr.Radio(
                         label="画质",
