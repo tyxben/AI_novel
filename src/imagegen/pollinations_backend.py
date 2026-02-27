@@ -2,6 +2,7 @@
 
 import io
 import logging
+import time
 import urllib.parse
 
 from PIL import Image
@@ -9,6 +10,11 @@ from PIL import Image
 from src.imagegen.image_generator import ImageGenerator
 
 log = logging.getLogger("novel")
+
+# Pollinations URL 对 prompt 长度敏感，过长会触发 530
+_MAX_PROMPT_CHARS = 500
+_MAX_RETRIES = 3
+_RETRY_DELAY = 5  # seconds
 
 
 class PollinationsBackend(ImageGenerator):
@@ -41,7 +47,12 @@ class PollinationsBackend(ImageGenerator):
         self.close()
 
     def generate(self, prompt: str) -> Image.Image:
-        """调用 Pollinations.ai 生成图片。"""
+        """调用 Pollinations.ai 生成图片（含重试）。"""
+        # 截断过长 prompt 避免 URL 过长导致 530
+        if len(prompt) > _MAX_PROMPT_CHARS:
+            prompt = prompt[:_MAX_PROMPT_CHARS]
+            log.debug("Prompt 截断至 %d 字符", _MAX_PROMPT_CHARS)
+
         encoded_prompt = urllib.parse.quote(prompt, safe="")
         url = (
             f"{self.BASE_URL}/{encoded_prompt}"
@@ -50,9 +61,18 @@ class PollinationsBackend(ImageGenerator):
         )
 
         client = self._get_client()
-        resp = client.get(url)
-        resp.raise_for_status()
+        last_err = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                resp = client.get(url)
+                resp.raise_for_status()
+                image = Image.open(io.BytesIO(resp.content))
+                log.debug("Pollinations 生成图片: %dx%d", image.width, image.height)
+                return image
+            except Exception as e:
+                last_err = e
+                log.warning("Pollinations 第 %d/%d 次失败: %s", attempt, _MAX_RETRIES, e)
+                if attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY)
 
-        image = Image.open(io.BytesIO(resp.content))
-        log.debug("Pollinations 生成图片: %dx%d", image.width, image.height)
-        return image
+        raise RuntimeError(f"Pollinations 生成失败（已重试 {_MAX_RETRIES} 次）: {last_err}")
