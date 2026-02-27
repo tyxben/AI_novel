@@ -42,5 +42,21 @@ def create_image_generator(config: dict) -> ImageGenerator:
         from src.imagegen.diffusers_backend import DiffusersBackend
 
         return DiffusersBackend(config)
+    elif backend == "together":
+        from src.imagegen.together_backend import TogetherBackend
+
+        return TogetherBackend(config)
+    elif backend == "siliconflow":
+        from src.imagegen.siliconflow_backend import SiliconFlowBackend
+
+        return SiliconFlowBackend(config)
+    elif backend == "pollinations":
+        from src.imagegen.pollinations_backend import PollinationsBackend
+
+        return PollinationsBackend(config)
+    elif backend == "dashscope":
+        from src.imagegen.dashscope_backend import DashScopeBackend
+
+        return DashScopeBackend(config)
     else:
         raise ValueError(f"Unknown image backend: {backend}")

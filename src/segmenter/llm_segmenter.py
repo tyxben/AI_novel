@@ -1,9 +1,7 @@
-"""LLM 分段器 - 基于 GPT 的智能文本分段"""
+"""LLM 分段器 - 基于 LLM 的智能文本分段（支持多后端）"""
 
 import json
 import logging
-
-from openai import OpenAI
 
 from src.segmenter.text_segmenter import TextSegmenter
 
@@ -28,27 +26,28 @@ _CHUNK_SIZE = 3000
 
 
 class LLMSegmenter(TextSegmenter):
-    """基于 OpenAI GPT 的智能文本分段器。
+    """基于 LLM 的智能文本分段器（支持多后端）。
 
-    使用大语言模型理解上下文后进行分段，效果优于规则方法，
-    但依赖 OpenAI API。当 API 调用失败时自动回退到 SimpleSegmenter。
+    使用大语言模型理解上下文后进行分段，效果优于规则方法。
+    支持 OpenAI、DeepSeek、Gemini、Ollama 等后端。
+    当 API 调用失败时自动回退到 SimpleSegmenter。
     """
 
     def __init__(self, config: dict) -> None:
-        llm_cfg = config.get("llm", {})
-        self.model: str = llm_cfg.get("model", "gpt-4o-mini")
-        self.temperature: float = llm_cfg.get("temperature", 0.3)
+        self._llm_config = config.get("llm", {})
+        self.temperature: float = self._llm_config.get("temperature", 0.3)
         self.max_chars: int = config.get("max_chars", 200)
         self.min_chars: int = config.get("min_chars", 50)
         self._config = config
-        self._client: OpenAI | None = None
+        self._llm_client = None
 
-    @property
-    def client(self) -> OpenAI:
-        """延迟初始化 OpenAI 客户端（首次调用 API 时创建）。"""
-        if self._client is None:
-            self._client = OpenAI()
-        return self._client
+    def _get_llm_client(self):
+        """创建或返回缓存的 LLM 客户端实例。"""
+        if self._llm_client is None:
+            from src.llm import create_llm_client
+
+            self._llm_client = create_llm_client(self._llm_config)
+        return self._llm_client
 
     # ------------------------------------------------------------------
     # public
@@ -92,7 +91,7 @@ class LLMSegmenter(TextSegmenter):
     # ------------------------------------------------------------------
 
     def _call_api(self, text: str) -> list[str]:
-        """调用 OpenAI API 进行分段。
+        """调用 LLM API 进行分段。
 
         Args:
             text: 单个文本块。
@@ -100,31 +99,39 @@ class LLMSegmenter(TextSegmenter):
         Returns:
             分段后的字符串列表。
         """
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=self.temperature,
+        client = self._get_llm_client()
+        response = client.chat(
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": text},
             ],
-            response_format={"type": "json_object"},
+            temperature=self.temperature,
+            json_mode=True,
         )
 
-        content = response.choices[0].message.content
+        content = response.content
         if not content:
             return []
 
         parsed = json.loads(content)
 
-        # 兼容两种返回格式: 纯数组 或 {"segments": [...]}
+        # 兼容多种返回格式:
+        #   1. 纯数组 ["段1", "段2"]
+        #   2. {"segments": ["段1", "段2"]}  — 值为 list
+        #   3. {"片段1": "段1", "片段2": "段2"} — 值为 str
         if isinstance(parsed, list):
             segments = parsed
         elif isinstance(parsed, dict):
-            # 取第一个值为列表的字段
-            segments = next(
+            # 优先找值为 list 的字段
+            list_val = next(
                 (v for v in parsed.values() if isinstance(v, list)),
-                [],
+                None,
             )
+            if list_val is not None:
+                segments = list_val
+            else:
+                # 所有值都是字符串时，按 key 排序取 values
+                segments = list(parsed.values())
         else:
             return []
 

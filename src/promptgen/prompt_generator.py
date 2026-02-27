@@ -180,9 +180,10 @@ class PromptGenerator:
         self._use_character_tracking: bool = config.get("character_tracking", True)
         self._tracker = CharacterTracker() if self._use_character_tracking else None
 
-        # 检测是否可使用 LLM
-        self._use_llm: bool = bool(os.environ.get("OPENAI_API_KEY"))
-        self._client = None  # 延迟初始化
+        # 检测是否可使用 LLM: 任意已知 API Key 或配置了 provider
+        self._llm_config = llm_cfg
+        self._use_llm: bool = self._detect_llm_available(llm_cfg)
+        self._llm_client_cached = None
 
         # 缓存全文的时代判断结果
         self._era_cache: str | None = None
@@ -258,12 +259,20 @@ class PromptGenerator:
     # LLM mode
     # ------------------------------------------------------------------
 
-    def _get_client(self):
-        """延迟初始化 OpenAI 客户端。"""
-        if self._client is None:
-            from openai import OpenAI
-            self._client = OpenAI()
-        return self._client
+    @staticmethod
+    def _detect_llm_available(llm_cfg: dict) -> bool:
+        """检测是否有可用的 LLM provider。"""
+        from src.llm import is_llm_available
+
+        return is_llm_available(llm_cfg)
+
+    def _get_llm_client(self):
+        """创建或返回缓存的 LLM 客户端实例。"""
+        if self._llm_client_cached is None:
+            from src.llm import create_llm_client
+
+            self._llm_client_cached = create_llm_client(self._llm_config)
+        return self._llm_client_cached
 
     def _generate_with_llm(self, text: str, character_prompt: str) -> str:
         """使用 LLM 生成高质量 prompt。"""
@@ -273,17 +282,16 @@ class PromptGenerator:
                 user_msg += f"\n\n已知角色描述（请保持一致）:\n{character_prompt}"
             user_msg += f"\n\n画面风格: {self._style_name}"
 
-            client = self._get_client()
-            response = client.chat.completions.create(
-                model=self._model,
-                temperature=self._temperature,
+            client = self._get_llm_client()
+            response = client.chat(
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
+                temperature=self._temperature,
             )
 
-            raw_prompt = (response.choices[0].message.content or "").strip()
+            raw_prompt = response.content.strip()
             if not raw_prompt:
                 log.warning("LLM 返回空 prompt，回退到本地模式")
                 return self._generate_local(text, character_prompt)

@@ -64,7 +64,12 @@ class Pipeline:
 
         log.info("阶段 1/5: 文本分段")
         text = self.input_file.read_text(encoding="utf-8")
-        segmenter = create_segmenter(self.cfg["segmenter"])
+        seg_cfg = dict(self.cfg["segmenter"])
+        # 全局 llm 配置与模块级 llm 配置合并（模块级覆盖全局）
+        global_llm = self.cfg.get("llm", {})
+        module_llm = seg_cfg.get("llm", {})
+        seg_cfg["llm"] = {**global_llm, **module_llm}
+        segmenter = create_segmenter(seg_cfg)
         segments = segmenter.segment(text)
 
         for i, seg in enumerate(segments):
@@ -89,7 +94,12 @@ class Pipeline:
             return self._load_prompts()
 
         log.info("阶段 2/5: 生成图片 Prompt")
-        gen = PromptGenerator(self.cfg.get("promptgen", {}))
+        prompt_cfg = dict(self.cfg.get("promptgen", {}))
+        # 全局 llm 配置与模块级 llm 配置合并（模块级覆盖全局）
+        global_llm = self.cfg.get("llm", {})
+        module_llm = prompt_cfg.get("llm", {})
+        prompt_cfg["llm"] = {**global_llm, **module_llm}
+        gen = PromptGenerator(prompt_cfg)
 
         # 用全文帮助判断时代背景（现代 vs 古风）
         full_text = self.input_file.read_text(encoding="utf-8")
