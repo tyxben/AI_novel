@@ -25,11 +25,16 @@ class PollinationsBackend(ImageGenerator):
 
     BASE_URL = "https://image.pollinations.ai/prompt"
 
+    # Pollinations 支持的 model 名，不同于 SiliconFlow/Together 的全称
+    _VALID_MODELS = {"flux", "turbo"}
+
     def __init__(self, config: dict) -> None:
         self._client = None
-        self._width = config.get("width", 1024)
-        self._height = config.get("height", 1792)
-        self._model = config.get("model", "flux")
+        self._width = min(config.get("width", 1024), 1024)
+        self._height = min(config.get("height", 1792), 1792)
+        model = config.get("model", "flux")
+        # 忽略其他后端的 model 名（如 black-forest-labs/FLUX.1-schnell）
+        self._model = model if model in self._VALID_MODELS else "flux"
 
     def _get_client(self):
         if self._client is None:

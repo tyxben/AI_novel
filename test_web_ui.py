@@ -51,11 +51,12 @@ def test_quick_config_llm_select(page):
 
     page.screenshot(path=f"{SCREENSHOTS_DIR}/02_llm_radio.png", full_page=True)
 
-    # Click Ollama - should hide key field
+    # Click Ollama - LLM key field should hide (image key may still be visible)
     page.locator("[data-testid='Ollama（本地免费）-radio-label']").first.click(force=True)
     time.sleep(1)
-    pw = page.locator("input[type='password']:visible")
-    assert pw.count() == 0, "Ollama should hide password field"
+    # Verify no LLM-specific key label is visible
+    for kl in ["Gemini API Key", "DeepSeek API Key", "OpenAI API Key"]:
+        assert page.get_by_label(kl).count() == 0, f"Ollama: {kl} should be hidden"
     page.screenshot(path=f"{SCREENSHOTS_DIR}/03_llm_ollama.png", full_page=True)
 
     # Switch back to verify key field reappears
@@ -84,11 +85,17 @@ def test_quick_config_img_select(page):
     expect(page.get_by_label("阿里云 DashScope API Key")).to_be_visible()
     page.screenshot(path=f"{SCREENSHOTS_DIR}/05_img_dashscope.png", full_page=True)
 
-    # Switch to Pollinations - should hide key, show hint
+    # Switch to Pollinations - key fields should hide
     page.locator("[data-testid='Pollinations（完全免费）-radio-label']").first.click(force=True)
     time.sleep(1)
-    expect(page.get_by_text("完全免费，无需 API Key")).to_be_visible()
+    for kl in ["SiliconFlow API Key", "阿里云 DashScope API Key"]:
+        assert page.get_by_label(kl).count() == 0, f"Pollinations: {kl} should be hidden"
     page.screenshot(path=f"{SCREENSHOTS_DIR}/06_img_pollinations.png", full_page=True)
+
+    # Switch back to verify key reappears
+    page.locator("[data-testid='SiliconFlow-radio-label']").first.click(force=True)
+    time.sleep(1)
+    expect(page.get_by_label("SiliconFlow API Key")).to_be_visible()
 
     print("PASS: image radio toggles correct key fields")
 
