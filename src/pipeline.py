@@ -1,7 +1,7 @@
 """流水线调度器 - 编排所有阶段"""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.checkpoint import Checkpoint
 from src.config_manager import load_config
@@ -14,15 +14,27 @@ from src.tts.subtitle_generator import SubtitleGenerator
 from src.video.video_assembler import VideoAssembler
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """递归合并两个字典，override 中的值覆盖 base 中的值。"""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 class Pipeline:
     def __init__(self, input_file: Path, config_path: Path | None = None,
                  output_dir: Path | None = None, workspace: Path | None = None,
-                 resume: bool = False):
+                 resume: bool = False, config: dict | None = None):
         self.input_file = Path(input_file)
         if not self.input_file.exists():
             raise FileNotFoundError(f"输入文件不存在: {self.input_file}")
 
-        self.cfg = load_config(config_path)
+        base_cfg = load_config(config_path)
+        self.cfg = _deep_merge(base_cfg, config) if config else base_cfg
         proj_name = self.input_file.stem
 
         base = Path(self.cfg.get("project", {}).get("default_workspace", "workspace"))
@@ -44,13 +56,28 @@ class Pipeline:
         for d in [self.seg_dir, self.img_dir, self.audio_dir, self.srt_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
-    def run(self) -> Path:
+    def run(self, progress_callback: Callable[[int, int, str], None] | None = None) -> Path:
+        """运行完整流水线。
+
+        Args:
+            progress_callback: 进度回调函数，签名为 (stage_num, total_stages, description)。
+                             可选，默认 None 表示不回调。
+        """
         log.info("开始处理: %s", self.input_file.name)
 
+        def _notify(stage: int, desc: str) -> None:
+            if progress_callback:
+                progress_callback(stage, 5, desc)
+
+        _notify(1, "文本分段")
         segments = self._stage_segment()
+        _notify(2, "生成图片 Prompt")
         prompts = self._stage_prompt(segments)
+        _notify(3, "生成图片")
         images = self._stage_image(prompts)
+        _notify(4, "语音合成")
         audio_srt = self._stage_tts(segments)
+        _notify(5, "视频合成")
         output = self._stage_video(segments, images, audio_srt)
 
         log.info("完成! 输出文件: %s", output)

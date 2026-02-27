@@ -20,6 +20,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from src.logger import log
+from src.utils.ffmpeg_helper import ensure_ffmpeg
 from src.video.effects import ken_burns_filter
 
 
@@ -197,13 +198,7 @@ class VideoAssembler:
             FileNotFoundError: ffprobe 未安装。
             RuntimeError: ffprobe 执行失败或输出解析异常。
         """
-        if not shutil.which("ffprobe"):
-            raise FileNotFoundError(
-                "未找到 ffprobe，请安装 FFmpeg (https://ffmpeg.org/)。\n"
-                "  macOS: brew install ffmpeg\n"
-                "  Ubuntu/Debian: sudo apt install ffmpeg\n"
-                "  Windows: winget install ffmpeg"
-            )
+        ensure_ffmpeg()
 
         cmd = [
             "ffprobe",
@@ -732,6 +727,7 @@ class VideoAssembler:
             cmd:         完整命令行参数列表。
             description: 操作描述，用于日志和错误消息。
         """
+        ensure_ffmpeg()
         log.debug("FFmpeg 命令 [%s]: %s", description, " ".join(cmd))
 
         try:
