@@ -1,0 +1,5 @@
+name: anime
+display_name: 日系动漫
+positive: "anime style, detailed, vibrant colors, studio ghibli inspired, cel shading, beautiful scenery"
+negative: "ugly, deformed, bad anatomy, extra limbs, mutated hands, poorly drawn face, blurry, watermark, text, logo, realistic, 3d render, lowres, worst quality, low quality"
+prefix: "beautiful anime illustration of"

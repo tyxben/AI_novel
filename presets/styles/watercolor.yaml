@@ -1,0 +1,5 @@
+name: watercolor
+display_name: 水彩
+positive: "watercolor painting, soft colors, artistic, dreamy, delicate, wet on wet technique"
+negative: "photo, 3d render, cartoon, deformed, blurry, watermark, text, harsh lines"
+prefix: "exquisite watercolor painting of"

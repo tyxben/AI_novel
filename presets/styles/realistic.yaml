@@ -1,0 +1,5 @@
+name: realistic
+display_name: 写实
+positive: "photorealistic, 8k, detailed, cinematic lighting, sharp focus, professional photography"
+negative: "cartoon, anime, painting, drawing, deformed, blurry, watermark, text, ugly"
+prefix: "cinematic photo of"

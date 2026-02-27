@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "novel-video"
+version = "0.1.0"
+description = "AI 小说推文自动化 - 小说一键转短视频"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "edge-tts>=6.1",
+    "Pillow>=10.0",
+    "aiofiles>=23.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch>=2.1",
+    "diffusers>=0.25",
+    "transformers>=4.36",
+    "accelerate>=0.25",
+    "safetensors>=0.4",
+]
+llm = [
+    "openai>=1.0",
+]
+all = [
+    "novel-video[gpu,llm]",
+]
+
+[project.scripts]
+novel-video = "main:cli"
+
+[tool.setuptools]
+py-modules = ["main"]
+packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.tts", "src.video"]

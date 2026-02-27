@@ -1,0 +1,5 @@
+name: chinese_ink
+display_name: 中国水墨风
+positive: "chinese ink painting, traditional art, elegant, flowing brushstrokes, masterpiece, best quality, extremely detailed face, beautiful eyes, correct anatomy"
+negative: "ugly, deformed, disfigured, bad anatomy, wrong anatomy, extra limbs, mutated hands, poorly drawn face, mutation, bad proportions, extra fingers, malformed, cross-eyed, blurry, watermark, text, logo, 3d render, cartoon, lowres, worst quality, low quality"
+prefix: "masterpiece ink painting of"

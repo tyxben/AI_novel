@@ -1,0 +1,12 @@
+click>=8.0
+pyyaml>=6.0
+rich>=13.0
+edge-tts>=6.1
+openai>=1.0
+diffusers>=0.25
+transformers>=4.36
+accelerate>=0.25
+torch>=2.1
+safetensors>=0.4
+aiofiles>=23.0
+Pillow>=10.0

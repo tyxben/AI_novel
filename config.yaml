@@ -1,0 +1,63 @@
+# AI 小说推文自动化 - 全局配置
+
+# 项目设置
+project:
+  default_workspace: workspace
+  default_output: output
+
+# 文本分段
+segmenter:
+  method: simple  # simple | llm
+  max_chars: 100
+  min_chars: 20
+  llm:
+    model: gpt-4o-mini
+    temperature: 0.3
+
+# Prompt 生成
+promptgen:
+  style: anime  # 风格预设名
+  llm:
+    model: gpt-4o-mini
+    temperature: 0.7
+  character_tracking: true
+
+# 图片生成
+imagegen:
+  backend: diffusers
+  model: gsdf/Counterfeit-V2.5
+  width: 512
+  height: 896
+  steps: 30
+  guidance_scale: 7.5
+  device: auto  # auto | cuda | mps | cpu
+
+# TTS 配音
+tts:
+  voice: zh-CN-YunxiNeural
+  rate: "+0%"
+  volume: "+0%"
+
+# 字幕
+subtitle:
+  font_size: 24
+  font_color: white
+  outline_color: black
+  outline_width: 2
+  position: bottom  # bottom | center
+
+# 视频合成
+video:
+  resolution: [1080, 1920]  # 竖屏 9:16
+  fps: 30
+  codec: libx264
+  crf: 18
+  ken_burns:
+    zoom_range: [1.0, 1.15]
+    pan_speed: 0.02
+  transition:
+    type: crossfade
+    duration: 0.5
+  bgm:
+    path: ""  # 留空则无BGM
+    volume: 0.15
