@@ -2,9 +2,11 @@
 
 将静态图片、语音音频和 SRT 字幕合成为最终 MP4 视频。
 主要流程:
-  1. 每组素材（图片 + 音频 + 字幕）创建一个带 Ken Burns 特效的片段
-  2. 使用 FFmpeg concat demuxer 拼接所有片段
-  3. 可选混入背景音乐
+  1. 每组素材（图片 + 音频 + 字幕）按 SRT 条目拆分为子片段，
+     每个子片段只显示对应时间点的字幕文本
+  2. Ken Burns 特效在子片段间保持连续（按时间比例分配 zoom 范围）
+  3. 使用 FFmpeg concat demuxer 拼接所有片段
+  4. 可选混入背景音乐
 """
 
 from __future__ import annotations
@@ -68,6 +70,13 @@ def _find_cjk_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
     log.warning("未找到 CJK 字体，字幕可能无法正确显示中文。请安装 Noto Sans CJK 或其他中文字体。")
     return ImageFont.load_default()
+
+
+def _parse_srt_time(time_str: str) -> float:
+    """解析 SRT 时间码 ``HH:MM:SS,mmm`` 为秒数。"""
+    time_str = time_str.replace(",", ".")
+    parts = time_str.split(":")
+    return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
 
 
 class VideoAssembler:
@@ -228,6 +237,122 @@ class VideoAssembler:
         return duration
 
     # ------------------------------------------------------------------
+    # SRT 解析
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_srt_entries(srt_path: Path) -> list[dict]:
+        """解析 SRT 文件，返回带时间信息的字幕条目列表。
+
+        Returns:
+            [{"start": float, "end": float, "text": str}, ...]
+        """
+        if not srt_path.exists():
+            return []
+        text = srt_path.read_text(encoding="utf-8").strip()
+        if not text:
+            return []
+
+        entries: list[dict] = []
+        current_entry: dict = {}
+        text_lines: list[str] = []
+
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                # 空行 = 条目结束
+                if text_lines and "start" in current_entry:
+                    current_entry["text"] = "".join(text_lines)
+                    if current_entry["end"] > current_entry["start"]:
+                        entries.append(current_entry)
+                    else:
+                        log.warning(
+                            "跳过无效 SRT 条目: end (%.3fs) <= start (%.3fs)",
+                            current_entry["end"], current_entry["start"],
+                        )
+                current_entry = {}
+                text_lines = []
+            elif "-->" in line:
+                # 时间码行: 00:00:01,000 --> 00:00:03,500
+                parts = line.split("-->")
+                current_entry["start"] = _parse_srt_time(parts[0].strip())
+                current_entry["end"] = _parse_srt_time(parts[1].strip())
+            elif line.isdigit():
+                # 序号行，跳过
+                pass
+            else:
+                text_lines.append(line)
+
+        # 处理末尾无空行的最后一条
+        if text_lines and "start" in current_entry:
+            current_entry["text"] = "".join(text_lines)
+            if current_entry["end"] > current_entry["start"]:
+                entries.append(current_entry)
+
+        return entries
+
+    # ------------------------------------------------------------------
+    # 子片段构建（处理 SRT 条目间隙）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_sub_segments(
+        entries: list[dict], segment_duration: float
+    ) -> list[dict]:
+        """构建子片段列表，处理 SRT 条目间的间隙。
+
+        策略:
+        - 间隙 < 0.3s: 延伸前一条目的 end（或首条目的 start）
+        - 间隙 >= 0.3s: 插入无字幕子片段
+        """
+        if not entries:
+            return [{"start": 0.0, "end": segment_duration, "text": ""}]
+
+        entries = sorted(entries, key=lambda e: e["start"])
+        result: list[dict] = []
+        current_time = 0.0
+
+        for entry in entries:
+            entry_start = entry["start"]
+            entry_end = entry["end"]
+            text = entry.get("text", "")
+
+            gap = entry_start - current_time
+            if gap >= 0.3:
+                # 大间隙: 插入无字幕子片段
+                result.append({
+                    "start": current_time,
+                    "end": entry_start,
+                    "text": "",
+                })
+            elif gap > 0:
+                # 小间隙: 延伸前一条目或调整当前条目
+                if result:
+                    result[-1]["end"] = entry_start
+                else:
+                    entry_start = current_time
+
+            result.append({
+                "start": entry_start,
+                "end": entry_end,
+                "text": text,
+            })
+            current_time = entry_end
+
+        # 处理尾部间隙
+        gap = segment_duration - current_time
+        if gap >= 0.3:
+            result.append({
+                "start": current_time,
+                "end": segment_duration,
+                "text": "",
+            })
+        elif gap > 0 and result:
+            result[-1]["end"] = segment_duration
+
+        return result
+
+    # ------------------------------------------------------------------
     # 单段片段制作
     # ------------------------------------------------------------------
 
@@ -239,10 +364,10 @@ class VideoAssembler:
         srt: Path,
         duration: float,
     ) -> Path:
-        """创建单个片段视频: 图片 + Ken Burns 特效 + 字幕 + 音频。
+        """创建单个片段视频: 按 SRT 条目拆分子片段，动态显示字幕。
 
-        使用 Pillow 将字幕文本烧录到图片上（避免依赖 libass），
-        然后用 FFmpeg 创建 Ken Burns 动态视频并混入音频。
+        每个 SRT 条目对应一个独立的子片段视频，只显示当前时间点的
+        字幕文本。Ken Burns 特效在子片段间保持连续。
 
         Args:
             idx:      片段序号（从 0 开始）。
@@ -256,10 +381,128 @@ class VideoAssembler:
         """
         clip_path = self.tmp_dir / f"clip_{idx:04d}.mp4"
 
-        # 将字幕文本烧录到图片上
-        subtitled_image = self._burn_subtitles_on_image(image, srt, idx)
+        # 解析 SRT 条目
+        entries = self._parse_srt_entries(srt)
 
-        # 构建 Ken Burns 滤镜
+        if not entries:
+            log.debug("片段 %d: SRT 无有效条目，使用无字幕模式", idx)
+            return self._make_single_image_clip(idx, image, audio, duration)
+
+        # 构建子片段列表（处理间隙）
+        sub_segments = self._build_sub_segments(entries, duration)
+
+        if len(sub_segments) <= 1:
+            # 单条字幕，走简单路径
+            seg = sub_segments[0] if sub_segments else {
+                "start": 0, "end": duration, "text": "",
+            }
+            text = seg.get("text", "")
+            if text:
+                sub_img = self._render_subtitle_image(image, text, idx, 0)
+            else:
+                sub_img = image
+            return self._make_single_image_clip(idx, sub_img, audio, duration)
+
+        # 多个子片段: 逐个创建子视频
+        sub_clips: list[Path] = []
+        for sub_idx, seg in enumerate(sub_segments):
+            seg_duration = seg["end"] - seg["start"]
+            if seg_duration < 0.05:
+                continue  # 跳过极短片段
+
+            text = seg.get("text", "")
+            if text:
+                sub_img = self._render_subtitle_image(
+                    image, text, idx, sub_idx,
+                )
+            else:
+                sub_img = image  # 无字幕间隙用原图
+
+            # 计算 Ken Burns zoom 子区间（保持连续性）
+            progress_start = seg["start"] / duration if duration > 0 else 0
+            progress_end = seg["end"] / duration if duration > 0 else 1
+            z_start = (
+                self.zoom_range[0]
+                + (self.zoom_range[1] - self.zoom_range[0]) * progress_start
+            )
+            z_end = (
+                self.zoom_range[0]
+                + (self.zoom_range[1] - self.zoom_range[0]) * progress_end
+            )
+
+            kb_filter = ken_burns_filter(
+                duration=seg_duration,
+                width=self.width,
+                height=self.height,
+                zoom_range=self.zoom_range,
+                direction=idx,
+                fps=self.fps,
+                zoom_start=z_start,
+                zoom_end=z_end,
+            )
+
+            # 创建无音频子片段视频
+            sub_clip_path = self.tmp_dir / f"sub_{idx:04d}_{sub_idx:04d}.mp4"
+            filter_complex = (
+                f"[0:v]scale={self.width * 2}:{self.height * 2},"
+                f"setsar=1,"
+                f"{kb_filter}[vout]"
+            )
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-i", str(sub_img),
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-an",
+                "-c:v", self.codec,
+                "-crf", str(self.crf),
+                "-preset", "medium",
+                "-t", str(seg_duration),
+                "-pix_fmt", "yuv420p",
+                str(sub_clip_path),
+            ]
+
+            self._run_ffmpeg(cmd, f"子片段 {idx}-{sub_idx}")
+            sub_clips.append(sub_clip_path)
+
+        if not sub_clips:
+            return self._make_single_image_clip(idx, image, audio, duration)
+
+        # 拼接所有子片段（无音频）
+        if len(sub_clips) == 1:
+            concat_video = sub_clips[0]
+        else:
+            concat_video = self.tmp_dir / f"concat_seg_{idx:04d}.mp4"
+            self._concatenate(sub_clips, concat_video)
+
+        # 混入音频
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(concat_video),
+            "-i", str(audio),
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-t", str(duration),
+            "-movflags", "+faststart",
+            str(clip_path),
+        ]
+
+        self._run_ffmpeg(cmd, f"混音片段 {idx}")
+        return clip_path
+
+    def _make_single_image_clip(
+        self,
+        idx: int,
+        image: Path,
+        audio: Path,
+        duration: float,
+    ) -> Path:
+        """从单张图片 + 音频创建片段视频（简单路径，无子片段拆分）。"""
+        clip_path = self.tmp_dir / f"clip_{idx:04d}.mp4"
+
         kb_filter = ken_burns_filter(
             duration=duration,
             width=self.width,
@@ -269,7 +512,6 @@ class VideoAssembler:
             fps=self.fps,
         )
 
-        # 滤镜链: 缩放 → Ken Burns
         filter_complex = (
             f"[0:v]scale={self.width * 2}:{self.height * 2},"
             f"setsar=1,"
@@ -279,7 +521,7 @@ class VideoAssembler:
         cmd = [
             "ffmpeg", "-y",
             "-loop", "1",
-            "-i", str(subtitled_image),
+            "-i", str(image),
             "-i", str(audio),
             "-filter_complex", filter_complex,
             "-map", "[vout]",
@@ -298,80 +540,91 @@ class VideoAssembler:
         self._run_ffmpeg(cmd, f"片段 {idx}")
         return clip_path
 
-    def _burn_subtitles_on_image(
-        self, image_path: Path, srt_path: Path, idx: int
-    ) -> Path:
-        """使用 Pillow 将 SRT 字幕文本烧录到图片底部。
+    # ------------------------------------------------------------------
+    # 字幕渲染
+    # ------------------------------------------------------------------
 
-        将所有字幕行合并为一段文字，以描边白字绘制在图片底部区域。
+    def _render_subtitle_image(
+        self, image_path: Path, text: str, idx: int, sub_idx: int,
+    ) -> Path:
+        """渲染单条字幕到图片上，返回新图片路径。
+
+        样式: 大字号、半透明黑色背景条、3px 描边、最多 2 行、居中偏下。
 
         Args:
             image_path: 原始图片路径。
-            srt_path:   SRT 字幕文件路径。
+            text:       单条字幕文本。
             idx:        片段序号。
+            sub_idx:    子片段序号。
 
         Returns:
             烧录字幕后的新图片路径。
         """
-        # 解析 SRT，提取纯文本
-        subtitle_text = self._extract_srt_text(srt_path)
-        if not subtitle_text:
-            return image_path  # 无字幕，直接使用原图
+        if not text:
+            return image_path
 
-        img = Image.open(image_path).convert("RGB")
-        draw = ImageDraw.Draw(img)
+        img = Image.open(image_path).convert("RGBA")
 
-        # 字体大小根据图片宽度自适应
-        font_size = max(28, img.width // 25)
+        # 字号增大: ~60px @ 1080w
+        font_size = max(36, img.width // 18)
         font = _find_cjk_font(font_size)
 
-        # 自动换行
-        max_chars_per_line = max(1, (img.width - 80) // font_size)
-        lines = []
-        for i in range(0, len(subtitle_text), max_chars_per_line):
-            lines.append(subtitle_text[i:i + max_chars_per_line])
+        # 自动换行，最多 2 行
+        max_chars = max(1, (img.width - 120) // font_size)
+        if len(text) <= max_chars:
+            lines = [text]
+        elif len(text) <= max_chars * 2:
+            mid = (len(text) + 1) // 2
+            lines = [text[:mid], text[mid:]]
+        else:
+            lines = [text[:max_chars], text[max_chars:max_chars * 2]]
 
-        # 计算文本区域
-        line_height = font_size + 8
+        # 计算文本尺寸
+        line_height = font_size + 12
         total_text_height = len(lines) * line_height
-        y_start = img.height - total_text_height - 60  # 底部留 60px 边距
 
-        # 绘制描边 + 白字
+        # 居中偏下，底部留 80px 边距
+        y_start = img.height - total_text_height - 80
+
+        # 半透明背景条
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw_overlay = ImageDraw.Draw(overlay)
+        bg_pad_x = 40
+        bg_pad_y = 16
+        draw_overlay.rectangle(
+            [
+                (bg_pad_x, y_start - bg_pad_y),
+                (img.width - bg_pad_x, y_start + total_text_height + bg_pad_y),
+            ],
+            fill=(0, 0, 0, 160),
+        )
+        img = Image.alpha_composite(img, overlay)
+
+        draw = ImageDraw.Draw(img)
+
+        # 描边 + 白字
         for i, line in enumerate(lines):
             bbox = draw.textbbox((0, 0), line, font=font)
             text_width = bbox[2] - bbox[0]
             x = (img.width - text_width) // 2
             y = y_start + i * line_height
 
-            # 描边（黑色）
-            for dx in range(-2, 3):
-                for dy in range(-2, 3):
+            # 3px 黑色描边
+            for dx in range(-3, 4):
+                for dy in range(-3, 4):
                     if dx == 0 and dy == 0:
                         continue
-                    draw.text((x + dx, y + dy), line, fill=(0, 0, 0), font=font)
-            # 正文（白色）
-            draw.text((x, y), line, fill=(255, 255, 255), font=font)
+                    draw.text(
+                        (x + dx, y + dy), line,
+                        fill=(0, 0, 0, 255), font=font,
+                    )
+            # 白色正文
+            draw.text((x, y), line, fill=(255, 255, 255, 255), font=font)
 
-        out_path = self.tmp_dir / f"subtitled_{idx:04d}.png"
-        img.save(str(out_path))
+        # 转回 RGB 保存
+        out_path = self.tmp_dir / f"subtitled_{idx:04d}_{sub_idx:04d}.png"
+        img.convert("RGB").save(str(out_path))
         return out_path
-
-    @staticmethod
-    def _extract_srt_text(srt_path: Path) -> str:
-        """从 SRT 文件中提取纯文本（合并所有字幕条目）。"""
-        if not srt_path.exists():
-            return ""
-        text = srt_path.read_text(encoding="utf-8").strip()
-        if not text:
-            return ""
-        lines = []
-        for line in text.splitlines():
-            line = line.strip()
-            # 跳过序号、时间码、空行
-            if not line or line.isdigit() or "-->" in line:
-                continue
-            lines.append(line)
-        return "".join(lines)
 
     # ------------------------------------------------------------------
     # 拼接
@@ -387,7 +640,7 @@ class VideoAssembler:
         Returns:
             输出文件路径。
         """
-        concat_list = self.tmp_dir / "concat.txt"
+        concat_list = self.tmp_dir / f"concat_{output.stem}.txt"
         with open(concat_list, "w", encoding="utf-8") as f:
             for clip in clips:
                 # concat demuxer 需要绝对路径

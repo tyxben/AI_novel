@@ -63,7 +63,7 @@ tts:
 
 # 字幕
 subtitle:
-  font_size: 24
+  font_size: 48
   font_color: white
   outline_color: black
   outline_width: 2
