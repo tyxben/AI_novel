@@ -85,13 +85,35 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'torch',
-        'diffusers',
-        'transformers',
-        'accelerate',
-        'safetensors',
-        'triton',
-        'nvidia',
+        # GPU / ML（本项目云端调用，不需要本地模型）
+        'torch', 'torchvision', 'torchaudio',
+        'diffusers', 'transformers', 'accelerate', 'safetensors',
+        'triton', 'nvidia',
+        # 科学计算（Gradio 间接依赖，实际不需要）
+        'scipy', 'sklearn', 'scikit-learn', 'scikit_learn',
+        'pandas', 'numpy.f2py',
+        'pyarrow', 'statsmodels', 'numba', 'llvmlite',
+        # 可视化（Gradio 间接依赖，实际不需要）
+        'bokeh', 'panel', 'plotly', 'matplotlib', 'mpl_toolkits',
+        'holoviews', 'hvplot', 'datashader', 'colorcet',
+        # 浏览器自动化（不需要）
+        'playwright', 'selenium',
+        # Qt（Gradio 用自己的前端，不需要 Qt）
+        'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
+        'QtWebEngineWidgets', 'QtWebEngine',
+        # AWS（不需要）
+        'botocore', 'boto3', 's3transfer',
+        # 其他大包
+        'sphinx', 'docutils', 'alabaster',
+        'notebook', 'nbconvert', 'nbformat', 'jupyterlab',
+        'IPython', 'ipykernel', 'ipywidgets',
+        'dask', 'distributed', 'xarray',
+        'astropy', 'h5py', 'tables',
+        'sympy', 'networkx',
+        'nltk', 'datasets', 'langchain',
+        'shapely', 'imageio',
+        'pytest', 'black', 'lib2to3',
+        'tkinter', '_tkinter',
     ],
     noarchive=False,
     optimize=0,
