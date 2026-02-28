@@ -131,7 +131,7 @@ if platform.system() == 'Darwin':
         bundle_identifier='com.novel-video.app',
         info_plist={
             'CFBundleDisplayName': 'AI小说转视频',
-            'CFBundleShortVersionString': '0.3.0',
+            'CFBundleShortVersionString': '0.4.0',
             'NSHighResolutionCapable': True,
         },
     )
