@@ -54,7 +54,6 @@ all_hiddenimports = [
     'src.imagegen',
     'src.imagegen.image_generator',
     'src.imagegen.siliconflow_backend',
-    'src.imagegen.pollinations_backend',
     'src.imagegen.dashscope_backend',
     'src.imagegen.together_backend',
     'src.imagegen.diffusers_backend',

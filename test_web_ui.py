@@ -85,14 +85,7 @@ def test_quick_config_img_select(page):
     expect(page.get_by_label("阿里云 DashScope API Key")).to_be_visible()
     page.screenshot(path=f"{SCREENSHOTS_DIR}/05_img_dashscope.png", full_page=True)
 
-    # Switch to Pollinations - key fields should hide
-    page.locator("[data-testid='Pollinations（完全免费）-radio-label']").first.click(force=True)
-    time.sleep(1)
-    for kl in ["SiliconFlow API Key", "阿里云 DashScope API Key"]:
-        assert page.get_by_label(kl).count() == 0, f"Pollinations: {kl} should be hidden"
-    page.screenshot(path=f"{SCREENSHOTS_DIR}/06_img_pollinations.png", full_page=True)
-
-    # Switch back to verify key reappears
+    # Switch back to SiliconFlow to verify key reappears
     page.locator("[data-testid='SiliconFlow-radio-label']").first.click(force=True)
     time.sleep(1)
     expect(page.get_by_label("SiliconFlow API Key")).to_be_visible()

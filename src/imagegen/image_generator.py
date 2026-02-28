@@ -50,10 +50,6 @@ def create_image_generator(config: dict) -> ImageGenerator:
         from src.imagegen.siliconflow_backend import SiliconFlowBackend
 
         return SiliconFlowBackend(config)
-    elif backend == "pollinations":
-        from src.imagegen.pollinations_backend import PollinationsBackend
-
-        return PollinationsBackend(config)
     elif backend == "dashscope":
         from src.imagegen.dashscope_backend import DashScopeBackend
 

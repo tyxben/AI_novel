@@ -6,7 +6,7 @@
 
 - **全自动流水线** — 输入小说文本，输出可直接发布的竖屏短视频
 - **多 LLM 后端** — OpenAI / DeepSeek / Gemini(免费) / Ollama(本地离线)，自动检测
-- **多图片生成后端** — SiliconFlow(免费) / 阿里云万相 / Pollinations(免费无Key) / Together.ai / 本地SD
+- **多图片生成后端** — SiliconFlow(免费) / 阿里云万相 / Together.ai / 本地SD
 - **智能分段** — 规则分段 + LLM 智能分段，自动控制节奏
 - **TTS 配音** — 微软 edge-tts 免费高质量语音合成 + SRT 字幕
 - **Ken Burns 特效** — 图片自动缩放平移，告别静态幻灯片
@@ -56,7 +56,7 @@ export SILICONFLOW_API_KEY=xxx  # 硅基流动（免费，推荐）
 export DASHSCOPE_API_KEY=xxx    # 阿里云百炼万相（新用户100张免费）
 export TOGETHER_API_KEY=xxx     # Together.ai（需绑卡）
 
-# 也可以不设任何 Key：使用 simple 分段 + 本地关键词 Prompt + Pollinations 免费生图
+# 也可以不设 LLM Key：使用 simple 分段 + 本地关键词 Prompt（仍需图片生成 Key）
 ```
 
 ### 运行
@@ -87,7 +87,7 @@ python main.py status workspace/novel/
 | 配置项 | 说明 | 可选值 |
 |--------|------|--------|
 | `llm.provider` | LLM 后端 | `auto`(默认) / `openai` / `deepseek` / `gemini` / `ollama` |
-| `imagegen.backend` | 图片生成后端 | `siliconflow`(默认) / `diffusers` / `together` / `pollinations` / `dashscope` |
+| `imagegen.backend` | 图片生成后端 | `siliconflow`(默认) / `diffusers` / `together` / `dashscope` |
 | `segmenter.method` | 分段方式 | `simple`(规则) / `llm`(智能) |
 
 ### 图片生成后端对比
@@ -96,7 +96,6 @@ python main.py status workspace/novel/
 |------|------|------|------|------|
 | **siliconflow** | 免费 | ~4s/张 | FLUX 高质量 | API Key（免费注册） |
 | **dashscope** | 100张免费 | ~5s/张 | 万相高质量 | 阿里云账号 |
-| **pollinations** | 完全免费 | ~10s/张 | FLUX | 无需任何配置 |
 | **together** | 需绑卡 | ~3s/张 | FLUX 高质量 | API Key |
 | **diffusers** | 免费 | ~30s/张 | 一般 | GPU + torch |
 
@@ -134,7 +133,6 @@ AI_novel/
 │   │   ├── image_generator.py      # ABC + 工厂
 │   │   ├── siliconflow_backend.py  # 硅基流动 FLUX
 │   │   ├── dashscope_backend.py    # 阿里云万相
-│   │   ├── pollinations_backend.py # Pollinations 免费
 │   │   ├── together_backend.py     # Together.ai
 │   │   └── diffusers_backend.py    # 本地 Stable Diffusion
 │   ├── tts/                # edge-tts 配音 + 字幕
@@ -150,7 +148,7 @@ AI_novel/
 不花一分钱也能跑通完整流水线：
 
 1. LLM 用 **Gemini**（免费 1000次/天）或不用（`segmenter.method: simple`）
-2. 图片用 **SiliconFlow**（免费注册）或 **Pollinations**（完全免费）
+2. 图片用 **SiliconFlow**（免费注册）
 3. TTS 用 **edge-tts**（免费）
 4. 视频合成用 **FFmpeg**（免费）
 

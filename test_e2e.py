@@ -28,7 +28,7 @@ def _open_config_accordion(page):
 
 
 def _ensure_siliconflow_selected(page):
-    """确保图片后端选了 SiliconFlow（Pollinations 免费服务不稳定）。"""
+    """确保图片后端选了 SiliconFlow。"""
     acc = page.locator("button.label-wrap", has_text="配置 AI 服务")
     if acc.count() > 0:
         cls = acc.first.get_attribute("class") or ""

@@ -32,7 +32,7 @@ promptgen:
 
 # 图片生成
 imagegen:
-  backend: siliconflow  # diffusers | together | siliconflow | pollinations | dashscope
+  backend: siliconflow  # diffusers | together | siliconflow | dashscope
   model: black-forest-labs/FLUX.1-schnell
   width: 1024
   height: 1792
@@ -49,8 +49,6 @@ imagegen:
   # --- SiliconFlow 硅基流动 (backend: siliconflow) ---
   # model: black-forest-labs/FLUX.1-schnell  # 免费
   # image_size: 1024x1792  # 可选，默认用 width x height
-  # --- Pollinations.ai (backend: pollinations) ---
-  # model: flux  # 完全免费，无需 API Key
   # --- 阿里云万相 (backend: dashscope) ---
   # model: wan2.6-t2i  # 新用户 100 张免费
   # size: 1024*1792

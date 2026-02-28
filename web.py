@@ -65,10 +65,9 @@ VOICE_MAP = {
 RATE_CHOICES = ["慢速", "正常", "快速"]
 RATE_MAP = {"慢速": "-20%", "正常": "+0%", "快速": "+20%"}
 
-BACKEND_CHOICES = ["SiliconFlow", "Pollinations(免费)", "阿里云通义"]
+BACKEND_CHOICES = ["SiliconFlow", "阿里云通义"]
 BACKEND_MAP = {
     "SiliconFlow": "siliconflow",
-    "Pollinations(免费)": "pollinations",
     "阿里云通义": "dashscope",
 }
 
@@ -409,7 +408,7 @@ def generate(
     config = {
         "promptgen": {"style": STYLE_MAP.get(style, "anime")},
         "tts": {"voice": voice_id, "rate": RATE_MAP.get(rate, "+0%")},
-        "imagegen": {"backend": BACKEND_MAP.get(image_backend, "pollinations")},
+        "imagegen": {"backend": BACKEND_MAP.get(image_backend, "siliconflow")},
         "llm": {"provider": LLM_MAP.get(llm_backend, "auto")},
         "video": {
             "crf": QUALITY_MAP.get(quality, 18),
@@ -452,7 +451,6 @@ _QUICK_LLM_TO_DROPDOWN = {
 # Maps quick-radio labels → advanced dropdown labels (must match BACKEND_CHOICES exactly)
 _QUICK_IMG_TO_DROPDOWN = {
     "SiliconFlow": "SiliconFlow",
-    "Pollinations（完全免费）": "Pollinations(免费)",
     "阿里云通义": "阿里云通义",
 }
 # Maps quick-radio labels → pipeline config values
@@ -464,7 +462,6 @@ _QUICK_LLM_TO_PROVIDER = {
 }
 _QUICK_IMG_TO_BACKEND = {
     "SiliconFlow": "siliconflow",
-    "Pollinations（完全免费）": "pollinations",
     "阿里云通义": "dashscope",
 }
 
@@ -486,7 +483,7 @@ def _detect_quick_img(settings: dict) -> str:
         return "SiliconFlow"
     if settings.get("key_dashscope"):
         return "阿里云通义"
-    return "Pollinations（完全免费）"
+    return "SiliconFlow"
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +564,7 @@ def create_ui() -> gr.Blocks:
                             gr.Markdown("**生成图片用的服务**")
                             quick_img = gr.Radio(
                                 label="选择图片服务",
-                                choices=["SiliconFlow", "Pollinations（完全免费）", "阿里云通义"],
+                                choices=["SiliconFlow", "阿里云通义"],
                                 value=_default_img,
                             )
                             _img_key_map = {
@@ -575,17 +572,11 @@ def create_ui() -> gr.Blocks:
                                 "阿里云通义": ("key_dashscope", "阿里云 DashScope API Key", "sk-..."),
                             }
                             _init_img_key = _img_key_map.get(_default_img, ("", "", ""))
-                            _is_free_img = _default_img == "Pollinations（完全免费）"
                             quick_img_key = gr.Textbox(
-                                label=_init_img_key[1] if not _is_free_img else "API Key",
+                                label=_init_img_key[1] if _init_img_key[1] else "API Key",
                                 type="password",
-                                value=settings.get(_init_img_key[0], "") if not _is_free_img else "",
-                                placeholder=_init_img_key[2] if not _is_free_img else "",
-                                visible=not _is_free_img,
-                            )
-                            quick_img_hint = gr.Markdown(
-                                "Pollinations 完全免费，无需 API Key，直接可用。",
-                                visible=_is_free_img,
+                                value=settings.get(_init_img_key[0], "") if _init_img_key[0] else "",
+                                placeholder=_init_img_key[2] if _init_img_key[2] else "",
                             )
                         with gr.Accordion("自定义提示词", open=False):
                             system_prompt_input = gr.Textbox(
@@ -719,7 +710,7 @@ def create_ui() -> gr.Blocks:
                     image_backend = gr.Dropdown(
                         label="图片生成后端",
                         choices=BACKEND_CHOICES,
-                        value=_QUICK_IMG_TO_DROPDOWN.get(_default_img, "Pollinations(免费)"),
+                        value=_QUICK_IMG_TO_DROPDOWN.get(_default_img, "SiliconFlow"),
                     )
                     llm_backend = gr.Dropdown(
                         label="LLM 后端",
@@ -782,23 +773,15 @@ def create_ui() -> gr.Blocks:
         }
 
         def _on_img_select(choice):
-            is_free = choice == "Pollinations（完全免费）"
-            if is_free:
-                return (
-                    gr.update(visible=False),
-                    gr.update(visible=True),
-                    _QUICK_IMG_TO_DROPDOWN.get(choice, "SiliconFlow"),
-                )
             info = _img_key_info[choice]
             saved_val = load_settings().get(info[0], "")
             return (
-                gr.update(visible=True, label=info[1], placeholder=info[2], value=saved_val),
-                gr.update(visible=False),
+                gr.update(label=info[1], placeholder=info[2], value=saved_val),
                 _QUICK_IMG_TO_DROPDOWN.get(choice, "SiliconFlow"),
             )
         quick_img.change(
             fn=_on_img_select, inputs=[quick_img],
-            outputs=[quick_img_key, quick_img_hint, image_backend],
+            outputs=[quick_img_key, image_backend],
         )
 
         # -- Save quick keys on change + sync to advanced panel --
