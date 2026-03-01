@@ -14,9 +14,11 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            artifact: AI小说转视频-macOS
+            artifact: novel-video-macOS
+            zip_name: AI小说转视频-macOS
           - os: windows-latest
-            artifact: AI小说转视频-Windows
+            artifact: novel-video-Windows
+            zip_name: AI小说转视频-Windows
 
     runs-on: ${{ matrix.os }}
 
@@ -41,13 +43,13 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           cd dist
-          zip -r ../AI小说转视频-macOS.zip AI小说转视频.app
+          zip -r ../${{ matrix.artifact }}.zip AI小说转视频.app
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/AI小说转视频" -DestinationPath "AI小说转视频-Windows.zip"
+          Compress-Archive -Path "dist/AI小说转视频" -DestinationPath "${{ matrix.artifact }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
