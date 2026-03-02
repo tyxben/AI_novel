@@ -88,12 +88,26 @@ class VideoAssembler:
         workspace: 工作目录，用于存放临时文件。
     """
 
+    def _codec_flags(self) -> list[str]:
+        """编码器相关的 FFmpeg 参数。"""
+        flags = ["-c:v", self.codec, "-crf", str(self.crf)]
+        if self.codec == "libx265":
+            # hvc1 tag 确保 Apple/抖音/小红书兼容
+            flags += ["-tag:v", "hvc1"]
+        return flags
+
+    @staticmethod
+    def _default_crf(codec: str) -> int:
+        """不同编码器的默认 CRF（同等画质）。"""
+        # H.265 同画质下 CRF 比 H.264 高 ~4-6
+        return {"libx264": 18, "libx265": 23, "libsvtav1": 28}.get(codec, 18)
+
     def __init__(self, config: dict, workspace: Path) -> None:
         self.width: int = config["resolution"][0]
         self.height: int = config["resolution"][1]
         self.fps: int = config.get("fps", 30)
-        self.codec: str = config.get("codec", "libx264")
-        self.crf: int = config.get("crf", 18)
+        self.codec: str = config.get("codec", "libx265")
+        self.crf: int = config.get("crf", self._default_crf(self.codec))
 
         # Ken Burns 参数
         kb_cfg = config.get("ken_burns", {})
@@ -123,6 +137,7 @@ class VideoAssembler:
         images: list[Path],
         audio_srt: list[dict],
         output_path: Path,
+        video_clips: list[Path] | None = None,
     ) -> Path:
         """执行完整的视频组装流水线。
 
@@ -131,6 +146,8 @@ class VideoAssembler:
             audio_srt:   每段的音频和字幕信息列表，每个元素为
                          ``{"audio": Path, "srt": Path}``。
             output_path: 最终输出的 MP4 文件路径。
+            video_clips: 可选的 AI 生成视频片段列表。当提供时，使用视频片段
+                         替代静态图 + Ken Burns 特效，仅做音频替换和字幕叠加。
 
         Returns:
             输出文件路径。
@@ -141,10 +158,21 @@ class VideoAssembler:
                 f"({len(audio_srt)}) 不匹配"
             )
 
+        use_video_clips = (
+            video_clips is not None
+            and len(video_clips) == len(audio_srt)
+        )
+        if video_clips and not use_video_clips:
+            log.warning(
+                "视频片段数量 (%d) 与音频/字幕数量 (%d) 不匹配，回退到静态图模式",
+                len(video_clips), len(audio_srt),
+            )
+
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        log.info("开始视频合成: %d 个片段", len(images))
+        mode_desc = "AI 视频片段" if use_video_clips else "静态图"
+        log.info("开始视频合成 (%s模式): %d 个片段", mode_desc, len(images))
 
         # -- 第 1 步: 为每段素材创建片段视频 --
         clips: list[Path] = []
@@ -153,13 +181,22 @@ class VideoAssembler:
             srt_path = Path(entry["srt"])
             duration = self._get_audio_duration(audio_path)
 
-            clip = self._make_segment_clip(
-                idx=idx,
-                image=img,
-                audio=audio_path,
-                srt=srt_path,
-                duration=duration,
-            )
+            if use_video_clips:
+                clip = self._make_video_clip_segment(
+                    idx=idx,
+                    video=video_clips[idx],
+                    audio=audio_path,
+                    srt=srt_path,
+                    target_duration=duration,
+                )
+            else:
+                clip = self._make_segment_clip(
+                    idx=idx,
+                    image=img,
+                    audio=audio_path,
+                    srt=srt_path,
+                    duration=duration,
+                )
             clips.append(clip)
             log.info("片段 %d/%d 完成", idx + 1, len(images))
 
@@ -451,8 +488,7 @@ class VideoAssembler:
                 "-filter_complex", filter_complex,
                 "-map", "[vout]",
                 "-an",
-                "-c:v", self.codec,
-                "-crf", str(self.crf),
+                *self._codec_flags(),
                 "-preset", "medium",
                 "-t", str(seg_duration),
                 "-pix_fmt", "yuv420p",
@@ -521,8 +557,7 @@ class VideoAssembler:
             "-filter_complex", filter_complex,
             "-map", "[vout]",
             "-map", "1:a",
-            "-c:v", self.codec,
-            "-crf", str(self.crf),
+            *self._codec_flags(),
             "-preset", "medium",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -534,6 +569,161 @@ class VideoAssembler:
 
         self._run_ffmpeg(cmd, f"片段 {idx}")
         return clip_path
+
+    # ------------------------------------------------------------------
+    # AI 视频片段合成（跳过 Ken Burns）
+    # ------------------------------------------------------------------
+
+    def _make_video_clip_segment(
+        self,
+        idx: int,
+        video: Path,
+        audio: Path,
+        srt: Path,
+        target_duration: float,
+    ) -> Path:
+        """从 AI 生成的视频片段 + TTS 音频 + 字幕创建最终片段。
+
+        与静态图模式的区别:
+        - 不使用 Ken Burns 特效（AI 视频已自带动态）
+        - 视频时长与音频对齐:
+          - 视频比音频长: 裁剪视频到音频时长
+          - 视频比音频短: 冻结最后一帧延长至音频时长
+        - 字幕通过 FFmpeg drawtext 滤镜叠加（而非 Pillow 渲染到图片）
+
+        Args:
+            idx:             片段序号。
+            video:           AI 生成的视频片段路径。
+            audio:           TTS 音频路径。
+            srt:             SRT 字幕路径。
+            target_duration: 目标时长（秒），与音频时长匹配。
+
+        Returns:
+            最终片段视频文件路径。
+        """
+        clip_path = self.tmp_dir / f"clip_{idx:04d}.mp4"
+
+        # 获取 AI 视频片段的实际时长
+        video_duration = self._get_video_duration(video)
+
+        # 根据时长差异选择处理策略
+        if video_duration >= target_duration:
+            # 视频足够长: 裁剪到目标时长，替换音频，叠加字幕
+            self._trim_replace_audio_subtitle(
+                idx, video, audio, srt, target_duration, clip_path,
+            )
+        else:
+            # 视频太短: 冻结最后一帧延长，替换音频，叠加字幕
+            extended = self._extend_video_freeze(idx, video, target_duration)
+            self._trim_replace_audio_subtitle(
+                idx, extended, audio, srt, target_duration, clip_path,
+            )
+
+        return clip_path
+
+    def _get_video_duration(self, video_path: Path) -> float:
+        """使用 ffprobe 获取视频文件时长（秒）。"""
+        ensure_ffmpeg()
+        cmd = [
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            str(video_path),
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=True,
+            )
+            info = json.loads(result.stdout)
+            return float(info["format"]["duration"])
+        except (subprocess.CalledProcessError, json.JSONDecodeError,
+                KeyError, ValueError) as exc:
+            raise RuntimeError(
+                f"无法获取视频时长: {video_path}"
+            ) from exc
+
+    def _extend_video_freeze(
+        self, idx: int, video: Path, target_duration: float,
+    ) -> Path:
+        """冻结视频最后一帧，延长到目标时长。
+
+        使用 tpad 滤镜在视频末尾填充最后一帧。
+        """
+        extended_path = self.tmp_dir / f"extended_{idx:04d}.mp4"
+        video_dur = self._get_video_duration(video)
+        pad_duration = target_duration - video_dur
+        if pad_duration <= 0:
+            return video
+
+        # tpad: stop_mode=clone 克隆最后一帧，stop_duration 为填充时长
+        filter_v = (
+            f"scale={self.width}:{self.height}:force_original_aspect_ratio=decrease,"
+            f"pad={self.width}:{self.height}:(ow-iw)/2:(oh-ih)/2,"
+            f"setsar=1,"
+            f"tpad=stop_mode=clone:stop_duration={pad_duration}"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video),
+            "-vf", filter_v,
+            "-an",
+            *self._codec_flags(),
+            "-preset", "medium",
+            "-pix_fmt", "yuv420p",
+            str(extended_path),
+        ]
+        self._run_ffmpeg(cmd, f"延长视频 {idx}")
+        return extended_path
+
+    def _trim_replace_audio_subtitle(
+        self,
+        idx: int,
+        video: Path,
+        audio: Path,
+        srt: Path,
+        duration: float,
+        output: Path,
+    ) -> None:
+        """裁剪视频到指定时长，替换音频，叠加 SRT 字幕。"""
+        # 构建视频滤镜: 缩放 + 字幕叠加
+        filter_parts = [
+            f"scale={self.width}:{self.height}:force_original_aspect_ratio=decrease",
+            f"pad={self.width}:{self.height}:(ow-iw)/2:(oh-ih)/2",
+            "setsar=1",
+        ]
+
+        # 如果有 SRT 字幕，使用 subtitles 滤镜叠加
+        srt_path = Path(srt)
+        if srt_path.exists() and srt_path.stat().st_size > 0:
+            # FFmpeg subtitles 滤镜需要转义路径中的特殊字符
+            escaped_srt = str(srt_path.resolve()).replace("\\", "/").replace(":", "\\:")
+            filter_parts.append(
+                f"subtitles='{escaped_srt}'"
+                f":force_style='FontSize=20,PrimaryColour=&HFFFFFF,"
+                f"OutlineColour=&H000000,Outline=2,Shadow=1,"
+                f"Alignment=2,MarginV=60'"
+            )
+
+        filter_v = ",".join(filter_parts)
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video),
+            "-i", str(audio),
+            "-vf", filter_v,
+            "-map", "0:v",
+            "-map", "1:a",
+            *self._codec_flags(),
+            "-preset", "medium",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-t", str(duration),
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output),
+        ]
+        self._run_ffmpeg(cmd, f"视频片段合成 {idx}")
 
     # ------------------------------------------------------------------
     # 字幕渲染

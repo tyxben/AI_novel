@@ -30,6 +30,28 @@ promptgen:
     temperature: 0.7
   character_tracking: true
 
+# AI 视频片段生成（可选，不配置则使用静态图+Ken Burns模式）
+# videogen:
+#   backend: kling        # kling | seedance | minimax | sora
+#   duration: 5           # 视频时长（秒）
+#   aspect_ratio: "9:16"  # 竖屏
+#   mode: std             # std | pro (仅kling)
+#   use_image_as_first_frame: true  # 用图片生成的结果作为视频首帧
+#   poll_interval: 10     # 轮询间隔（秒）
+#   poll_timeout: 300     # 轮询超时（秒）
+#   # --- 可灵 Kling (backend: kling) ---
+#   # model: kling-v2-6
+#   # --- 即梦 Seedance (backend: seedance) ---
+#   # model: seedance-2.0
+#   # resolution: 1080p
+#   # --- MiniMax 海螺 (backend: minimax) ---
+#   # model: MiniMax-Hailuo-02
+#   # resolution: 720P
+#   # --- OpenAI Sora (backend: sora) ---
+#   # model: sora-2          # sora-2 | sora-2-pro
+#   # size: 1024x1792        # 竖屏 9:16
+#   # 使用 OPENAI_API_KEY
+
 # 图片生成
 imagegen:
   backend: siliconflow  # diffusers | together | siliconflow | dashscope
@@ -71,7 +93,7 @@ subtitle:
 video:
   resolution: [1080, 1920]  # 竖屏 9:16
   fps: 30
-  codec: libx264
+  codec: libx265  # libx264(通用) | libx265(推荐,体积小一半) | libsvtav1(最小,兼容性差)
   crf: 18
   ken_burns:
     zoom_range: [1.0, 1.15]

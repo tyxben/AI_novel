@@ -1,5 +1,6 @@
 """流水线调度器 - 编排所有阶段"""
 
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +13,7 @@ from src.imagegen.image_generator import create_image_generator
 from src.tts.tts_engine import TTSEngine
 from src.tts.subtitle_generator import SubtitleGenerator
 from src.video.video_assembler import VideoAssembler
+from src.videogen.video_generator import create_video_generator
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -53,8 +55,15 @@ class Pipeline:
         self.img_dir = self.workspace / "images"
         self.audio_dir = self.workspace / "audio"
         self.srt_dir = self.workspace / "subtitles"
-        for d in [self.seg_dir, self.img_dir, self.audio_dir, self.srt_dir]:
+        self.video_clip_dir = self.workspace / "videos"
+        for d in [self.seg_dir, self.img_dir, self.audio_dir, self.srt_dir,
+                  self.video_clip_dir]:
             d.mkdir(parents=True, exist_ok=True)
+
+        # 是否启用 AI 视频片段生成
+        self._videogen_enabled: bool = "videogen" in self.cfg and bool(
+            self.cfg["videogen"].get("backend")
+        )
 
     def run(self, progress_callback: Callable[[int, int, str], None] | None = None) -> Path:
         """运行完整流水线。
@@ -64,10 +73,11 @@ class Pipeline:
                              可选，默认 None 表示不回调。
         """
         log.info("开始处理: %s", self.input_file.name)
+        total_stages = 6 if self._videogen_enabled else 5
 
         def _notify(stage: int, desc: str) -> None:
             if progress_callback:
-                progress_callback(stage, 5, desc)
+                progress_callback(stage, total_stages, desc)
 
         _notify(1, "文本分段")
         segments = self._stage_segment()
@@ -75,10 +85,22 @@ class Pipeline:
         prompts = self._stage_prompt(segments)
         _notify(3, "生成图片")
         images = self._stage_image(prompts)
-        _notify(4, "语音合成")
-        audio_srt = self._stage_tts(segments)
-        _notify(5, "视频合成")
-        output = self._stage_video(segments, images, audio_srt)
+
+        # Stage 3.5 (可选): AI 视频片段生成
+        video_clips: list[Path] | None = None
+        if self._videogen_enabled:
+            _notify(4, "AI 视频片段生成")
+            video_clips = self._stage_videogen(segments, images)
+            _notify(5, "语音合成")
+            audio_srt = self._stage_tts(segments)
+            _notify(6, "视频合成")
+        else:
+            _notify(4, "语音合成")
+            audio_srt = self._stage_tts(segments)
+            _notify(5, "视频合成")
+
+        output = self._stage_video(segments, images, audio_srt,
+                                   video_clips=video_clips)
 
         log.info("完成! 输出文件: %s", output)
         return output
@@ -182,6 +204,68 @@ class Pipeline:
         self.ckpt.mark_done("image")
         return images
 
+    # -- Stage 3.5: AI 视频片段生成 (可选) --
+    def _stage_videogen(self, segments: list[dict], images: list[Path]) -> list[Path]:
+        if self.resume and self.ckpt.is_done("videogen"):
+            log.info("[断点续传] 跳过 AI 视频片段生成")
+            return sorted(self.video_clip_dir.glob("*.mp4"))
+
+        log.info("阶段 3.5: AI 视频片段生成")
+        videogen_cfg = dict(self.cfg["videogen"])
+
+        # 创建视频生成器
+        gen = create_video_generator(videogen_cfg)
+
+        # 创建 prompt 生成器（用于生成视频 prompt）
+        prompt_cfg = dict(self.cfg.get("promptgen", {}))
+        global_llm = self.cfg.get("llm", {})
+        module_llm = prompt_cfg.get("llm", {})
+        prompt_cfg["llm"] = {**global_llm, **module_llm}
+        prompt_gen = PromptGenerator(prompt_cfg)
+
+        full_text = self.input_file.read_text(encoding="utf-8")
+        prompt_gen.set_full_text(full_text)
+
+        use_first_frame = videogen_cfg.get("use_image_as_first_frame", True)
+        duration = videogen_cfg.get("duration", 5)
+        video_clips: list[Path] = []
+
+        with get_progress() as progress:
+            task = progress.add_task("AI 视频生成", total=len(segments))
+            for i, seg in enumerate(segments):
+                out = self.video_clip_dir / f"{i:04d}.mp4"
+
+                # 段级断点续传: 跳过已生成的视频文件
+                if self.resume and out.exists():
+                    video_clips.append(out)
+                    progress.advance(task)
+                    continue
+
+                # 生成视频 prompt
+                video_prompt = prompt_gen.generate_video_prompt(
+                    seg["text"], segment_index=i,
+                )
+
+                # 可选使用 Stage 3 图片作为首帧
+                image_path = images[i] if use_first_frame and i < len(images) else None
+
+                result = gen.generate(
+                    prompt=video_prompt,
+                    image_path=image_path,
+                    duration=float(duration),
+                )
+
+                # 将生成的视频复制到 workspace
+                shutil.copy2(str(result.video_path), str(out))
+                video_clips.append(out)
+
+                self.ckpt.update_segment(i, "video_clip", str(out))
+                progress.advance(task)
+
+        gen.close()
+        self.ckpt.mark_done("videogen")
+        return video_clips
+
     # -- Stage 4: TTS + 字幕 --
     def _stage_tts(self, segments: list[dict]) -> list[dict]:
         if self.resume and self.ckpt.is_done("tts"):
@@ -222,10 +306,11 @@ class Pipeline:
             results.append({"audio": a, "srt": s})
         return results
 
-    # -- Stage 5: 视频合成 --
+    # -- Stage 5/6: 视频合成 --
     def _stage_video(self, segments: list[dict], images: list[Path],
-                     audio_srt: list[dict]) -> Path:
-        log.info("阶段 5/5: 视频合成")
+                     audio_srt: list[dict],
+                     video_clips: list[Path] | None = None) -> Path:
+        log.info("最终阶段: 视频合成")
         output_path = self.output_dir / f"{self.input_file.stem}.mp4"
 
         assembler = VideoAssembler(self.cfg["video"], self.workspace)
@@ -233,11 +318,15 @@ class Pipeline:
             images=images,
             audio_srt=audio_srt,
             output_path=output_path,
+            video_clips=video_clips,
         )
         return output_path
 
     def get_status(self) -> dict:
-        stages = ["segment", "prompt", "image", "tts", "video"]
+        stages = ["segment", "prompt", "image"]
+        if self._videogen_enabled:
+            stages.append("videogen")
+        stages.extend(["tts", "video"])
         status = {}
         for s in stages:
             status[s] = "done" if self.ckpt.is_done(s) else "pending"

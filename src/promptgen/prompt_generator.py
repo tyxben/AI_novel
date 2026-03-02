@@ -1,4 +1,4 @@
-"""Prompt 生成器 - 将小说文本转换为 Stable Diffusion 图片 Prompt"""
+"""Prompt 生成器 - 将小说文本转换为图片/视频 Prompt"""
 
 import logging
 import os
@@ -23,6 +23,61 @@ _SYSTEM_PROMPT = """\
 
 输出格式: 仅输出英文 prompt 文本，不要包含任何解释或前缀。
 """
+
+# 视频生成 LLM 系统提示词
+_VIDEO_SYSTEM_PROMPT = """\
+你是一个专业的 AI 视频 Prompt 工程师。你的任务是将中文小说片段转换为 AI 视频生成 Prompt。
+
+要求:
+1. 分析文本中的场景、角色、动作、情绪
+2. 生成英文视频生成 prompt（自然语言完整句子，非关键词堆叠）
+3. 必须包含以下层次:
+   - 主体: 角色外观、服装、表情
+   - 动作: 具体动作过程，添加速度修饰（slowly, gently, dramatically）
+   - 场景: 环境、天气、时间
+   - 光影: 光源类型、色温、氛围
+   - 运镜: 选择合适的相机运动（dolly in, pan, orbit, tracking 等）
+   - 画质: 4K, cinematic quality, natural colors
+4. 运镜选择原则:
+   - 紧张场景: slow dolly in + 手持感
+   - 孤独场景: crane up 远离
+   - 壮阔场景: drone/aerial shot
+   - 日常对话: static shot
+   - 动作场景: tracking/follow shot
+   - 揭示场景: pan-to-reveal 或 pull back
+   - 浪漫/温馨: slow orbit
+5. 动作必须柔和自然，优先使用 slow、gentle、smooth 等修饰词
+6. 末尾添加约束: "Stable character appearance, natural smooth movements, cinematic quality, 4K"
+7. 如果有角色，保持其外观描述一致
+8. 注意视频只有5-10秒，不要描述过多动作，聚焦最核心的一个画面转变
+
+输出格式: 仅输出英文 prompt 文本，不要包含任何解释或前缀。Prompt 应为 2-4 句完整的英文句子。
+"""
+
+# ---- 视频运镜自动匹配规则 (按优先级排列，第一个匹配即返回) ----
+_CAMERA_MOVEMENT_RULES: list[tuple[str, str]] = [
+    # 紧张/悬疑 -> 缓慢推进
+    (r"紧张|心跳|不对劲|危险|杀气|恐怖|诡异", "The camera slowly dollies in"),
+    # 孤独/悲伤 -> 升降远离
+    (r"孤独|一个人|独自|离去|远去|消失", "The camera slowly cranes upward, pulling away"),
+    # 壮阔场景 -> 航拍
+    (r"山顶|战场|全城|远方|天地|苍茫", "Aerial drone shot sweeping over"),
+    # 角色登场 -> 从下往上
+    (r"出现|走来|现身|登场|站在.*面前", "The camera tilts up from ground level"),
+    # 追逐/动作 -> 跟拍
+    (r"追|跑|逃|冲|飞|闪|躲", "Tracking shot following"),
+    # 环顾/展示 -> 环绕
+    (r"环顾|四周|周围|打量|审视", "The camera slowly orbits around"),
+    # 揭示/发现 -> 拉镜
+    (r"发现|原来|看到|映入|展现|豁然", "The camera pulls back to reveal"),
+    # 回忆/梦境 -> 缓慢zoom
+    (r"回忆|想起|记得|梦|往事|从前", "Slow zoom in with soft focus"),
+    # 对话/日常 -> 静镜
+    (r"说道|问道|笑道|答道|聊|谈", "Static medium shot"),
+]
+
+# 默认运镜（当没有规则匹配时）
+_DEFAULT_CAMERA = "Gentle dolly in"
 
 # ---- 现代都市场景规则 ----
 _MODERN_RULES: list[tuple[str, str]] = [
@@ -230,6 +285,145 @@ class PromptGenerator:
     def character_tracker(self) -> CharacterTracker | None:
         """获取角色追踪器实例（用于外部序列化/恢复）。"""
         return self._tracker
+
+    def generate_video_prompt(self, segment_text: str, segment_index: int) -> str:
+        """将小说文本片段转换为视频生成 AI 的 prompt。
+
+        视频 prompt 与图片 prompt 的主要区别:
+        - 使用自然语言完整句子（而非逗号分隔的关键词）
+        - 包含运镜描述（camera movement）
+        - 包含角色动作过程（而非静态姿态）
+        - 包含场景过渡和氛围描写
+
+        Args:
+            segment_text: 中文小说文本片段。
+            segment_index: 片段在全文中的序号（从 0 开始）。
+
+        Returns:
+            英文视频生成 prompt 字符串。
+        """
+        if not segment_text or not segment_text.strip():
+            return ""
+
+        # 提取角色信息
+        character_prompt = ""
+        if self._tracker:
+            characters = self._tracker.extract_characters(segment_text)
+            character_prompt = self._tracker.get_character_prompt(characters)
+
+        # 根据模式生成 prompt
+        if self._use_llm:
+            prompt = self._generate_video_with_llm(segment_text, character_prompt)
+        else:
+            prompt = self._generate_video_local(segment_text, character_prompt)
+
+        # 更新角色追踪器
+        if self._tracker:
+            self._tracker.update(segment_text, prompt)
+
+        log.debug("段 %d video prompt: %s", segment_index, prompt[:80])
+        return prompt
+
+    # ------------------------------------------------------------------
+    # video prompt - LLM mode
+    # ------------------------------------------------------------------
+
+    def _generate_video_with_llm(self, text: str, character_prompt: str) -> str:
+        """使用 LLM 生成视频 prompt。"""
+        try:
+            user_msg = f"小说文本:\n{text}"
+            if character_prompt:
+                user_msg += f"\n\n已知角色描述（请保持一致）:\n{character_prompt}"
+            user_msg += f"\n\n画面风格: {self._style_name}"
+
+            client = self._get_llm_client()
+            response = client.chat(
+                messages=[
+                    {"role": "system", "content": _VIDEO_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=self._temperature,
+            )
+
+            raw_prompt = response.content.strip()
+            if not raw_prompt:
+                log.warning("LLM 返回空视频 prompt，回退到本地模式")
+                return self._generate_video_local(text, character_prompt)
+
+            # 附加视频风格关键词
+            prompt = self._apply_video_style(raw_prompt)
+            return prompt
+
+        except Exception as e:
+            log.warning("LLM 视频 prompt 生成失败 (%s)，回退到本地模式", e)
+            return self._generate_video_local(text, character_prompt)
+
+    # ------------------------------------------------------------------
+    # video prompt - local fallback mode
+    # ------------------------------------------------------------------
+
+    def _generate_video_local(self, text: str, character_prompt: str) -> str:
+        """使用规则匹配生成视频 prompt（无 API 依赖）。
+
+        在图片 prompt 的场景元素基础上，将其改写为自然语言句子，
+        并追加运镜描述和视频画质约束。
+        """
+        era = self._get_era(text)
+        scene_parts = self._extract_scene(text, era)
+
+        parts: list[str] = []
+
+        # 1. 角色 + 场景描述（组装为自然语言句子）
+        if character_prompt:
+            parts.append(character_prompt)
+        if scene_parts:
+            parts.append(", ".join(scene_parts))
+
+        # 组装主体描述句
+        if parts:
+            subject_sentence = ". ".join(p.rstrip(".") for p in parts if p) + "."
+        else:
+            subject_sentence = "A cinematic scene."
+
+        # 2. 运镜描述
+        camera = self._select_camera_movement(text)
+
+        # 3. 视频风格和约束
+        video_style = self._preset.get("video_style", "cinematic quality, 4K")
+        video_constraints = self._preset.get(
+            "video_constraints",
+            "stable character appearance, natural smooth movements, no distortion",
+        )
+
+        # 拼装完整视频 prompt
+        prompt = f"{subject_sentence} {camera}. {video_style}, {video_constraints}."
+        return prompt
+
+    @staticmethod
+    def _select_camera_movement(text: str) -> str:
+        """根据文本情绪/场景自动选择运镜描述。"""
+        for pattern, camera_desc in _CAMERA_MOVEMENT_RULES:
+            if re.search(pattern, text):
+                return camera_desc
+        return _DEFAULT_CAMERA
+
+    def _apply_video_style(self, raw_prompt: str) -> str:
+        """将视频风格预设关键词附加到 prompt 上。"""
+        prompt = raw_prompt.rstrip(". ")
+
+        video_style = self._preset.get("video_style", "")
+        video_constraints = self._preset.get("video_constraints", "")
+
+        suffix_parts: list[str] = []
+        if video_style:
+            suffix_parts.append(video_style)
+        if video_constraints:
+            suffix_parts.append(video_constraints)
+
+        if suffix_parts:
+            prompt += ". " + ", ".join(suffix_parts) + "."
+
+        return prompt
 
     # ------------------------------------------------------------------
     # era detection

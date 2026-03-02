@@ -83,6 +83,23 @@ LLM_MAP = {
 QUALITY_CHOICES = ["标准", "高清", "极致"]
 QUALITY_MAP = {"标准": 23, "高清": 18, "极致": 12}
 
+CODEC_CHOICES = ["H.265（推荐）", "H.264（兼容）"]
+CODEC_MAP = {"H.265（推荐）": "libx265", "H.264（兼容）": "libx264"}
+
+VIDEO_MODE_CHOICES = ["静态图+特效（免费）", "AI视频片段（付费）"]
+VIDEO_MODE_MAP = {
+    "静态图+特效（免费）": None,
+    "AI视频片段（付费）": True,
+}
+
+VIDEOGEN_CHOICES = ["可灵 Kling", "即梦 Seedance", "MiniMax 海螺", "OpenAI Sora"]
+VIDEOGEN_MAP = {
+    "可灵 Kling": "kling",
+    "即梦 Seedance": "seedance",
+    "MiniMax 海螺": "minimax",
+    "OpenAI Sora": "sora",
+}
+
 RESOLUTION_CHOICES = ["竖屏9:16", "横屏16:9", "方形1:1"]
 RESOLUTION_MAP = {
     "竖屏9:16": [1080, 1920],
@@ -369,8 +386,10 @@ def _test_dashscope(key):
 # ---------------------------------------------------------------------------
 def generate(
     text, file, style, voice, rate,
-    image_backend, llm_backend, quality, resolution,
+    image_backend, llm_backend, quality, resolution, codec,
+    video_mode, videogen_backend,
     key_siliconflow, key_gemini, key_deepseek, key_openai, key_dashscope,
+    key_kling, key_jimeng, key_minimax,
     progress=gr.Progress(),
 ):
     # 1. Resolve input text
@@ -398,6 +417,9 @@ def generate(
         "DEEPSEEK_API_KEY": key_deepseek,
         "OPENAI_API_KEY": key_openai,
         "DASHSCOPE_API_KEY": key_dashscope,
+        "KLING_API_KEY": key_kling,
+        "JIMENG_API_KEY": key_jimeng,
+        "MINIMAX_API_KEY": key_minimax,
     }
     for k, v in env_map.items():
         if v and v.strip():
@@ -411,10 +433,21 @@ def generate(
         "imagegen": {"backend": BACKEND_MAP.get(image_backend, "siliconflow")},
         "llm": {"provider": LLM_MAP.get(llm_backend, "auto")},
         "video": {
+            "codec": CODEC_MAP.get(codec, "libx265"),
             "crf": QUALITY_MAP.get(quality, 18),
             "resolution": RESOLUTION_MAP.get(resolution, [1080, 1920]),
         },
     }
+
+    # 4b. Add videogen config if AI video mode is selected
+    if VIDEO_MODE_MAP.get(video_mode):
+        vg_backend = VIDEOGEN_MAP.get(videogen_backend, "kling")
+        config["videogen"] = {
+            "backend": vg_backend,
+            "duration": 5,
+            "aspect_ratio": "9:16",
+            "use_image_as_first_frame": True,
+        }
 
     # 5. Run pipeline
     from src.pipeline import Pipeline
@@ -631,6 +664,29 @@ def create_ui() -> gr.Blocks:
                         label="语速", choices=RATE_CHOICES, value="正常", scale=1,
                     )
 
+                gr.HTML('<div class="section-title">画面模式</div>')
+                with gr.Row():
+                    video_mode = gr.Radio(
+                        label="画面生成方式",
+                        choices=VIDEO_MODE_CHOICES,
+                        value="静态图+特效（免费）",
+                        scale=2,
+                    )
+                    videogen_backend = gr.Dropdown(
+                        label="视频生成服务",
+                        choices=VIDEOGEN_CHOICES,
+                        value="可灵 Kling",
+                        visible=False,
+                        scale=1,
+                    )
+
+                def _on_video_mode_change(mode):
+                    return gr.update(visible=VIDEO_MODE_MAP.get(mode) is not None)
+                video_mode.change(
+                    fn=_on_video_mode_change, inputs=[video_mode],
+                    outputs=[videogen_backend],
+                )
+
                 generate_btn = gr.Button(
                     "生成视频",
                     variant="primary",
@@ -706,6 +762,29 @@ def create_ui() -> gr.Blocks:
                             btn_test_dashscope = gr.Button("测试", size="sm", scale=1)
 
                 with gr.Column():
+                    gr.HTML('<div class="section-title">视频生成 API 密钥</div>')
+                    gr.Markdown("AI 视频片段模式需要以下服务的 Key（按需配置）。")
+                    with gr.Group():
+                        key_kling = gr.Textbox(
+                            label="可灵 Kling",
+                            type="password",
+                            value=settings.get("key_kling", ""),
+                            placeholder="API Key",
+                        )
+                        key_jimeng = gr.Textbox(
+                            label="即梦 Seedance",
+                            type="password",
+                            value=settings.get("key_jimeng", ""),
+                            placeholder="API Key",
+                        )
+                        key_minimax = gr.Textbox(
+                            label="MiniMax 海螺",
+                            type="password",
+                            value=settings.get("key_minimax", ""),
+                            placeholder="API Key",
+                        )
+
+                with gr.Column():
                     gr.HTML('<div class="section-title">后端 & 画质</div>')
                     image_backend = gr.Dropdown(
                         label="图片生成后端",
@@ -727,6 +806,11 @@ def create_ui() -> gr.Blocks:
                         choices=RESOLUTION_CHOICES,
                         value="竖屏9:16",
                     )
+                    codec_radio = gr.Radio(
+                        label="视频编码",
+                        choices=CODEC_CHOICES,
+                        value="H.265（推荐）",
+                    )
 
         # ====== Event wiring ======
         # Auto-save keys (advanced panel)
@@ -736,6 +820,9 @@ def create_ui() -> gr.Blocks:
             (key_deepseek, "key_deepseek"),
             (key_openai, "key_openai"),
             (key_dashscope, "key_dashscope"),
+            (key_kling, "key_kling"),
+            (key_jimeng, "key_jimeng"),
+            (key_minimax, "key_minimax"),
         ]:
             key_comp.change(fn=lambda v, n=key_name: _save_key(n, v), inputs=[key_comp])
 
@@ -858,8 +945,10 @@ def create_ui() -> gr.Blocks:
             inputs=[
                 txt_input, file_input,
                 style_dropdown, voice_dropdown, rate_radio,
-                image_backend, llm_backend, quality_radio, resolution_radio,
+                image_backend, llm_backend, quality_radio, resolution_radio, codec_radio,
+                video_mode, videogen_backend,
                 key_siliconflow, key_gemini, key_deepseek, key_openai, key_dashscope,
+                key_kling, key_jimeng, key_minimax,
             ],
             outputs=[status_box, video_output, file_output],
         )

@@ -18,6 +18,12 @@ _BUILTIN_PRESETS: dict[str, dict[str, str]] = {
         ),
         "negative": "photo, 3d render, cartoon, deformed, blurry, watermark, text",
         "prefix": "masterpiece ink painting of",
+        "video_style": "cinematic Chinese ink painting style, flowing artistic quality, 4K",
+        "video_mood": "traditional Chinese aesthetic, ethereal atmosphere, muted elegant colors",
+        "video_constraints": (
+            "stable character appearance, smooth natural movements, no distortion"
+        ),
+        "default_camera": "slow dolly in",
     },
     "anime": {
         "positive": (
@@ -26,6 +32,12 @@ _BUILTIN_PRESETS: dict[str, dict[str, str]] = {
         ),
         "negative": "photo, 3d render, realistic, deformed, blurry, watermark, text, ugly",
         "prefix": "beautiful anime illustration of",
+        "video_style": "anime cinematic style, vibrant colors, detailed animation quality, 4K",
+        "video_mood": "dynamic anime atmosphere, expressive lighting",
+        "video_constraints": (
+            "consistent character design, smooth animation, no flickering"
+        ),
+        "default_camera": "tracking shot",
     },
     "realistic": {
         "positive": (
@@ -34,6 +46,12 @@ _BUILTIN_PRESETS: dict[str, dict[str, str]] = {
         ),
         "negative": "cartoon, anime, painting, drawing, deformed, blurry, watermark, text, ugly",
         "prefix": "cinematic photo of",
+        "video_style": "photorealistic cinematic quality, 4K, shallow depth of field",
+        "video_mood": "natural lighting, authentic atmosphere",
+        "video_constraints": (
+            "stable face, no morphing, natural physics, smooth movements"
+        ),
+        "default_camera": "gentle dolly in",
     },
     "watercolor": {
         "positive": (
@@ -42,6 +60,12 @@ _BUILTIN_PRESETS: dict[str, dict[str, str]] = {
         ),
         "negative": "photo, 3d render, cartoon, deformed, blurry, watermark, text, harsh lines",
         "prefix": "exquisite watercolor painting of",
+        "video_style": "soft watercolor aesthetic, dreamy cinematic quality, 4K",
+        "video_mood": "delicate pastel tones, gentle diffused lighting",
+        "video_constraints": (
+            "stable character appearance, smooth natural movements, no distortion"
+        ),
+        "default_camera": "slow dolly in",
     },
     "cyberpunk": {
         "positive": (
@@ -50,6 +74,12 @@ _BUILTIN_PRESETS: dict[str, dict[str, str]] = {
         ),
         "negative": "nature, countryside, bright, cheerful, deformed, blurry, watermark, text",
         "prefix": "cyberpunk scene of",
+        "video_style": "cyberpunk cinematic style, neon-lit, high contrast, 4K",
+        "video_mood": "dark futuristic atmosphere, rain-slicked surfaces, holographic glows",
+        "video_constraints": (
+            "stable character appearance, smooth natural movements, no distortion"
+        ),
+        "default_camera": "tracking shot",
     },
 }
 
@@ -76,11 +106,16 @@ def _load_presets() -> dict[str, dict[str, str]]:
                 with open(yaml_file, "r", encoding="utf-8") as f:
                     data: dict[str, Any] = yaml.safe_load(f) or {}
                 name = data.get("name", yaml_file.stem)
-                presets[name] = {
-                    "positive": str(data.get("positive", "")),
-                    "negative": str(data.get("negative", "")),
-                    "prefix": str(data.get("prefix", "")),
-                }
+                # 以已有内建预设为基础，YAML 字段覆盖其上
+                preset_dict = dict(presets.get(name, {}))
+                for key in ("positive", "negative", "prefix",
+                            "video_style", "video_mood",
+                            "video_constraints", "default_camera"):
+                    if key in data:
+                        preset_dict[key] = str(data[key])
+                    elif key in ("positive", "negative", "prefix") and key not in preset_dict:
+                        preset_dict[key] = ""
+                presets[name] = preset_dict
             except Exception:
                 # YAML 解析失败时跳过，保留内建预设
                 continue

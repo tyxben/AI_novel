@@ -41,6 +41,9 @@ ollama = [
 cloud-image = [
     "httpx>=0.27",
 ]
+cloud-video = [
+    "httpx>=0.27",
+]
 web = [
     "gradio>=4.0",
 ]
@@ -48,7 +51,7 @@ build = [
     "pyinstaller>=6.0",
 ]
 all = [
-    "novel-video[gpu,llm,gemini,ollama,cloud-image,web]",
+    "novel-video[gpu,llm,gemini,ollama,cloud-image,cloud-video,web]",
 ]
 
 [project.scripts]
@@ -56,4 +59,4 @@ novel-video = "main:cli"
 
 [tool.setuptools]
 py-modules = ["main"]
-packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.tts", "src.video", "src.llm", "src.utils"]
+packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.videogen", "src.tts", "src.video", "src.llm", "src.utils"]
