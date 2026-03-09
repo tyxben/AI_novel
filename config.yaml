@@ -104,3 +104,18 @@ video:
   bgm:
     path: ""  # 留空则无BGM
     volume: 0.15
+
+# Agent 模式配置（可选，仅 --mode agent 时生效）
+# agent:
+#   quality_check:
+#     enabled: true
+#     threshold: 6.0
+#     max_retries: 3
+#     vision_provider: openai  # openai | gemini
+#   decisions:
+#     enabled: true
+#     file: agent_decisions.json
+#   budget_mode:
+#     disable_quality_check: true
+#     use_cheap_llm: true
+#     simple_emotion_analysis: true

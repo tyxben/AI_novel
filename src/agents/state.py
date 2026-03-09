@@ -61,5 +61,8 @@ class AgentState(TypedDict, total=False):
     # 错误 — 同样使用 add reducer 累积
     errors: Annotated[list[dict], operator.add]
 
+    # 断点续传 — 已完成节点列表，使用 add reducer 累积
+    completed_nodes: Annotated[list[str], operator.add]
+
     # 流水线计划
     pipeline_plan: dict | None

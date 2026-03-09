@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.agents.state import AgentState, Decision
-from src.agents.utils import make_decision, extract_json_obj
+from src.agents.state import AgentState, Decision, QualityEvaluation
+from src.agents.utils import make_decision
 from src.tools.prompt_gen_tool import PromptGenTool
 from src.tools.image_gen_tool import ImageGenTool
+from src.tools.evaluate_quality_tool import EvaluateQualityTool
 from src.logger import log
 
 
@@ -19,34 +20,28 @@ class ArtDirectorAgent:
         self.budget_mode = budget_mode
         self.prompt_gen = PromptGenTool(config)
         self.image_gen = ImageGenTool(config)
-        self._vision_llm = None
+        self.quality_tool = EvaluateQualityTool(config)
 
-    def _get_vision_llm(self):
-        """懒加载视觉 LLM（质量评估用）"""
-        if self._vision_llm is None:
-            agent_cfg = self.config.get("agent", {})
-            quality_cfg = agent_cfg.get("quality_check", {})
-            provider = quality_cfg.get("vision_provider", "openai")
+    def _optimize_prompt(
+        self,
+        original_prompt: str,
+        feedback: str,
+        evaluation: QualityEvaluation,
+    ) -> str:
+        """根据质量反馈优化 prompt。"""
+        additions = []
+        if evaluation.get("clarity", 0) < 1.5:
+            additions.append("sharp focus, high detail, 8k resolution")
+        if evaluation.get("composition", 0) < 1.5:
+            additions.append("well-composed, rule of thirds, balanced layout")
+        if evaluation.get("color", 0) < 1.5:
+            additions.append("vibrant colors, harmonious color palette")
+        if evaluation.get("text_match", 0) < 2.0:
+            additions.append("accurate depiction of the scene")
 
-            if provider == "gemini":
-                try:
-                    from langchain_google_genai import ChatGoogleGenerativeAI
-
-                    self._vision_llm = ChatGoogleGenerativeAI(
-                        model="gemini-2.0-flash-exp"
-                    )
-                    return self._vision_llm
-                except ImportError:
-                    log.warning("langchain-google-genai 未安装，回退到 openai")
-
-            try:
-                from langchain_openai import ChatOpenAI
-
-                self._vision_llm = ChatOpenAI(model="gpt-4o", temperature=0)
-            except Exception as e:
-                log.warning("OpenAI 视觉模型不可用: %s，禁用质量检查", e)
-                self._vision_llm = None
-        return self._vision_llm
+        if additions:
+            return f"{original_prompt}, {', '.join(additions)}"
+        return original_prompt
 
     def generate_image(
         self,
@@ -78,11 +73,24 @@ class ArtDirectorAgent:
             "quality_check", {}
         ).get("enabled", False)
 
+        last_prompt: str | None = None
+        last_evaluation: QualityEvaluation | None = None
+
         while retry_count <= max_retries:
             # 生成 prompt
             prompt = self.prompt_gen.run(
                 text, segment_index=index, full_text=full_text
             )
+
+            # 重试时根据上次评估反馈优化 prompt
+            if retry_count > 0 and last_evaluation is not None:
+                feedback = last_evaluation.get("feedback", "")
+                prompt = self._optimize_prompt(prompt, feedback, last_evaluation)
+                log.info(
+                    "[ArtDirector] 段%d 重试优化 prompt: %s",
+                    index,
+                    prompt[:100],
+                )
 
             # 生成图片
             suffix = f"_r{retry_count}" if retry_count > 0 else ""
@@ -98,15 +106,27 @@ class ArtDirectorAgent:
                 ))
                 return out_path, -1.0, 0, decisions
 
-            # 质量评估
-            score, feedback = self._evaluate_quality(out_path, text, prompt)
+            # 质量评估（使用独立工具）
+            evaluation = self.quality_tool.run(out_path, text, prompt)
+            score = evaluation.get("score", 5.0)
+            feedback = evaluation.get("feedback", "")
+            last_prompt = prompt
+            last_evaluation = evaluation
 
             decisions.append(make_decision(
                 "ArtDirector",
                 f"quality_seg{index}_try{retry_count}",
                 f"评分={score:.1f}/10, {'通过' if score >= threshold else '未通过'}",
                 f"反馈: {feedback}",
-                data={"score": score, "feedback": feedback},
+                data={
+                    "score": score,
+                    "feedback": feedback,
+                    "composition": evaluation.get("composition", 0),
+                    "clarity": evaluation.get("clarity", 0),
+                    "text_match": evaluation.get("text_match", 0),
+                    "color": evaluation.get("color", 0),
+                    "consistency": evaluation.get("consistency", 0),
+                },
             ))
 
             if score > best_score:
@@ -135,51 +155,6 @@ class ArtDirectorAgent:
             )
 
         return best_path, best_score, retry_count, decisions  # type: ignore[return-value]
-
-    def _evaluate_quality(
-        self, image_path: Path, text: str, prompt: str
-    ) -> tuple[float, str]:
-        """GPT-4V/Gemini Vision 评估图片质量"""
-        vision_llm = self._get_vision_llm()
-        if vision_llm is None:
-            return 5.0, "视觉模型不可用，跳过评估"
-
-        import base64
-
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode()
-
-        eval_prompt = (
-            "你是图片质量评估专家。评估这张 AI 生成的图片。\n\n"
-            f"原文：{text[:200]}\n"
-            f"Prompt：{prompt[:200]}\n\n"
-            "评分维度（总分10分）：\n"
-            "1. 构图(0-2) 2. 清晰度(0-2) 3. 文本匹配(0-3) 4. 色彩(0-2) 5. 一致性(0-1)\n\n"
-            '输出 JSON：{{"score": 总分, "feedback": "反馈"}}'
-        )
-
-        try:
-            from langchain_core.messages import HumanMessage
-
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": eval_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{image_b64}"
-                        },
-                    },
-                ]
-            )
-            result = vision_llm.invoke([message])
-            data = extract_json_obj(result.content)
-            if data:
-                return float(data.get("score", 5.0)), data.get("feedback", "")
-        except Exception as e:
-            log.warning("质量评估失败: %s", e)
-
-        return 5.0, "评估失败，使用默认分数"
 
 
 def art_director_node(state: AgentState) -> dict:

@@ -631,8 +631,11 @@ class TestArtDirector:
         agent = ArtDirectorAgent(config, budget_mode=False)
         agent.prompt_gen = mock_prompt
         agent.image_gen = mock_img
-        # Mock _evaluate_quality to return high score
-        agent._evaluate_quality = MagicMock(return_value=(8.0, "good"))
+        # Mock quality_tool.run to return high score
+        agent.quality_tool.run = MagicMock(return_value=QualityEvaluation(
+            score=8.0, feedback="good", passed=True,
+            composition=2, clarity=2, text_match=2, color=2, consistency=0,
+        ))
 
         path, score, retries, decisions = agent.generate_image(
             "测试", 0, tmp_path
@@ -640,7 +643,7 @@ class TestArtDirector:
 
         assert score == 8.0
         assert retries == 0
-        agent._evaluate_quality.assert_called_once()
+        agent.quality_tool.run.assert_called_once()
 
     @patch("src.agents.art_director.ImageGenTool")
     @patch("src.agents.art_director.PromptGenTool")
@@ -658,13 +661,22 @@ class TestArtDirector:
         agent.prompt_gen = mock_prompt
         agent.image_gen = mock_img
         # 第一次低分，第二次高分
-        agent._evaluate_quality = MagicMock(side_effect=[(3.0, "bad"), (7.0, "good")])
+        agent.quality_tool.run = MagicMock(side_effect=[
+            QualityEvaluation(
+                score=3.0, feedback="bad", passed=False,
+                composition=1, clarity=1, text_match=1, color=0, consistency=0,
+            ),
+            QualityEvaluation(
+                score=7.0, feedback="good", passed=True,
+                composition=2, clarity=2, text_match=2, color=1, consistency=0,
+            ),
+        ])
 
         path, score, retries, decisions = agent.generate_image("txt", 0, tmp_path)
 
         assert score == 7.0
         assert retries == 1
-        assert agent._evaluate_quality.call_count == 2
+        assert agent.quality_tool.run.call_count == 2
 
     @patch("src.agents.art_director.ImageGenTool")
     @patch("src.agents.art_director.PromptGenTool")
@@ -682,8 +694,19 @@ class TestArtDirector:
         agent.prompt_gen = mock_prompt
         agent.image_gen = mock_img
         # 始终低分
-        agent._evaluate_quality = MagicMock(side_effect=[
-            (4.0, "bad"), (5.0, "better"), (3.0, "worst")
+        agent.quality_tool.run = MagicMock(side_effect=[
+            QualityEvaluation(
+                score=4.0, feedback="bad", passed=False,
+                composition=1, clarity=1, text_match=1, color=1, consistency=0,
+            ),
+            QualityEvaluation(
+                score=5.0, feedback="better", passed=False,
+                composition=1, clarity=1, text_match=2, color=1, consistency=0,
+            ),
+            QualityEvaluation(
+                score=3.0, feedback="worst", passed=False,
+                composition=0, clarity=1, text_match=1, color=1, consistency=0,
+            ),
         ])
 
         path, score, retries, decisions = agent.generate_image("txt", 0, tmp_path)
@@ -693,18 +716,20 @@ class TestArtDirector:
 
     def test_evaluate_quality_no_vision_llm(self, minimal_config, tmp_path):
         """vision LLM 不可用时返回默认 5.0 分。"""
-        agent = ArtDirectorAgent(minimal_config, budget_mode=False)
-        agent._vision_llm = None
+        from src.tools.evaluate_quality_tool import EvaluateQualityTool
+
+        tool = EvaluateQualityTool(minimal_config)
+        tool._vision_llm = None
         # Force _get_vision_llm to return None
-        agent._get_vision_llm = MagicMock(return_value=None)
+        tool._get_vision_llm = MagicMock(return_value=None)
 
         # Create dummy image
         img_path = tmp_path / "test.png"
         img_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
 
-        score, feedback = agent._evaluate_quality(img_path, "text", "prompt")
-        assert score == 5.0
-        assert "不可用" in feedback
+        evaluation = tool.run(img_path, "text", "prompt")
+        assert evaluation["score"] == 5.0
+        assert "不可用" in evaluation["feedback"]
 
     @patch("src.agents.art_director.ImageGenTool")
     @patch("src.agents.art_director.PromptGenTool")

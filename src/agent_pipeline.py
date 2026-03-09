@@ -96,6 +96,7 @@ class AgentPipeline:
             retry_counts={},
             decisions=[],
             errors=[],
+            completed_nodes=[],
             pipeline_plan=None,
         )
 
@@ -160,7 +161,10 @@ class AgentPipeline:
         _notify(1, "Agent 分析中...")
 
         try:
-            result = graph.invoke(dict(state))
+            result = graph.invoke(
+                dict(state),
+                config={"configurable": {"pipeline": self}},
+            )
         except Exception as e:
             log.error("Agent 流水线失败: %s", e)
             # 保存当前状态用于恢复

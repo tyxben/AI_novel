@@ -27,3 +27,42 @@ def _validate(cfg: dict) -> None:
     res = cfg["video"].get("resolution")
     if not (isinstance(res, list) and len(res) == 2):
         raise ValueError("video.resolution 必须是 [width, height]")
+
+    # agent 配置（可选）
+    agent_cfg = cfg.get("agent")
+    if agent_cfg is not None:
+        if not isinstance(agent_cfg, dict):
+            raise ValueError("agent 配置必须是字典")
+        _validate_agent(agent_cfg)
+
+
+def _validate_agent(agent_cfg: dict) -> None:
+    """验证 agent 配置子字段。"""
+    qc = agent_cfg.get("quality_check")
+    if qc is not None:
+        if not isinstance(qc, dict):
+            raise ValueError("agent.quality_check 必须是字典")
+
+        threshold = qc.get("threshold")
+        if threshold is not None:
+            if not isinstance(threshold, (int, float)) or not (0 <= threshold <= 10):
+                raise ValueError("agent.quality_check.threshold 必须在 0-10 之间")
+
+        max_retries = qc.get("max_retries")
+        if max_retries is not None:
+            if not isinstance(max_retries, int) or not (0 <= max_retries <= 10):
+                raise ValueError("agent.quality_check.max_retries 必须是 0-10 的整数")
+
+        vision_provider = qc.get("vision_provider")
+        if vision_provider is not None and vision_provider not in ("openai", "gemini"):
+            raise ValueError("agent.quality_check.vision_provider 必须是 openai 或 gemini")
+
+    decisions = agent_cfg.get("decisions")
+    if decisions is not None:
+        if not isinstance(decisions, dict):
+            raise ValueError("agent.decisions 必须是字典")
+
+    budget = agent_cfg.get("budget_mode")
+    if budget is not None:
+        if not isinstance(budget, dict):
+            raise ValueError("agent.budget_mode 必须是字典")
