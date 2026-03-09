@@ -85,7 +85,8 @@ def segment(input_file: str, config: str | None, method: str | None):
 
 @cli.command()
 @click.argument("workspace_dir", type=click.Path(exists=True))
-def status(workspace_dir: str):
+@click.option("--decisions", is_flag=True, help="显示 Agent 决策日志")
+def status(workspace_dir: str, decisions: bool):
     """查看项目处理进度"""
     from src.checkpoint import Checkpoint
 
@@ -114,6 +115,92 @@ def status(workspace_dir: str):
     table.add_row("总段数", str(seg_count))
 
     console.print(table)
+
+    if decisions:
+        _show_decisions(Path(workspace_dir))
+
+
+def _show_decisions(workspace: Path) -> None:
+    """显示 Agent 决策日志摘要。"""
+    from src.agents.utils import load_decisions_from_file
+    from collections import defaultdict
+
+    decisions_file = workspace / "agent_decisions.json"
+    decisions = load_decisions_from_file(decisions_file)
+
+    if not decisions:
+        console.print("\n[yellow]未找到决策日志（agent_decisions.json 不存在或为空）[/]")
+        return
+
+    # Group by agent
+    by_agent: dict[str, list] = defaultdict(list)
+    for d in decisions:
+        by_agent[d.get("agent", "unknown")].append(d)
+
+    # Decision table
+    dec_table = Table(title="Agent 决策日志")
+    dec_table.add_column("Agent", style="cyan")
+    dec_table.add_column("步骤", style="white")
+    dec_table.add_column("决策", style="green")
+    dec_table.add_column("原因", style="dim")
+
+    for agent, decs in by_agent.items():
+        for i, d in enumerate(decs):
+            dec_table.add_row(
+                agent if i == 0 else "",
+                d.get("step", ""),
+                d.get("decision", ""),
+                d.get("reason", ""),
+            )
+
+    console.print()
+    console.print(dec_table)
+
+    # Per-agent summary
+    summary_table = Table(title="决策统计")
+    summary_table.add_column("Agent", style="cyan")
+    summary_table.add_column("决策数", style="white")
+    for agent, decs in by_agent.items():
+        summary_table.add_row(agent, str(len(decs)))
+    summary_table.add_row("[bold]总计[/]", f"[bold]{len(decisions)}[/]")
+    console.print(summary_table)
+
+    # Quality scores summary
+    all_scores = []
+    for d in decisions:
+        data = d.get("data") or {}
+        if "score" in data:
+            try:
+                all_scores.append(float(data["score"]))
+            except (ValueError, TypeError):
+                pass
+    if all_scores:
+        q_table = Table(title="质量评分摘要")
+        q_table.add_column("指标", style="cyan")
+        q_table.add_column("值", style="white")
+        q_table.add_row("平均分", f"{sum(all_scores) / len(all_scores):.2f}")
+        q_table.add_row("最低分", f"{min(all_scores):.2f}")
+        q_table.add_row("最高分", f"{max(all_scores):.2f}")
+        q_table.add_row("评分数", str(len(all_scores)))
+        console.print(q_table)
+
+    # Retry statistics
+    retry_decisions = [
+        d for d in decisions
+        if "retry" in d.get("decision", "").lower()
+        or "重试" in d.get("decision", "")
+    ]
+    if retry_decisions:
+        r_table = Table(title="重试统计")
+        r_table.add_column("Agent", style="cyan")
+        r_table.add_column("重试次数", style="yellow")
+        retry_by_agent: dict[str, int] = defaultdict(int)
+        for d in retry_decisions:
+            retry_by_agent[d.get("agent", "unknown")] += 1
+        for agent, count in retry_by_agent.items():
+            r_table.add_row(agent, str(count))
+        r_table.add_row("[bold]总计[/]", f"[bold]{len(retry_decisions)}[/]")
+        console.print(r_table)
 
 
 if __name__ == "__main__":

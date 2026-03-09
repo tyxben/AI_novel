@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "novel-video"
-version = "0.4.0"
+version = "0.7.0"
 description = "AI 小说推文自动化 - 小说一键转短视频"
 readme = "README.md"
 license = {text = "MIT"}

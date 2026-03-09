@@ -73,7 +73,6 @@ class ArtDirectorAgent:
             "quality_check", {}
         ).get("enabled", False)
 
-        last_prompt: str | None = None
         last_evaluation: QualityEvaluation | None = None
 
         while retry_count <= max_retries:
@@ -110,7 +109,6 @@ class ArtDirectorAgent:
             evaluation = self.quality_tool.run(out_path, text, prompt)
             score = evaluation.get("score", 5.0)
             feedback = evaluation.get("feedback", "")
-            last_prompt = prompt
             last_evaluation = evaluation
 
             decisions.append(make_decision(

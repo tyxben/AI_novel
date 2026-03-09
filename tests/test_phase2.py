@@ -4,21 +4,19 @@ from __future__ import annotations
 import json
 import operator
 from pathlib import Path
-from typing import Any, get_type_hints
-from unittest.mock import MagicMock, patch, call
+from typing import get_type_hints
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 # ---------------------------------------------------------------------------
 # 被测模块（始终可用）
 # ---------------------------------------------------------------------------
-from src.agents.state import AgentState, Decision, QualityEvaluation
+from src.agents.state import AgentState, QualityEvaluation
 from src.agents.utils import make_decision
-from src.agents.director import DirectorAgent, director_node
-from src.agents.content_analyzer import ContentAnalyzerAgent, content_analyzer_node
+from src.agents.director import director_node
+from src.agents.content_analyzer import content_analyzer_node
 from src.agents.art_director import ArtDirectorAgent, art_director_node
-from src.agents.voice_director import VoiceDirectorAgent, voice_director_node
-from src.agents.editor import EditorAgent, editor_node
 
 # ---------------------------------------------------------------------------
 # 可能尚未实现的模块 -- 用 importorskip / skipif 保护
@@ -585,6 +583,87 @@ class TestConfigAgent:
         quality_config["agent"]["quality_check"]["vision_provider"] = "gemini"
         provider = quality_config["agent"]["quality_check"]["vision_provider"]
         assert provider == "gemini"
+
+    # --- budget_mode config validation ---
+
+    def test_budget_mode_valid_config_passes(self, minimal_config):
+        """合法的 budget_mode 配置通过验证。"""
+        from src.config_manager import _validate
+
+        minimal_config["agent"] = {
+            "budget_mode": {
+                "disable_quality_check": True,
+                "use_cheap_llm": True,
+                "simple_emotion_analysis": True,
+            }
+        }
+        # 应不抛异常
+        _validate(minimal_config)
+
+    def test_budget_mode_partial_config_passes(self, minimal_config):
+        """budget_mode 只填部分字段也应通过验证。"""
+        from src.config_manager import _validate
+
+        minimal_config["agent"] = {
+            "budget_mode": {
+                "disable_quality_check": True,
+            }
+        }
+        _validate(minimal_config)
+
+    def test_budget_mode_empty_dict_passes(self, minimal_config):
+        """budget_mode 为空字典也应通过验证。"""
+        from src.config_manager import _validate
+
+        minimal_config["agent"] = {"budget_mode": {}}
+        _validate(minimal_config)
+
+    def test_budget_mode_not_dict_raises(self, minimal_config):
+        """budget_mode 不是字典时应报错。"""
+        from src.config_manager import _validate
+
+        minimal_config["agent"] = {"budget_mode": True}
+        with pytest.raises(ValueError, match="budget_mode 必须是字典"):
+            _validate(minimal_config)
+
+    @pytest.mark.parametrize("field", [
+        "disable_quality_check",
+        "use_cheap_llm",
+        "simple_emotion_analysis",
+    ])
+    def test_budget_mode_non_bool_field_raises(self, minimal_config, field):
+        """budget_mode 子字段为非布尔值时应报错。"""
+        from src.config_manager import _validate
+
+        minimal_config["agent"] = {"budget_mode": {field: "yes"}}
+        with pytest.raises(ValueError, match=f"budget_mode.{field} 必须是布尔值"):
+            _validate(minimal_config)
+
+    @pytest.mark.parametrize("field", [
+        "disable_quality_check",
+        "use_cheap_llm",
+        "simple_emotion_analysis",
+    ])
+    def test_budget_mode_int_field_raises(self, minimal_config, field):
+        """budget_mode 子字段为整数时应报错（int 不是 bool）。"""
+        from src.config_manager import _validate
+
+        minimal_config["agent"] = {"budget_mode": {field: 1}}
+        with pytest.raises(ValueError, match=f"budget_mode.{field} 必须是布尔值"):
+            _validate(minimal_config)
+
+    def test_budget_mode_all_false_passes(self, minimal_config):
+        """budget_mode 所有字段为 False 也应通过。"""
+        from src.config_manager import _validate
+
+        minimal_config["agent"] = {
+            "budget_mode": {
+                "disable_quality_check": False,
+                "use_cheap_llm": False,
+                "simple_emotion_analysis": False,
+            }
+        }
+        _validate(minimal_config)
 
 
 # ===================================================================

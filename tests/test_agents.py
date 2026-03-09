@@ -3,11 +3,8 @@ from __future__ import annotations
 
 import json
 import operator
-import os
-import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,17 +23,14 @@ from src.agents.director import DirectorAgent, director_node
 from src.agents.content_analyzer import (
     ContentAnalyzerAgent,
     content_analyzer_node,
-    GENRE_RULES,
-    STYLE_MAP,
 )
 from src.agents.art_director import ArtDirectorAgent, art_director_node
 from src.agents.voice_director import (
     VoiceDirectorAgent,
     voice_director_node,
-    EMOTION_RULES,
     EMOTION_TTS_PARAMS,
 )
-from src.agents.editor import EditorAgent, editor_node
+from src.agents.editor import editor_node
 from src.tools.segment_tool import SegmentTool
 from src.tools.prompt_gen_tool import PromptGenTool
 from src.tools.image_gen_tool import ImageGenTool
@@ -212,6 +206,20 @@ class TestDecisionUtils:
     def test_load_decisions_missing_file(self, tmp_path):
         """文件不存在时返回空列表。"""
         result = load_decisions_from_file(tmp_path / "nonexistent.json")
+        assert result == []
+
+    def test_load_decisions_corrupted_json(self, tmp_path):
+        """JSON 格式错误时返回空列表，不抛异常。"""
+        filepath = tmp_path / "bad.json"
+        filepath.write_text("{not valid json!!!", encoding="utf-8")
+        result = load_decisions_from_file(filepath)
+        assert result == []
+
+    def test_load_decisions_non_list_json(self, tmp_path):
+        """JSON 文件是对象而非数组时返回空列表。"""
+        filepath = tmp_path / "obj.json"
+        filepath.write_text('{"agent": "test"}', encoding="utf-8")
+        result = load_decisions_from_file(filepath)
         assert result == []
 
     # --- extract_json_obj ---
@@ -918,7 +926,7 @@ class TestEditorAgent:
         base_state["video_clips"] = [str(tmp_path / "0.mp4")]
         base_state["input_file"] = str(tmp_path / "novel.txt")
 
-        result = editor_node(base_state)
+        editor_node(base_state)
 
         call_kwargs = mock_vid.run.call_args
         assert call_kwargs is not None
@@ -1126,7 +1134,7 @@ class TestAgentPipeline:
         }
 
         from src.agent_pipeline import AgentPipeline
-        pipe = AgentPipeline(input_file=input_file)
+        AgentPipeline(input_file=input_file)
 
         ws = tmp_path / "ws" / "novel"
         assert ws.exists()
@@ -1349,3 +1357,142 @@ class TestClassicModeRegression:
         }
         with pytest.raises(ValueError, match="resolution"):
             _validate(cfg)
+
+
+# ===================================================================
+# TestStatusDecisions
+# ===================================================================
+class TestStatusDecisions:
+    """status --decisions 功能测试。"""
+
+    def test_status_has_decisions_flag(self):
+        """status 命令应有 --decisions flag。"""
+        from main import cli
+        status_cmd = cli.commands["status"]
+        dec_param = None
+        for param in status_cmd.params:
+            if param.name == "decisions":
+                dec_param = param
+                break
+        assert dec_param is not None
+        assert dec_param.is_flag is True
+
+    def test_decisions_with_mock_data(self, tmp_path):
+        """--decisions 应正确显示决策日志。"""
+        from click.testing import CliRunner
+        from main import cli
+
+        # 创建 checkpoint 文件
+        ckpt_file = tmp_path / "checkpoint.json"
+        ckpt_file.write_text('{"stages": {}, "segments": []}', encoding="utf-8")
+
+        # 创建 decisions 文件
+        decisions = [
+            {
+                "agent": "director",
+                "step": "plan",
+                "decision": "执行全流程",
+                "reason": "新项目无断点",
+                "data": None,
+                "timestamp": "2026-01-01T00:00:00+00:00",
+            },
+            {
+                "agent": "art_director",
+                "step": "quality_check",
+                "decision": "通过",
+                "reason": "评分达标",
+                "data": {"score": 8.5},
+                "timestamp": "2026-01-01T00:01:00+00:00",
+            },
+            {
+                "agent": "art_director",
+                "step": "quality_check",
+                "decision": "retry 重试",
+                "reason": "评分不足",
+                "data": {"score": 4.0},
+                "timestamp": "2026-01-01T00:02:00+00:00",
+            },
+        ]
+        dec_file = tmp_path / "agent_decisions.json"
+        dec_file.write_text(json.dumps(decisions, ensure_ascii=False), encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", str(tmp_path), "--decisions"])
+
+        assert result.exit_code == 0
+        assert "director" in result.output
+        assert "art_director" in result.output
+        assert "执行全流程" in result.output
+        # Quality summary should appear
+        assert "8.50" in result.output or "8.5" in result.output
+        assert "4.00" in result.output or "4.0" in result.output
+        # Retry stats should appear
+        assert "重试" in result.output
+
+    def test_decisions_no_file(self, tmp_path):
+        """decisions 文件不存在时显示提示信息。"""
+        from click.testing import CliRunner
+        from main import cli
+
+        # 创建 checkpoint 文件 (status 需要)
+        ckpt_file = tmp_path / "checkpoint.json"
+        ckpt_file.write_text('{"stages": {}, "segments": []}', encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", str(tmp_path), "--decisions"])
+
+        assert result.exit_code == 0
+        assert "未找到决策日志" in result.output
+
+    def test_decisions_without_flag(self, tmp_path):
+        """不传 --decisions 时不显示决策日志。"""
+        from click.testing import CliRunner
+        from main import cli
+
+        ckpt_file = tmp_path / "checkpoint.json"
+        ckpt_file.write_text('{"stages": {}, "segments": []}', encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["status", str(tmp_path)])
+
+        assert result.exit_code == 0
+        assert "决策日志" not in result.output
+
+    def test_decision_summary_calculation(self):
+        """决策摘要统计计算应正确。"""
+
+        decisions = [
+            {"agent": "a", "step": "s1", "decision": "d1", "reason": "r1",
+             "data": {"score": 6.0}},
+            {"agent": "a", "step": "s2", "decision": "d2", "reason": "r2",
+             "data": {"score": 8.0}},
+            {"agent": "b", "step": "s3", "decision": "retry 重试", "reason": "r3",
+             "data": {"score": 3.0}},
+        ]
+
+        # 验证分组和统计逻辑
+        from collections import defaultdict
+        by_agent = defaultdict(list)
+        for d in decisions:
+            by_agent[d.get("agent", "unknown")].append(d)
+
+        assert len(by_agent["a"]) == 2
+        assert len(by_agent["b"]) == 1
+
+        all_scores = []
+        for d in decisions:
+            data = d.get("data") or {}
+            if "score" in data:
+                all_scores.append(float(data["score"]))
+        assert len(all_scores) == 3
+        assert sum(all_scores) / len(all_scores) == pytest.approx(5.666, abs=0.01)
+        assert min(all_scores) == 3.0
+        assert max(all_scores) == 8.0
+
+        retry_decisions = [
+            d for d in decisions
+            if "retry" in d.get("decision", "").lower()
+            or "重试" in d.get("decision", "")
+        ]
+        assert len(retry_decisions) == 1
+        assert retry_decisions[0]["agent"] == "b"

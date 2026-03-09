@@ -66,3 +66,15 @@ def _validate_agent(agent_cfg: dict) -> None:
     if budget is not None:
         if not isinstance(budget, dict):
             raise ValueError("agent.budget_mode 必须是字典")
+
+        _budget_bool_fields = [
+            "disable_quality_check",
+            "use_cheap_llm",
+            "simple_emotion_analysis",
+        ]
+        for field in _budget_bool_fields:
+            val = budget.get(field)
+            if val is not None and not isinstance(val, bool):
+                raise ValueError(
+                    f"agent.budget_mode.{field} 必须是布尔值"
+                )

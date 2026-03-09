@@ -7,7 +7,6 @@ import os
 import platform
 import shutil
 import stat
-import sys
 import tarfile
 import zipfile
 from pathlib import Path

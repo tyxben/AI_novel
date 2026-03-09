@@ -3,7 +3,6 @@
 import io
 import logging
 import os
-import urllib.request
 
 from PIL import Image
 

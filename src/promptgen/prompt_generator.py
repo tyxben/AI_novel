@@ -1,7 +1,6 @@
 """Prompt 生成器 - 将小说文本转换为图片/视频 Prompt"""
 
 import logging
-import os
 import re
 
 from src.promptgen.character_tracker import CharacterTracker

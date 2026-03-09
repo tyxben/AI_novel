@@ -4,7 +4,6 @@ API 文档: https://platform.openai.com/docs/api-reference/videos
 模型: sora-2, sora-2-pro
 """
 
-import base64
 import logging
 import os
 from pathlib import Path

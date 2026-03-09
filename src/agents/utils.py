@@ -34,12 +34,18 @@ def save_decisions_to_file(state: dict, filepath: str | Path) -> None:
     filepath.write_text(json.dumps(decisions, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_decisions_from_file(filepath: str | Path) -> list[Decision]:
+def load_decisions_from_file(filepath: str | Path) -> list[dict]:
     """从 JSON 文件加载决策日志。"""
     filepath = Path(filepath)
     if not filepath.exists():
         return []
-    return json.loads(filepath.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(filepath.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return data
 
 
 def extract_json_obj(text: str | None) -> dict | None:

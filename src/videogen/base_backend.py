@@ -7,11 +7,17 @@
 - 资源清理
 """
 
+from __future__ import annotations
+
 import logging
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from src.videogen.video_generator import VideoGenerator
+
+if TYPE_CHECKING:
+    from src.videogen.video_generator import VideoResult
 
 log = logging.getLogger("novel")
 

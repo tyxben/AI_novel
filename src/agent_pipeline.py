@@ -9,7 +9,7 @@ from typing import Callable
 from src.agents.state import AgentState
 from src.agents.utils import save_decisions_to_file
 from src.config_manager import load_config
-from src.logger import log, console
+from src.logger import log
 
 
 class AgentPipeline:

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import platform
-import shutil
 import subprocess
 from pathlib import Path
 

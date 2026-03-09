@@ -12,4 +12,17 @@ __all__ = [
     "ImageGenTool",
     "TTSTool",
     "VideoAssembleTool",
+    "create_tools",
 ]
+
+
+def create_tools(config: dict) -> dict:
+    """统一初始化所有 Tool，返回 {name: tool_instance} 字典。"""
+    return {
+        "segment": SegmentTool(config),
+        "prompt_gen": PromptGenTool(config),
+        "image_gen": ImageGenTool(config),
+        "tts": TTSTool(config),
+        "video_assemble": VideoAssembleTool(config),
+        "evaluate_quality": EvaluateQualityTool(config),
+    }
