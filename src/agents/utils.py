@@ -67,11 +67,21 @@ def extract_json_obj(text: str | None) -> dict | None:
 
 
 def extract_json_array(text: str | None) -> list | None:
-    """从 LLM 输出中稳健提取 JSON 数组。"""
+    """从 LLM 输出中稳健提取 JSON 数组。
+
+    如果顶层是 JSON 对象（常见于 json_mode），会尝试提取第一个数组类型的值。
+    """
     if not text:
         return None
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+        # json_mode 常返回 {"key": [...]}，提取第一个数组值
+        if isinstance(parsed, dict):
+            for v in parsed.values():
+                if isinstance(v, list):
+                    return v
     except (json.JSONDecodeError, TypeError):
         pass
     start = text.find("[")
