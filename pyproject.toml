@@ -44,6 +44,14 @@ cloud-image = [
 cloud-video = [
     "httpx>=0.27",
 ]
+agent = [
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.3.0",
+]
+agent-gemini = [
+    "langchain-google-genai>=2.0.0",
+]
 web = [
     "gradio>=4.0",
 ]
@@ -51,7 +59,7 @@ build = [
     "pyinstaller>=6.0",
 ]
 all = [
-    "novel-video[gpu,llm,gemini,ollama,cloud-image,cloud-video,web]",
+    "novel-video[gpu,llm,gemini,ollama,cloud-image,cloud-video,agent,web]",
 ]
 
 [project.scripts]
@@ -59,4 +67,4 @@ novel-video = "main:cli"
 
 [tool.setuptools]
 py-modules = ["main"]
-packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.videogen", "src.tts", "src.video", "src.llm", "src.utils"]
+packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.videogen", "src.tts", "src.video", "src.llm", "src.utils", "src.agents", "src.tools"]

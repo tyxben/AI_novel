@@ -18,19 +18,39 @@ def cli():
 @click.option("--output", "-o", type=click.Path(), default=None, help="输出目录")
 @click.option("--workspace", "-w", type=click.Path(), default=None, help="工作目录")
 @click.option("--resume", "-r", is_flag=True, help="断点续传")
+@click.option("--mode", type=click.Choice(["classic", "agent"]), default="classic",
+              help="运行模式: classic(传统) | agent(智能Agent)")
+@click.option("--budget-mode", is_flag=True, help="省钱模式（仅Agent模式有效）")
+@click.option("--quality-threshold", type=float, default=None,
+              help="图片质量阈值 0-10（仅Agent模式有效）")
 def run(input_file: str, config: str | None, output: str | None,
-        workspace: str | None, resume: bool):
+        workspace: str | None, resume: bool, mode: str,
+        budget_mode: bool, quality_threshold: float | None):
     """全流程: 小说 → 短视频"""
-    from src.pipeline import Pipeline
-
     try:
-        pipe = Pipeline(
-            input_file=Path(input_file),
-            config_path=Path(config) if config else None,
-            output_dir=Path(output) if output else None,
-            workspace=Path(workspace) if workspace else None,
-            resume=resume,
-        )
+        if mode == "agent":
+            from src.agent_pipeline import AgentPipeline
+
+            pipe = AgentPipeline(
+                input_file=Path(input_file),
+                config_path=Path(config) if config else None,
+                output_dir=Path(output) if output else None,
+                workspace=Path(workspace) if workspace else None,
+                resume=resume,
+                budget_mode=budget_mode,
+                quality_threshold=quality_threshold,
+            )
+        else:
+            from src.pipeline import Pipeline
+
+            pipe = Pipeline(
+                input_file=Path(input_file),
+                config_path=Path(config) if config else None,
+                output_dir=Path(output) if output else None,
+                workspace=Path(workspace) if workspace else None,
+                resume=resume,
+            )
+
         result = pipe.run()
         console.print(f"\n[bold green]视频生成完成: {result}[/]")
     except Exception as e:
