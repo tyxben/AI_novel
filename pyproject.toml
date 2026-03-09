@@ -68,3 +68,8 @@ novel-video = "main:cli"
 [tool.setuptools]
 py-modules = ["main"]
 packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.videogen", "src.tts", "src.video", "src.llm", "src.utils", "src.agents", "src.tools"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: real API integration tests (require API keys)",
+]
