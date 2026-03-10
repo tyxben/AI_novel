@@ -1,0 +1,87 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -e '.[web,cloud-image,cloud-video,llm,gemini,build]'
+
+      - name: Build with PyInstaller
+        run: pyinstaller novel_video.spec --noconfirm
+
+      - name: Package macOS app
+        run: |
+          cd dist
+          tar -czf AI-Novel-Video-${GITHUB_REF_NAME}-macOS-arm64.tar.gz AI小说转视频.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: dist/AI-Novel-Video-*.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -e '.[web,cloud-image,cloud-video,llm,gemini,build]'
+
+      - name: Build with PyInstaller
+        run: pyinstaller novel_video.spec --noconfirm
+
+      - name: Package Windows build
+        run: |
+          cd dist
+          Compress-Archive -Path "AI小说转视频" -DestinationPath "AI-Novel-Video-${{ github.ref_name }}-Windows-x64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-app
+          path: dist/AI-Novel-Video-*.zip
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          # Extract the latest version's notes from CHANGELOG.md
+          awk '/^## \[/{if(found) exit; found=1; next} found' CHANGELOG.md > release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: artifacts/*
+          draft: false
+          prerelease: false
