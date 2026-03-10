@@ -121,6 +121,10 @@ GENRE_MAP = {
 LENGTH_CHOICES = ["30秒 (~120字)", "60秒 (~250字)", "3分钟 (~700字)"]
 LENGTH_MAP = {"30秒 (~120字)": 120, "60秒 (~250字)": 250, "3分钟 (~700字)": 700}
 
+# Agent 模式阶段映射
+RUN_MODE_CHOICES = ["经典模式（快速）", "Agent模式（智能质控）"]
+AGENT_STAGES = {1: "导演分析", 2: "内容解析", 3: "图片生成", 4: "配音合成", 5: "视频编辑"}
+
 
 # ---------------------------------------------------------------------------
 # CSS theme
@@ -382,6 +386,109 @@ def _test_dashscope(key):
 
 
 # ---------------------------------------------------------------------------
+# Agent 结果加载
+# ---------------------------------------------------------------------------
+def _load_agent_results(workspace_path: str) -> tuple:
+    """加载 Agent 模式生成的分析结果、决策日志和质量报告。
+
+    Returns:
+        (analysis_markdown, image_paths, decisions_json, quality_markdown)
+    """
+    workspace = Path(workspace_path)
+
+    # --- 内容分析 (从 agent_state.json) ---
+    analysis_md = ""
+    state_file = workspace / "agent_state.json"
+    if state_file.exists():
+        try:
+            state_data = json.loads(state_file.read_text(encoding="utf-8"))
+            parts = []
+            if state_data.get("genre"):
+                parts.append(f"**题材类型:** {state_data['genre']}")
+            if state_data.get("era"):
+                parts.append(f"**时代背景:** {state_data['era']}")
+            if state_data.get("characters"):
+                chars = state_data["characters"]
+                if isinstance(chars, list):
+                    chars_str = "、".join(str(c) for c in chars)
+                elif isinstance(chars, str):
+                    chars_str = chars
+                else:
+                    chars_str = str(chars)
+                parts.append(f"**主要角色:** {chars_str}")
+            if state_data.get("suggested_style"):
+                parts.append(f"**推荐画风:** {state_data['suggested_style']}")
+            if state_data.get("segments"):
+                parts.append(f"**分段数量:** {len(state_data['segments'])} 段")
+            if state_data.get("prompts"):
+                parts.append(f"**图片提示词:** {len(state_data['prompts'])} 条")
+            analysis_md = "\n\n".join(parts) if parts else "暂无分析数据"
+        except (json.JSONDecodeError, OSError):
+            analysis_md = "分析数据加载失败"
+
+    # --- 生成的图片 ---
+    image_paths = []
+    images_dir = workspace / "images"
+    if images_dir.exists():
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+            image_paths.extend(sorted(images_dir.glob(ext)))
+    # 转为字符串路径列表
+    image_paths = [str(p) for p in sorted(image_paths)]
+
+    # --- 决策日志 (从 agent_decisions.json) ---
+    decisions_json = []
+    decisions_file = workspace / "agent_decisions.json"
+    if decisions_file.exists():
+        from src.agents.utils import load_decisions_from_file
+        decisions_json = load_decisions_from_file(decisions_file)
+
+    # --- 质量报告 ---
+    quality_md = ""
+    if state_file.exists():
+        try:
+            state_data = json.loads(state_file.read_text(encoding="utf-8"))
+            scores = state_data.get("quality_scores", [])
+            retry_counts = state_data.get("retry_counts", {})
+
+            parts = []
+            if scores:
+                numeric_scores = [s for s in scores if isinstance(s, (int, float))]
+                if numeric_scores:
+                    avg_score = sum(numeric_scores) / len(numeric_scores)
+                    min_score = min(numeric_scores)
+                    max_score = max(numeric_scores)
+                    parts.append("### 图片质量评分")
+                    parts.append(f"- **平均分:** {avg_score:.1f}")
+                    parts.append(f"- **最低分:** {min_score:.1f}")
+                    parts.append(f"- **最高分:** {max_score:.1f}")
+                    parts.append(f"- **评分数量:** {len(numeric_scores)}")
+
+            if retry_counts:
+                total_retries = sum(retry_counts.values())
+                parts.append("\n### 重试统计")
+                parts.append(f"- **总重试次数:** {total_retries}")
+                for k, v in retry_counts.items():
+                    if v > 0:
+                        parts.append(f"- {k}: {v} 次重试")
+
+            # 决策统计（按 Agent 分类）
+            if decisions_json:
+                agent_counts: dict[str, int] = {}
+                for d in decisions_json:
+                    agent_name = d.get("agent", "unknown")
+                    agent_counts[agent_name] = agent_counts.get(agent_name, 0) + 1
+                parts.append("\n### Agent 决策统计")
+                for agent_name, count in sorted(agent_counts.items()):
+                    parts.append(f"- **{agent_name}:** {count} 条决策")
+
+            quality_md = "\n".join(parts) if parts else "暂无质量数据"
+        except (json.JSONDecodeError, OSError):
+            quality_md = "质量数据加载失败"
+
+    return analysis_md, image_paths, decisions_json, quality_md
+
+
+# ---------------------------------------------------------------------------
 # Main video generation
 # ---------------------------------------------------------------------------
 def generate(
@@ -390,6 +497,7 @@ def generate(
     video_mode, videogen_backend,
     key_siliconflow, key_gemini, key_deepseek, key_openai, key_dashscope,
     key_kling, key_jimeng, key_minimax,
+    run_mode, budget_mode, quality_threshold,
     progress=gr.Progress(),
 ):
     # 1. Resolve input text
@@ -449,44 +557,111 @@ def generate(
             "use_image_as_first_frame": True,
         }
 
-    # 5. Run pipeline
-    from src.pipeline import Pipeline
+    # 5. 判断运行模式
+    is_agent_mode = run_mode == "Agent模式（智能质控）"
 
-    progress(0, desc="正在初始化...")
+    if is_agent_mode:
+        mode_desc = "Agent模式：智能分析 -> 质量控制 -> 生成"
+        if budget_mode:
+            mode_desc += "（省钱模式）"
+    else:
+        mode_desc = "经典模式：直接生成"
 
-    def progress_cb(stage, total, desc):
-        progress(stage / total if total > 0 else 0, desc=f"阶段 {stage}/{total}: {desc}")
+    progress(0, desc=f"正在初始化... [{mode_desc}]")
 
-    try:
-        pipe = Pipeline(input_file=input_file, config=config, resume=False)
-        output = pipe.run(progress_callback=progress_cb)
-    except Exception as e:
-        raise gr.Error(f"生成失败: {e}")
+    # 6. 创建并运行 Pipeline
+    if is_agent_mode:
+        from src.agent_pipeline import AgentPipeline
 
-    output_path = str(output)
-    return (
-        f"生成完成!\n输出文件: {output_path}",
-        output_path,
-        output_path,
-    )
+        def progress_cb(stage, total, desc):
+            stage_name = AGENT_STAGES.get(stage, desc)
+            progress(
+                stage / total if total > 0 else 0,
+                desc=f"阶段 {stage}/{total}: {stage_name}",
+            )
+
+        try:
+            pipe = AgentPipeline(
+                input_file=input_file,
+                config=config,
+                resume=False,
+                budget_mode=budget_mode,
+                quality_threshold=quality_threshold if quality_threshold else None,
+            )
+            output = pipe.run(progress_callback=progress_cb)
+            workspace_path = str(pipe.workspace)
+        except Exception as e:
+            raise gr.Error(f"Agent 模式生成失败: {e}")
+
+        output_path = str(output)
+
+        # 加载 Agent 分析结果
+        analysis_md, image_paths, decisions_json, quality_md = _load_agent_results(
+            workspace_path
+        )
+
+        return (
+            f"Agent 模式生成完成!\n{mode_desc}\n输出文件: {output_path}",
+            output_path,
+            output_path,
+            # Agent 专属输出
+            analysis_md,
+            image_paths,
+            decisions_json,
+            quality_md,
+            # 显示 Agent Tabs
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=True),
+        )
+    else:
+        from src.pipeline import Pipeline
+
+        def progress_cb(stage, total, desc):
+            progress(
+                stage / total if total > 0 else 0,
+                desc=f"阶段 {stage}/{total}: {desc}",
+            )
+
+        try:
+            pipe = Pipeline(input_file=input_file, config=config, resume=False)
+            output = pipe.run(progress_callback=progress_cb)
+        except Exception as e:
+            raise gr.Error(f"生成失败: {e}")
+
+        output_path = str(output)
+        return (
+            f"经典模式生成完成!\n输出文件: {output_path}",
+            output_path,
+            output_path,
+            # Agent 专属输出：空值
+            "",
+            [],
+            [],
+            "",
+            # 隐藏 Agent Tabs
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+        )
 
 
 # ---------------------------------------------------------------------------
 # Quick config helpers
 # ---------------------------------------------------------------------------
-# Maps quick-radio labels → advanced dropdown labels (must match LLM_CHOICES exactly)
+# Maps quick-radio labels -> advanced dropdown labels (must match LLM_CHOICES exactly)
 _QUICK_LLM_TO_DROPDOWN = {
     "Gemini（免费推荐）": "Gemini",
     "DeepSeek": "DeepSeek",
     "OpenAI": "OpenAI",
     "Ollama（本地免费）": "Ollama本地",
 }
-# Maps quick-radio labels → advanced dropdown labels (must match BACKEND_CHOICES exactly)
+# Maps quick-radio labels -> advanced dropdown labels (must match BACKEND_CHOICES exactly)
 _QUICK_IMG_TO_DROPDOWN = {
     "SiliconFlow": "SiliconFlow",
     "阿里云通义": "阿里云通义",
 }
-# Maps quick-radio labels → pipeline config values
+# Maps quick-radio labels -> pipeline config values
 _QUICK_LLM_TO_PROVIDER = {
     "Gemini（免费推荐）": "gemini",
     "DeepSeek": "deepseek",
@@ -538,7 +713,7 @@ def create_ui() -> gr.Blocks:
         with gr.Row(equal_height=False):
             # ============== Left column: Input ==============
             with gr.Column(scale=5, elem_classes="input-card"):
-                with gr.Tabs() as input_tabs:
+                with gr.Tabs():
                     # --- Tab 1: AI 写故事 ---
                     with gr.Tab("AI 写故事", id="tab_ai"):
                         topic_input = gr.Textbox(
@@ -687,6 +862,42 @@ def create_ui() -> gr.Blocks:
                     outputs=[videogen_backend],
                 )
 
+                # ====== 运行模式选择 ======
+                gr.HTML('<div class="section-title">运行模式</div>')
+                run_mode_radio = gr.Radio(
+                    label="运行模式",
+                    choices=RUN_MODE_CHOICES,
+                    value="经典模式（快速）",
+                    info="经典模式快速生成；Agent模式通过多个AI智能体协作，自动分析内容、控制质量",
+                )
+
+                # Agent 模式专属控件（默认隐藏）
+                with gr.Group(visible=False) as agent_options_group:
+                    with gr.Row():
+                        budget_mode_checkbox = gr.Checkbox(
+                            label="省钱模式",
+                            value=False,
+                            info="跳过质量检查，使用规则替代LLM分析，减少API调用费用",
+                        )
+                        quality_threshold_slider = gr.Slider(
+                            label="图片质量阈值",
+                            minimum=1,
+                            maximum=10,
+                            step=0.5,
+                            value=6.0,
+                            info="低于此分数的图片将自动重新生成",
+                        )
+
+                # 模式切换时显示/隐藏 Agent 选项
+                def _on_run_mode_change(mode):
+                    is_agent = mode == "Agent模式（智能质控）"
+                    return gr.update(visible=is_agent)
+                run_mode_radio.change(
+                    fn=_on_run_mode_change,
+                    inputs=[run_mode_radio],
+                    outputs=[agent_options_group],
+                )
+
                 generate_btn = gr.Button(
                     "生成视频",
                     variant="primary",
@@ -703,8 +914,35 @@ def create_ui() -> gr.Blocks:
                     lines=3,
                     elem_classes="status-area",
                 )
-                video_output = gr.Video(label="视频预览", height=400)
-                file_output = gr.File(label="下载视频")
+
+                with gr.Tabs():
+                    # --- 视频预览 Tab ---
+                    with gr.Tab("视频预览"):
+                        video_output = gr.Video(label="视频预览", height=400)
+                        file_output = gr.File(label="下载视频")
+
+                    # --- Agent 分析 Tab（默认隐藏）---
+                    with gr.Tab("Agent 分析", visible=False) as agent_tab:
+                        agent_analysis = gr.Markdown(
+                            label="内容分析",
+                            value="Agent 模式生成后将显示内容分析结果...",
+                        )
+                        agent_gallery = gr.Gallery(
+                            label="生成的图片",
+                            columns=3,
+                            height=300,
+                        )
+
+                    # --- 决策日志 Tab（默认隐藏）---
+                    with gr.Tab("决策日志", visible=False) as decision_tab:
+                        decision_display = gr.JSON(label="Agent 决策记录")
+
+                    # --- 质量报告 Tab（默认隐藏）---
+                    with gr.Tab("质量报告", visible=False) as quality_tab:
+                        quality_report = gr.Markdown(
+                            label="质量报告",
+                            value="Agent 模式生成后将显示质量报告...",
+                        )
 
         # ============== Advanced settings ==============
         with gr.Accordion("高级设置", open=False, elem_classes="settings-panel"):
@@ -939,7 +1177,7 @@ def create_ui() -> gr.Blocks:
             outputs=[txt_input],
         )
 
-        # Video generation
+        # Video generation — 包含 Agent 模式的新参数和扩展输出
         generate_btn.click(
             fn=generate,
             inputs=[
@@ -949,8 +1187,16 @@ def create_ui() -> gr.Blocks:
                 video_mode, videogen_backend,
                 key_siliconflow, key_gemini, key_deepseek, key_openai, key_dashscope,
                 key_kling, key_jimeng, key_minimax,
+                # Agent 模式新参数
+                run_mode_radio, budget_mode_checkbox, quality_threshold_slider,
             ],
-            outputs=[status_box, video_output, file_output],
+            outputs=[
+                status_box, video_output, file_output,
+                # Agent 专属输出
+                agent_analysis, agent_gallery, decision_display, quality_report,
+                # Tab 可见性控制
+                agent_tab, decision_tab, quality_tab,
+            ],
         )
 
     return app
