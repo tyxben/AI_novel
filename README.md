@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.4.0-orange)]()
+[![Version](https://img.shields.io/badge/version-v0.7.0-orange)]()
 
 ---
 
@@ -13,11 +13,14 @@
 - **AI 自动写故事** — LLM 智能分段 + 自动生成画面描述，小说秒变分镜脚本
 - **多 LLM 后端** — Gemini（免费）/ DeepSeek / OpenAI / Ollama（本地离线），自动检测可用 Key
 - **多图片生成后端** — SiliconFlow（免费）/ 阿里云万相 / Together.ai / 本地 Stable Diffusion
-- **AI 视频片段生成** `NEW` — 可灵 Kling / 即梦 Seedance / MiniMax 海螺 / OpenAI Sora，让画面动起来
+- **AI 视频片段生成** — 可灵 Kling / 即梦 Seedance / MiniMax 海螺，让画面动起来
+- **Agent 智能模式** `NEW` — LangGraph 多 Agent 编排，5 个专职 Agent（导演/内容分析/美术总监/配音导演/剪辑师），自动质量评估与重试优化
+- **省钱模式** — 规则替代 LLM，跳过质量检查，成本降低约 40%
+- **决策追踪** — 全流程决策日志，可视化审计每个 Agent 的判断依据
 - **免费 TTS 配音** — 微软 edge-tts 高质量语音合成 + SRT 字幕自动生成
 - **H.265 编码** — 相比 H.264 体积减少约一半，画质不变
 - **Ken Burns 特效** — 图片自动缩放平移，告别静态幻灯片感
-- **Web UI** — 基于 Gradio 的可视化界面，无需命令行知识
+- **Web UI** — 基于 Gradio 的可视化界面，支持 Agent 分析 / 决策日志 / 质量报告 等标签页
 - **CLI 命令行** — Click 驱动的完整 CLI，适合批量处理和脚本集成
 - **断点续传** — 中断后从上次进度继续，不浪费已完成的工作
 - **桌面应用打包** — 支持 PyInstaller 打包为独立可执行文件
@@ -38,6 +41,44 @@
 | **画面一致性** | 高（基于同一张图片） | 中等（AI 生成有随机性） |
 
 两种模式可在配置文件中一键切换。未配置 `videogen` 时默认使用免费的静态图模式。
+
+---
+
+## Agent 智能模式
+
+v0.7.0 新增基于 LangGraph 的多 Agent 编排系统，在经典流水线基础上增加智能决策层：
+
+### 5 个专职 Agent
+
+| Agent | 职责 | 关键能力 |
+|-------|------|---------|
+| **Director** 导演 | 任务分析与成本估算 | 纯逻辑，无 LLM 调用 |
+| **ContentAnalyzer** 内容分析 | 题材分类、角色提取、风格推荐 | 武侠→水墨、都市→写实、玄幻→动漫 |
+| **ArtDirector** 美术总监 | 图片生成 + 质量闭环 | GPT-4V/Gemini Vision 评分，不达标自动重试 |
+| **VoiceDirector** 配音导演 | 情感分析 + TTS 调参 | 紧张→语速+10%，悲伤→语速-15% |
+| **Editor** 剪辑师 | FFmpeg 视频合成 | 收集所有资产，输出最终视频 |
+
+### 使用方式
+
+```bash
+# CLI
+python main.py run input/novel.txt --mode agent
+python main.py run input/novel.txt --mode agent --budget-mode
+python main.py run input/novel.txt --mode agent --quality-threshold 7.0
+
+# Web UI
+# 在界面中选择"Agent模式（智能质控）"即可
+```
+
+### 省钱模式 vs 标准模式
+
+| 对比项 | 标准模式 | 省钱模式 |
+|--------|---------|---------|
+| 题材分类 | LLM 智能分析 | 正则关键词匹配 |
+| 角色提取 | LLM 提取 | 正则模式匹配 |
+| 图片质量检查 | GPT-4V/Gemini Vision | 跳过 |
+| 情感分析 | LLM 分析 | 正则规则 |
+| 成本（10段） | ~¥1.0 | ~¥0.6 |
 
 ---
 
@@ -79,7 +120,9 @@ pip install -e '.[llm]'        # + OpenAI / DeepSeek
 pip install -e '.[gemini]'     # + Google Gemini
 pip install -e '.[ollama]'     # + Ollama 本地 LLM
 pip install -e '.[cloud-image]' # + 云端生图（SiliconFlow / 阿里云）
-pip install -e '.[cloud-video]' # + AI 视频生成（可灵 / 即梦 / MiniMax / Sora）
+pip install -e '.[cloud-video]' # + AI 视频生成（可灵 / 即梦 / MiniMax）
+pip install -e '.[agent]'     # + LangGraph Agent 智能模式
+pip install -e '.[agent-gemini]' # + Agent + Gemini LLM
 pip install -e '.[web]'        # + Gradio Web UI
 pip install -e '.[all]'        # 全部安装
 ```
@@ -112,6 +155,15 @@ python main.py segment input/novel.txt
 
 # 查看处理进度
 python main.py status workspace/novel/
+
+# Agent 智能模式
+python main.py run input/novel.txt --mode agent
+
+# Agent + 省钱模式
+python main.py run input/novel.txt --mode agent --budget-mode
+
+# 查看决策日志
+python main.py status workspace/novel/ --decisions
 ```
 
 ---
@@ -153,7 +205,7 @@ imagegen:
 
 ```yaml
 videogen:
-  backend: kling        # kling | seedance | minimax | sora
+  backend: kling        # kling | seedance | minimax
   duration: 5           # 视频时长（秒）
   aspect_ratio: "9:16"  # 竖屏
   mode: std             # std | pro（仅 kling）
@@ -161,6 +213,8 @@ videogen:
   poll_interval: 10     # 轮询间隔（秒）
   poll_timeout: 300     # 轮询超时（秒）
 ```
+
+详细的视频生成 API 对比见 `docs/videogen-research.md`
 
 ### 环境变量（API Key）
 
@@ -170,7 +224,7 @@ videogen:
 # ---- LLM（至少设一个，用于智能分段和 Prompt 生成）----
 export GEMINI_API_KEY=xxx         # Google Gemini（免费）
 export DEEPSEEK_API_KEY=xxx       # DeepSeek
-export OPENAI_API_KEY=xxx         # OpenAI GPT / Sora
+export OPENAI_API_KEY=xxx         # OpenAI GPT
 
 # ---- 图片生成（至少设一个）----
 export SILICONFLOW_API_KEY=xxx    # 硅基流动（免费）
@@ -181,29 +235,9 @@ export TOGETHER_API_KEY=xxx       # Together.ai
 export KLING_API_KEY=xxx          # 可灵 Kling
 export SEEDANCE_API_KEY=xxx       # 即梦 Seedance（火山方舟）
 export MINIMAX_API_KEY=xxx        # MiniMax 海螺
-# Sora 使用 OPENAI_API_KEY
 ```
 
 也支持在项目根目录创建 `.env` 文件配置环境变量。
-
----
-
-## 视频生成 API 对比
-
-| 特性 | 可灵 Kling | 即梦 Seedance | MiniMax 海螺 | OpenAI Sora |
-|------|-----------|--------------|-------------|-------------|
-| **厂商** | 快手 | 字节跳动 | MiniMax | OpenAI |
-| **最新模型** | Kling-V3-Omni | Seedance 2.0 | Hailuo 2.3 | Sora-2 |
-| **最大时长** | 10s（续写 3min） | 15s | 10s | 25s (pro) |
-| **最大分辨率** | 1080p | 2K | 1080p | 1080p |
-| **9:16 竖屏** | 支持 | 支持 | 支持 | 支持 |
-| **图生视频** | 支持 | 支持（多图） | 支持 | 支持 |
-| **原生音频** | V3 支持 | 支持 | 不支持 | 不支持 |
-| **5s 视频价格** | ~$0.21 (std) | ~$0.10-0.40 | ~$0.25 (768p) | ~$0.50 |
-| **10s 视频价格** | ~$0.42 (std) | ~$0.20-0.80 | ~$0.50 (768p) | ~$1.00 |
-| **API 文档** | 完善 | 较新 | 完善 | 完善 |
-
-> 提示：价格仅供参考，以各平台官方定价为准。推荐从可灵或 MiniMax 开始尝试，性价比较高。
 
 ---
 
@@ -223,6 +257,14 @@ AI_novel/
 │   ├── config_manager.py    # YAML 配置加载/验证
 │   ├── checkpoint.py        # 断点续传（JSON）
 │   ├── logger.py            # Rich 日志
+│   ├── agents/              # Agent 智能编排（LangGraph）
+│   │   ├── graph.py         #   状态图构建 + 断点续传
+│   │   ├── director.py      #   导演 Agent
+│   │   ├── content_analyzer.py  # 内容分析 Agent
+│   │   ├── art_director.py      # 美术总监 Agent
+│   │   ├── voice_director.py    # 配音导演 Agent
+│   │   └── editor.py       #   剪辑师 Agent
+│   ├── tools/               # Tool 层（封装执行模块）
 │   ├── llm/                 # LLM 统一抽象层
 │   │   ├── llm_client.py    #   ABC + 工厂 + 自动检测
 │   │   ├── openai_backend.py    # OpenAI / DeepSeek
@@ -241,8 +283,7 @@ AI_novel/
 │   │   ├── base_backend.py      # 公共轮询逻辑
 │   │   ├── kling_backend.py     # 可灵
 │   │   ├── seedance_backend.py  # 即梦
-│   │   ├── minimax_backend.py   # MiniMax 海螺
-│   │   └── sora_backend.py      # OpenAI Sora
+│   │   └── minimax_backend.py   # MiniMax 海螺
 │   ├── tts/                 # edge-tts 配音 + SRT 字幕
 │   ├── video/               # FFmpeg 视频合成 + Ken Burns 特效
 │   └── utils/               # 工具函数（FFmpeg 检测等）
@@ -294,7 +335,8 @@ AI_novel/
 | TTS | edge-tts（微软免费语音合成） |
 | LLM | OpenAI / DeepSeek / Google Gemini / Ollama |
 | 图片生成 | SiliconFlow / 阿里云万相 / Together.ai / Diffusers (本地 SD) |
-| 视频生成 | 可灵 Kling / 即梦 Seedance / MiniMax 海螺 / OpenAI Sora |
+| 视频生成 | 可灵 Kling / 即梦 Seedance / MiniMax 海螺 |
+| 智能编排 | LangGraph + 5 Agent 协作 |
 | 视频合成 | FFmpeg（H.265 编码、Ken Burns 特效、字幕烧录） |
 | 日志 | Rich |
 | 配置 | PyYAML |
@@ -365,9 +407,21 @@ elif backend == "xxx":
 | `.[ollama]` | + Ollama 客户端 | 本地 LLM |
 | `.[cloud-image]` | + httpx | 云端生图 |
 | `.[cloud-video]` | + httpx | AI 视频生成 |
+| `.[agent]` | + LangGraph | Agent 智能模式 |
+| `.[agent-gemini]` | + LangChain Gemini | Agent + Gemini LLM |
 | `.[gpu]` | + torch + diffusers | 本地 Stable Diffusion |
 | `.[build]` | + PyInstaller | 桌面应用打包 |
 | `.[all]` | 全部安装 | 开发环境 |
+
+---
+
+## 更新计划
+
+- [ ] 动态视频拼接 — AI 视频片段（可灵/即梦/MiniMax）替代静态贴图
+- [ ] 多角色语音 — 不同角色使用不同音色
+- [ ] 批量处理 — 支持文件夹批量转换
+- [ ] Agent 条件路由 — 根据内容自动选择最优生成策略
+- [ ] 更多 LLM/图片后端 — 持续接入新的 AI 服务
 
 ---
 
