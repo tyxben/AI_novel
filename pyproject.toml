@@ -72,4 +72,5 @@ packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.videog
 [tool.pytest.ini_options]
 markers = [
     "integration: real API integration tests (require API keys)",
+    "e2e: end-to-end Playwright browser tests",
 ]
