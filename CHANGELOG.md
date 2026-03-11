@@ -1,5 +1,27 @@
 # 更新日志
 
+## [0.8.0] - 2026-03-11
+
+### 新增
+- **Sora 2 视频生成支持**
+  - Agent 模式完整支持 AI 动态视频生成 (ArtDirector → VideoGenTool)
+  - Sora 2 原生竖屏 720x1280，无需横转竖裁剪
+  - 自动生成同步音频（对话、音效、环境音）
+  - 支持 sora-2 ($0.10/s) 和 sora-2-pro ($0.30~0.50/s)
+  - 分辨率自动验证 + 时长对齐到支持的档位
+- **VideoGenTool** - 新增视频生成工具，封装 videogen 模块供 Agent 调用
+- **drawtext 字幕备选方案** - FFmpeg 缺少 libass 时自动使用 drawtext 滤镜渲染字幕
+
+### 修复
+- 视频合成横转竖使用 crop 填充替代 pad 黑边
+- Sora API 参数修正: `input_reference`(非 image)、JSON 格式纯文本请求
+- `pipeline_plan` 为 None 时的 AttributeError
+- FFmpeg subtitles filter 检测 + 优雅降级
+
+### 变更
+- 默认 Sora 分辨率从 1280x720 改为 720x1280 (原生竖屏)
+- 升级 FFmpeg 依赖建议: homebrew-ffmpeg/ffmpeg (含 libass + drawtext)
+
 ## [0.7.0] - 2026-03-10
 
 ### 新增
