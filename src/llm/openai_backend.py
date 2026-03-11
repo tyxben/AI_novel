@@ -40,6 +40,7 @@ class OpenAIBackend(LLMClient):
         messages: list[dict],
         temperature: float = 0.7,
         json_mode: bool = False,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         client = self._get_client()
         kwargs: dict = {
@@ -49,6 +50,8 @@ class OpenAIBackend(LLMClient):
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
 
         response = client.chat.completions.create(**kwargs)
         choice = response.choices[0]

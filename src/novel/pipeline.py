@@ -1,0 +1,628 @@
+"""NovelPipeline - 小说创作流水线编排
+
+编排 init graph 和 chapter graph，管理 workspace、checkpoint、文件持久化。
+所有方法均为 SYNC。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any
+
+from src.novel.agents.graph import build_chapter_graph, build_init_graph
+from src.novel.config import NovelConfig, load_novel_config
+from src.novel.storage.file_manager import FileManager
+
+log = logging.getLogger("novel")
+
+# ---------------------------------------------------------------------------
+# 默认工作目录
+# ---------------------------------------------------------------------------
+
+_DEFAULT_WORKSPACE = "workspace"
+
+
+# ---------------------------------------------------------------------------
+# NovelPipeline
+# ---------------------------------------------------------------------------
+
+
+class NovelPipeline:
+    """小说创作流水线 - 编排 init / chapter 两阶段图执行。"""
+
+    def __init__(
+        self,
+        config: NovelConfig | None = None,
+        workspace: str | None = None,
+    ) -> None:
+        self.config = config or load_novel_config()
+        self.workspace = workspace or _DEFAULT_WORKSPACE
+        self.file_manager: FileManager | None = None
+
+    # ------------------------------------------------------------------
+    # Lazy init helpers
+    # ------------------------------------------------------------------
+
+    def _get_file_manager(self) -> FileManager:
+        if self.file_manager is None:
+            self.file_manager = FileManager(self.workspace)
+        return self.file_manager
+
+    def _novel_dir(self, novel_id: str) -> Path:
+        return Path(self.workspace) / "novels" / novel_id
+
+    def _checkpoint_path(self, novel_id: str) -> Path:
+        return self._novel_dir(novel_id) / "checkpoint.json"
+
+    # ------------------------------------------------------------------
+    # Checkpoint
+    # ------------------------------------------------------------------
+
+    def _save_checkpoint(self, novel_id: str, state: dict) -> None:
+        """Save pipeline state as checkpoint JSON (atomic write)."""
+        ckpt_path = self._checkpoint_path(novel_id)
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Filter out non-serializable fields
+        serializable = {}
+        skip_keys = {"memory"}
+        for k, v in state.items():
+            if k in skip_keys:
+                continue
+            try:
+                json.dumps(v, ensure_ascii=False)
+                serializable[k] = v
+            except (TypeError, ValueError):
+                log.debug("跳过不可序列化字段: %s", k)
+
+        # Atomic write: temp file + rename to prevent corruption on crash
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(ckpt_path.parent), suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(serializable, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, str(ckpt_path))
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _load_checkpoint(self, novel_id: str) -> dict | None:
+        """Load checkpoint JSON. Returns None if not found."""
+        ckpt_path = self._checkpoint_path(novel_id)
+        if not ckpt_path.exists():
+            return None
+        with open(ckpt_path, encoding="utf-8") as f:
+            data = json.load(f)
+        # JSON round-trip converts int dict keys to strings; restore retry_counts
+        if "retry_counts" in data and isinstance(data["retry_counts"], dict):
+            data["retry_counts"] = {
+                int(k): v for k, v in data["retry_counts"].items()
+            }
+        return data
+
+    # ------------------------------------------------------------------
+    # create_novel
+    # ------------------------------------------------------------------
+
+    def create_novel(
+        self,
+        genre: str,
+        theme: str,
+        target_words: int,
+        style: str = "",
+        template: str = "",
+        custom_ideas: str = "",
+    ) -> dict:
+        """Create a new novel project.
+
+        1. Initialize workspace (FileManager)
+        2. Run init graph (outline + world + characters)
+        3. Save initial state to checkpoint
+
+        Returns:
+            Project info dict with keys: novel_id, workspace, outline, characters, world_setting
+        """
+        novel_id = f"novel_{uuid.uuid4().hex[:8]}"
+        fm = self._get_file_manager()
+
+        log.info("创建小说项目: %s (题材=%s, 主题=%s, 目标字数=%d)", novel_id, genre, theme, target_words)
+
+        # Build initial state
+        state: dict[str, Any] = {
+            "genre": genre,
+            "theme": theme,
+            "target_words": target_words,
+            "style_name": style,
+            "template": template,
+            "custom_style_reference": custom_ideas if custom_ideas else None,
+            "novel_id": novel_id,
+            "workspace": self.workspace,
+            "config": self.config.model_dump(),
+            "current_chapter": 0,
+            "total_chapters": 0,
+            "review_interval": self.config.human_in_loop.review_interval,
+            "silent_mode": self.config.human_in_loop.silent_mode,
+            "auto_approve_threshold": self.config.quality.auto_approve_threshold,
+            "max_retries": self.config.quality.max_retries,
+            "outline": None,
+            "world_setting": None,
+            "characters": [],
+            "chapters": [],
+            "decisions": [],
+            "errors": [],
+            "completed_nodes": [],
+            "retry_counts": {},
+            "should_continue": True,
+        }
+
+        # Run init graph
+        init_graph = build_init_graph()
+        state = init_graph.invoke(state)
+
+        # Save novel metadata
+        novel_data = {
+            "novel_id": novel_id,
+            "title": f"{genre} - {theme}",
+            "genre": genre,
+            "theme": theme,
+            "target_words": target_words,
+            "status": "initialized",
+            "current_chapter": 0,
+            "outline": state.get("outline"),
+            "style_name": state.get("style_name", style),
+            "template": state.get("template", template),
+        }
+        fm.save_novel(novel_id, novel_data)
+
+        # Save checkpoint
+        self._save_checkpoint(novel_id, state)
+
+        project_path = str(self._novel_dir(novel_id))
+        log.info("项目创建完成: %s", project_path)
+
+        return {
+            "novel_id": novel_id,
+            "workspace": project_path,
+            "outline": state.get("outline"),
+            "characters": state.get("characters", []),
+            "world_setting": state.get("world_setting"),
+            "total_chapters": state.get("total_chapters", 0),
+            "errors": state.get("errors", []),
+        }
+
+    # ------------------------------------------------------------------
+    # generate_chapters
+    # ------------------------------------------------------------------
+
+    def generate_chapters(
+        self,
+        project_path: str,
+        start_chapter: int = 1,
+        end_chapter: int | None = None,
+        silent: bool = False,
+    ) -> dict:
+        """Generate chapters for an existing project.
+
+        1. Load checkpoint
+        2. For each chapter: run chapter graph
+        3. After each chapter: save checkpoint, save chapter text
+        4. Every N chapters: pause for review (unless silent mode)
+
+        Returns:
+            Generation summary dict.
+        """
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+
+        # Load checkpoint
+        state = self._load_checkpoint(novel_id)
+        if state is None:
+            raise FileNotFoundError(f"找不到项目检查点: {project_path}")
+
+        outline = state.get("outline")
+        if not outline:
+            raise ValueError("项目大纲不存在，请先运行 create_novel")
+
+        total_chapters = len(outline.get("chapters", []))
+        if end_chapter is None:
+            end_chapter = total_chapters
+
+        # Determine effective silent mode
+        effective_silent = silent or state.get("silent_mode", False)
+        review_interval = state.get("review_interval", self.config.human_in_loop.review_interval)
+
+        chapters_generated = []
+        chapter_graph = build_chapter_graph()
+
+        for ch_num in range(start_chapter, end_chapter + 1):
+            log.info("=== 生成第 %d/%d 章 ===", ch_num, total_chapters)
+
+            # Set up current chapter in state
+            ch_outline = self._get_chapter_outline(outline, ch_num)
+            if ch_outline is None:
+                log.warning("第%d章大纲不存在，跳过", ch_num)
+                continue
+
+            state["current_chapter"] = ch_num
+            state["current_chapter_outline"] = ch_outline
+            state["current_chapter_text"] = None
+            state["current_chapter_quality"] = None
+            state["current_scenes"] = None
+
+            # Run chapter graph
+            try:
+                state = chapter_graph.invoke(state)
+            except Exception as exc:
+                log.error("第%d章生成失败: %s", ch_num, exc)
+                state.setdefault("errors", []).append(
+                    {"agent": "pipeline", "message": f"第{ch_num}章生成失败: {exc}"}
+                )
+                # Save checkpoint even on failure
+                self._save_checkpoint(novel_id, state)
+                continue
+
+            # Save chapter
+            chapter_text = state.get("current_chapter_text", "")
+            if chapter_text:
+                ch_data = {
+                    "chapter_number": ch_num,
+                    "title": ch_outline.get("title", f"第{ch_num}章"),
+                    "full_text": chapter_text,
+                    "word_count": len(chapter_text),
+                    "status": "draft",
+                }
+                fm.save_chapter(novel_id, ch_num, ch_data)
+                fm.save_chapter_text(novel_id, ch_num, chapter_text)
+
+                # Append to chapters list in state
+                chapters = state.get("chapters", [])
+                chapters.append(ch_data)
+                state["chapters"] = chapters
+
+                chapters_generated.append(ch_num)
+
+            # Update novel metadata
+            novel_data = fm.load_novel(novel_id) or {}
+            novel_data["current_chapter"] = ch_num
+            novel_data["status"] = "generating"
+            fm.save_novel(novel_id, novel_data)
+
+            # Save checkpoint
+            self._save_checkpoint(novel_id, state)
+
+            # Review pause
+            if (
+                not effective_silent
+                and review_interval > 0
+                and ch_num % review_interval == 0
+                and ch_num < end_chapter
+            ):
+                log.info("已生成 %d 章，暂停审核（静默模式可跳过）", ch_num)
+                # In CLI mode, the caller decides whether to pause
+                # For now, just log and continue
+
+        # Mark complete if all chapters done
+        if end_chapter >= total_chapters:
+            novel_data = fm.load_novel(novel_id) or {}
+            novel_data["status"] = "completed"
+            fm.save_novel(novel_id, novel_data)
+
+        return {
+            "novel_id": novel_id,
+            "chapters_generated": chapters_generated,
+            "total_generated": len(chapters_generated),
+            "errors": state.get("errors", []),
+        }
+
+    # ------------------------------------------------------------------
+    # resume_novel
+    # ------------------------------------------------------------------
+
+    def resume_novel(self, project_path: str) -> dict:
+        """Resume from checkpoint. Loads state and continues generation.
+
+        Returns:
+            Generation summary dict.
+        """
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+
+        state = self._load_checkpoint(novel_id)
+        if state is None:
+            raise FileNotFoundError(f"找不到项目检查点: {project_path}")
+
+        outline = state.get("outline")
+        if not outline:
+            raise ValueError("项目大纲不存在")
+
+        total_chapters = len(outline.get("chapters", []))
+        completed_chapters = fm.list_chapters(novel_id)
+        if completed_chapters:
+            start_chapter = max(completed_chapters) + 1
+        else:
+            start_chapter = 1
+
+        if start_chapter > total_chapters:
+            return {
+                "novel_id": novel_id,
+                "message": "所有章节已生成完成",
+                "chapters_generated": [],
+                "total_generated": 0,
+            }
+
+        log.info("从第%d章恢复生成（共%d章）", start_chapter, total_chapters)
+        return self.generate_chapters(
+            project_path, start_chapter=start_chapter, silent=True
+        )
+
+    # ------------------------------------------------------------------
+    # export_novel
+    # ------------------------------------------------------------------
+
+    def export_novel(
+        self, project_path: str, output_path: str | None = None
+    ) -> str:
+        """Export all chapters as a single text file.
+
+        Returns:
+            Output file path.
+        """
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+        result = fm.export_novel_txt(novel_id, output_path)
+        return str(result)
+
+    # ------------------------------------------------------------------
+    # get_status
+    # ------------------------------------------------------------------
+
+    def get_status(self, project_path: str) -> dict:
+        """Get project status (current chapter, total, word count, etc.)."""
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+        status = fm.load_status(novel_id)
+
+        # Enrich with checkpoint data
+        ckpt = self._load_checkpoint(novel_id)
+        if ckpt:
+            status["characters_count"] = len(ckpt.get("characters", []))
+            status["has_world_setting"] = ckpt.get("world_setting") is not None
+            status["errors_count"] = len(ckpt.get("errors", []))
+            status["decisions_count"] = len(ckpt.get("decisions", []))
+
+        return status
+
+    # ------------------------------------------------------------------
+    # apply_feedback
+    # ------------------------------------------------------------------
+
+    def apply_feedback(
+        self,
+        project_path: str,
+        feedback_text: str,
+        chapter_number: int | None = None,
+        max_propagation: int = 10,
+        dry_run: bool = False,
+    ) -> dict:
+        """应用读者反馈，重写受影响章节。
+
+        Args:
+            project_path: 项目路径
+            feedback_text: 反馈文本
+            chapter_number: 针对的章节号（None=全局）
+            max_propagation: 最大传播章节数
+            dry_run: 仅分析不重写
+
+        Returns:
+            dict with analysis, rewritten_chapters, etc.
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.novel.agents.feedback_analyzer import FeedbackAnalyzer
+        from src.novel.agents.writer import Writer
+        from src.novel.models.character import CharacterProfile
+        from src.novel.models.novel import ChapterOutline
+        from src.novel.models.world import WorldSetting
+        from src.novel.utils import truncate_text
+
+        # Load state
+        novel_id = Path(project_path).name
+        state = self._load_checkpoint(novel_id)
+        if state is None:
+            raise FileNotFoundError(f"找不到项目检查点: {project_path}")
+
+        # Initialize LLM
+        llm_config = state.get("config", {}).get("llm", {})
+        llm = create_llm_client(llm_config)
+
+        # Analyze feedback
+        analyzer = FeedbackAnalyzer(llm)
+        outline_chapters = state.get("outline", {}).get("chapters", [])
+        characters = state.get("characters", [])
+
+        analysis = analyzer.analyze(
+            feedback_text=feedback_text,
+            chapter_number=chapter_number,
+            outline_chapters=outline_chapters,
+            characters=characters,
+            max_propagation=max_propagation,
+        )
+
+        log.info(
+            "反馈分析完成: 类型=%s, 严重度=%s, 直接修改%d章, 传播%d章",
+            analysis.get("feedback_type"),
+            analysis.get("severity"),
+            len(analysis.get("target_chapters", [])),
+            len(analysis.get("propagation_chapters", [])),
+        )
+
+        result: dict = {
+            "analysis": analysis,
+            "rewritten_chapters": [],
+            "dry_run": dry_run,
+        }
+
+        if dry_run:
+            return result
+
+        # Prepare writer
+        writer = Writer(llm)
+        fm = self._get_file_manager()
+
+        # Restore models
+        char_profiles: list[CharacterProfile] = []
+        for c in characters:
+            try:
+                char_profiles.append(
+                    CharacterProfile(**c) if isinstance(c, dict) else c
+                )
+            except Exception:
+                pass
+
+        world_data = state.get("world_setting")
+        if world_data:
+            try:
+                world_setting = (
+                    WorldSetting(**world_data)
+                    if isinstance(world_data, dict)
+                    else world_data
+                )
+            except Exception:
+                world_setting = WorldSetting(era="未知", location="未知")
+        else:
+            world_setting = WorldSetting(era="未知", location="未知")
+
+        style_name = state.get("style_name", "webnovel.shuangwen")
+
+        # Build chapter map for context
+        chapters_done = state.get("chapters", [])
+        chapter_texts: dict[int, str] = {}
+        for ch_data in chapters_done:
+            ch_num = ch_data.get("chapter_number")
+            ch_text = ch_data.get("full_text", "")
+            if ch_num and ch_text:
+                chapter_texts[ch_num] = ch_text
+        # Also load from files
+        for ch_num in range(1, len(outline_chapters) + 1):
+            if ch_num not in chapter_texts:
+                text = fm.load_chapter_text(novel_id, ch_num)
+                if text:
+                    chapter_texts[ch_num] = text
+
+        # Rewrite chapters in order
+        target_set = set(analysis.get("target_chapters", []))
+        rewrite_queue = sorted(
+            set(
+                analysis.get("target_chapters", [])
+                + analysis.get("propagation_chapters", [])
+            )
+        )
+
+        rewrite_instructions = analysis.get("rewrite_instructions", {})
+
+        for ch_num in rewrite_queue:
+            original_text = chapter_texts.get(ch_num)
+            if not original_text:
+                log.warning("第%d章无原文，跳过重写", ch_num)
+                continue
+
+            # Save revision backup
+            fm.save_chapter_revision(novel_id, ch_num, original_text)
+
+            # Get outline for this chapter
+            ch_outline_data = next(
+                (
+                    ch
+                    for ch in outline_chapters
+                    if ch.get("chapter_number") == ch_num
+                ),
+                None,
+            )
+            if not ch_outline_data:
+                log.warning("第%d章无大纲，跳过重写", ch_num)
+                continue
+
+            try:
+                ch_outline = ChapterOutline(**ch_outline_data)
+            except Exception:
+                log.warning("第%d章大纲解析失败，跳过", ch_num)
+                continue
+
+            # Context from previous chapter
+            context = ""
+            if ch_num > 1 and (ch_num - 1) in chapter_texts:
+                context = truncate_text(chapter_texts[ch_num - 1], 2000)
+
+            # Get instruction
+            instruction = rewrite_instructions.get(
+                str(ch_num), rewrite_instructions.get(ch_num, feedback_text)
+            )
+            is_propagation = ch_num not in target_set
+
+            log.info(
+                "重写第%d章 (%s)...",
+                ch_num,
+                "传播调整" if is_propagation else "直接修改",
+            )
+
+            try:
+                new_text = writer.rewrite_chapter(
+                    original_text=original_text,
+                    rewrite_instruction=instruction,
+                    chapter_outline=ch_outline,
+                    characters=char_profiles,
+                    world_setting=world_setting,
+                    context=context,
+                    style_name=style_name,
+                    is_propagation=is_propagation,
+                )
+
+                # Save rewritten chapter
+                fm.save_chapter_text(novel_id, ch_num, new_text)
+                chapter_texts[ch_num] = new_text  # update for subsequent chapters' context
+
+                result["rewritten_chapters"].append(
+                    {
+                        "chapter_number": ch_num,
+                        "original_chars": len(original_text),
+                        "new_chars": len(new_text),
+                        "is_propagation": is_propagation,
+                    }
+                )
+
+                log.info(
+                    "第%d章重写完成: %d → %d 字",
+                    ch_num,
+                    len(original_text),
+                    len(new_text),
+                )
+
+            except Exception as exc:
+                log.error("第%d章重写失败: %s", ch_num, exc)
+                result.setdefault("errors", []).append(
+                    {
+                        "chapter": ch_num,
+                        "error": str(exc),
+                    }
+                )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_chapter_outline(self, outline: dict, chapter_number: int) -> dict | None:
+        """Get chapter outline by chapter number."""
+        for ch in outline.get("chapters", []):
+            if ch.get("chapter_number") == chapter_number:
+                return ch
+        return None

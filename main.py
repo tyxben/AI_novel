@@ -203,5 +203,142 @@ def _show_decisions(workspace: Path) -> None:
         console.print(r_table)
 
 
+# ---------------------------------------------------------------------------
+# novel 命令组 - AI 长篇小说写作
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def novel():
+    """AI 长篇小说写作"""
+    pass
+
+
+@novel.command("write")
+@click.option("--genre", default="玄幻", help="题材（玄幻/都市/武侠/悬疑等）")
+@click.option("--theme", required=True, help="主题（如：商战复仇、修仙逆袭）")
+@click.option("--target-words", type=int, default=100000, help="目标字数")
+@click.option("--style", default="", help="风格预设名称")
+@click.option("--template", default="", help="大纲模板名称")
+@click.option("--silent", is_flag=True, help="静默模式（不暂停审核）")
+@click.option("--workspace", "-w", type=click.Path(), default=None, help="工作目录")
+def write_novel(genre: str, theme: str, target_words: int,
+                style: str, template: str, silent: bool,
+                workspace: str | None):
+    """创建并生成小说"""
+    try:
+        from src.novel.pipeline import NovelPipeline
+
+        pipe = NovelPipeline(workspace=workspace)
+
+        console.print(f"\n[bold cyan]创建小说项目...[/]")
+        console.print(f"  题材: {genre}")
+        console.print(f"  主题: {theme}")
+        console.print(f"  目标字数: {target_words:,}")
+
+        result = pipe.create_novel(
+            genre=genre,
+            theme=theme,
+            target_words=target_words,
+            style=style,
+            template=template,
+        )
+
+        novel_id = result["novel_id"]
+        project_path = result["workspace"]
+        total = result.get("total_chapters", 0)
+
+        console.print(f"\n[green]项目创建成功: {project_path}[/]")
+        console.print(f"  总章节数: {total}")
+        console.print(f"  角色数: {len(result.get('characters', []))}")
+
+        if result.get("errors"):
+            for err in result["errors"]:
+                console.print(f"  [yellow]警告: {err.get('message', '')}[/]")
+
+        if total > 0:
+            console.print(f"\n[bold cyan]开始生成章节...[/]")
+            gen_result = pipe.generate_chapters(
+                project_path, silent=silent
+            )
+            console.print(
+                f"\n[bold green]生成完成: {gen_result['total_generated']} 章[/]"
+            )
+    except Exception as e:
+        log.error("小说创建失败: %s", e)
+        raise click.Abort()
+
+
+@novel.command("resume")
+@click.argument("project_path", type=click.Path(exists=True))
+def resume_novel(project_path: str):
+    """恢复小说创作"""
+    try:
+        from src.novel.pipeline import NovelPipeline
+
+        pipe = NovelPipeline(workspace=str(Path(project_path).parent.parent))
+        result = pipe.resume_novel(project_path)
+
+        console.print(f"\n[bold green]恢复生成完成: {result.get('total_generated', 0)} 章[/]")
+        if result.get("errors"):
+            for err in result["errors"]:
+                console.print(f"  [yellow]警告: {err.get('message', '')}[/]")
+    except Exception as e:
+        log.error("恢复失败: %s", e)
+        raise click.Abort()
+
+
+@novel.command("export")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--output", "-o", default=None, help="输出文件路径")
+def export_novel(project_path: str, output: str | None):
+    """导出小说为文本文件"""
+    try:
+        from src.novel.pipeline import NovelPipeline
+
+        pipe = NovelPipeline(workspace=str(Path(project_path).parent.parent))
+        result = pipe.export_novel(project_path, output)
+
+        console.print(f"\n[bold green]导出完成: {result}[/]")
+    except Exception as e:
+        log.error("导出失败: %s", e)
+        raise click.Abort()
+
+
+@novel.command("status")
+@click.argument("project_path", type=click.Path(exists=True))
+def novel_status(project_path: str):
+    """查看小说项目状态"""
+    try:
+        from src.novel.pipeline import NovelPipeline
+
+        pipe = NovelPipeline(workspace=str(Path(project_path).parent.parent))
+        info = pipe.get_status(project_path)
+
+        table = Table(title="小说项目状态")
+        table.add_column("项目", style="cyan")
+        table.add_column("值", style="green")
+
+        table.add_row("小说 ID", info.get("novel_id", ""))
+        table.add_row("标题", info.get("title", ""))
+        table.add_row("状态", info.get("status", ""))
+        table.add_row("当前章节", str(info.get("current_chapter", 0)))
+        table.add_row("总章节数", str(info.get("total_chapters", 0)))
+        table.add_row("已生成字数", f"{info.get('total_words', 0):,}")
+        table.add_row("目标字数", f"{info.get('target_words', 0):,}")
+
+        if "characters_count" in info:
+            table.add_row("角色数", str(info["characters_count"]))
+        if "has_world_setting" in info:
+            table.add_row("世界观", "已创建" if info["has_world_setting"] else "未创建")
+        if "errors_count" in info:
+            table.add_row("错误数", str(info["errors_count"]))
+
+        console.print(table)
+    except Exception as e:
+        log.error("状态查询失败: %s", e)
+        raise click.Abort()
+
+
 if __name__ == "__main__":
     cli()

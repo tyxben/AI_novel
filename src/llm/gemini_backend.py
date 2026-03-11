@@ -33,6 +33,7 @@ class GeminiBackend(LLMClient):
         messages: list[dict],
         temperature: float = 0.7,
         json_mode: bool = False,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         client = self._get_client()
         from google.genai import types
@@ -54,6 +55,8 @@ class GeminiBackend(LLMClient):
         gen_config_kwargs: dict = {"temperature": temperature}
         if json_mode:
             gen_config_kwargs["response_mime_type"] = "application/json"
+        if max_tokens is not None:
+            gen_config_kwargs["max_output_tokens"] = max_tokens
         gen_config = types.GenerateContentConfig(
             **gen_config_kwargs,
             system_instruction="\n".join(system_parts) if system_parts else None,

@@ -26,6 +26,7 @@ class LLMClient(ABC):
         messages: list[dict],
         temperature: float = 0.7,
         json_mode: bool = False,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         """发送消息并获取回复。
 
@@ -33,6 +34,7 @@ class LLMClient(ABC):
             messages: OpenAI 格式消息列表 [{"role": "system", "content": ...}, ...]
             temperature: 生成温度。
             json_mode: 是否要求返回 JSON 格式。
+            max_tokens: 最大输出 token 数（None 使用后端默认值）。
 
         Returns:
             LLMResponse 对象。

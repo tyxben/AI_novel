@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.7.0-orange)]()
+[![Version](https://img.shields.io/badge/version-v0.9.0-orange)]()
 
 ---
 
@@ -79,6 +79,73 @@ python main.py run input/novel.txt --mode agent --quality-threshold 7.0
 | 图片质量检查 | GPT-4V/Gemini Vision | 跳过 |
 | 情感分析 | LLM 分析 | 正则规则 |
 | 成本（10段） | ~¥1.0 | ~¥0.6 |
+
+---
+
+## AI 长篇小说创作
+
+v0.9.0 新增 AI 长篇小说自动创作模块，支持 10 万字级别的完整小说生成：
+
+### 9 个专职 Agent
+
+| Agent | 职责 | 关键能力 |
+|-------|------|---------|
+| **NovelDirector** 总导演 | 输入分析 + 三层大纲生成 | 题材→模板映射，幕/卷/章结构 |
+| **WorldBuilder** 世界观构建 | 时代/地域/力量体系设定 | 自动生成专有名词和世界规则 |
+| **CharacterDesigner** 角色设计 | 角色档案 + 关系网 | 性格标签、说话风格、成长弧线 |
+| **PlotPlanner** 情节规划 | 场景分解 + 节奏设计 | 张力曲线、叙事焦点、伏笔织入 |
+| **Writer** 写手 | 逐场景生成正文 | 2000-3000 字/章，反 AI 味指令 |
+| **ConsistencyChecker** 一致性检查 | 矛盾检测 | BM25 轻量检查 + LLM 深度检查 |
+| **StyleKeeper** 风格守护 | 风格指标分析 | 句长/对话比/感叹号比等量化指标 |
+| **QualityReviewer** 质量评审 | 综合质量判断 | 规则硬指标 + LLM 打分，自动重写 |
+| **FeedbackAnalyzer** 反馈分析 | 读者反馈处理 | 影响范围分析 + 逐章重写指令 |
+
+### 创作流程
+
+```
+输入(题材/主题/字数) → 大纲生成 → 世界观 → 角色设计
+                                                ↓
+                    ┌────── 逐章循环 ──────────────┐
+                    │ 情节规划 → 正文生成 → 质量检查 │
+                    │     ↑         重写 ←─────┘   │
+                    └──────────────────────────────┘
+                                                ↓
+                              完整小说(10万字+)
+```
+
+### 使用方式
+
+```python
+from src.novel.pipeline import NovelPipeline
+
+pipe = NovelPipeline(workspace='workspace')
+
+# 1. 创建项目
+result = pipe.create_novel(genre='玄幻', theme='少年修炼逆天改命', target_words=100000)
+
+# 2. 生成章节
+pipe.generate_chapters(f"workspace/novels/{result['novel_id']}", start_chapter=1, end_chapter=40)
+
+# 3. 应用读者反馈（可选）
+pipe.apply_feedback(
+    project_path=f"workspace/novels/{result['novel_id']}",
+    feedback_text="女主角刻画太单薄",
+    chapter_number=8,
+)
+```
+
+### 风格预设
+
+支持多种小说风格预设，每种预设包含 system prompt、量化约束和 few-shot 示例：
+
+| 风格 | 预设名 | 适用题材 |
+|------|--------|---------|
+| 玄幻爽文 | `webnovel.xuanhuan` | 玄幻、修仙 |
+| 都市爽文 | `webnovel.shuangwen` | 都市、系统流 |
+| 古典武侠 | `wuxia.classical` | 武侠 |
+| 现代仙侠 | `wuxia.modern` | 仙侠 |
+| 现实主义 | `literary.realism` | 群像、悬疑、科幻 |
+| 校园轻小说 | `light_novel.campus` | 轻小说 |
 
 ---
 
@@ -417,6 +484,7 @@ elif backend == "xxx":
 
 ## 更新计划
 
+- [x] AI 长篇小说自动创作 — 9 Agent 协作，支持 10 万字级别小说生成 + 读者反馈重写
 - [ ] 动态视频拼接 — AI 视频片段（可灵/即梦/MiniMax）替代静态贴图
 - [ ] 多角色语音 — 不同角色使用不同音色
 - [ ] 批量处理 — 支持文件夹批量转换

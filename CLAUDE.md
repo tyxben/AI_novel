@@ -83,6 +83,55 @@ python main.py run input/novel.txt --mode agent --quality-threshold 7.0
 python main.py run input/novel.txt --mode agent --resume
 ```
 
+## AI 长篇小说写作模块 (src/novel/)
+- `src/novel/agents/` - 9个 Agent: NovelDirector / WorldBuilder / CharacterDesigner / PlotPlanner / Writer / ConsistencyChecker / StyleKeeper / QualityReviewer / FeedbackAnalyzer
+- `src/novel/tools/` - Tool 层: ConsistencyTool / QualityCheckTool / StyleAnalysisTool / BM25Retriever / ChapterDigest
+- `src/novel/models/` - Pydantic 数据模型: Novel / Chapter / Character / World / Feedback 等
+- `src/novel/storage/` - 存储层: NovelMemory(SQLite+NetworkX+Chroma) / FileManager
+- `src/novel/templates/` - 模板预设: 大纲模板 / 风格预设 / 节奏模板 / AI味黑名单
+- `src/novel/pipeline.py` - 小说创作流水线（创建项目 / 生成章节 / 应用反馈）
+- `src/novel/config.py` - 小说模块配置 (NovelConfig)
+- `src/novel/agents/graph.py` - LangGraph 图构建 (init graph + chapter graph) + sequential fallback
+- `src/novel/agents/state.py` - NovelState TypedDict
+- 规划文档在 `specs/novel-writing/`（requirements.md / design.md / tasks.md）
+
+### Agent 编排
+- **初始化图**: NovelDirector → WorldBuilder → CharacterDesigner → END
+- **章节生成图**: PlotPlanner → Writer → [ConsistencyChecker ∥ StyleKeeper] → QualityReviewer → END/Writer(重写)
+- **反馈重写**: FeedbackAnalyzer → Writer.rewrite_chapter() (直接修改 + 传播调整)
+- ConsistencyChecker 和 StyleKeeper 并行执行 (ThreadPoolExecutor)
+- LangGraph 为可选依赖，未安装时 fallback 为顺序执行
+
+### 省 Token 策略
+- 前3章跳过一致性检查，非9倍数章用 BM25 轻量检查
+- LLM 打分仅每5章一次 + 末章（budget_mode）
+- 章节摘要替代全文送 LLM 打分（ChapterDigest）
+- 每章目标 2000-3000 字，Writer 用 max_tokens + 硬截断控制
+
+```bash
+# 创建小说项目（大纲+世界观+角色）
+python -c "
+from src.novel.pipeline import NovelPipeline
+pipe = NovelPipeline(workspace='workspace')
+result = pipe.create_novel(genre='玄幻', theme='少年修炼逆天改命', target_words=100000)
+"
+
+# 生成章节
+python -c "
+pipe.generate_chapters('workspace/novels/novel_xxx', start_chapter=1, end_chapter=40)
+"
+
+# 应用读者反馈
+python -c "
+result = pipe.apply_feedback(
+    project_path='workspace/novels/novel_xxx',
+    feedback_text='第5章主角性格突然变了',
+    chapter_number=5,
+    dry_run=True,  # 先分析不修改
+)
+"
+```
+
 ## 开发注意事项
 - 重依赖 (torch, diffusers, edge_tts) 使用懒加载，避免import时报错
 - 图片尺寸 1024x1792 (竖屏9:16)

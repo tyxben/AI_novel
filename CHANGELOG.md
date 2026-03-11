@@ -1,5 +1,41 @@
 # 更新日志
 
+## [0.9.0] - 2026-03-11
+
+### 新增
+- **AI 长篇小说写作模块** (`src/novel/`)
+  - 9 Agent LangGraph 编排: NovelDirector / WorldBuilder / CharacterDesigner / PlotPlanner / Writer / ConsistencyChecker / StyleKeeper / QualityReviewer / FeedbackAnalyzer
+  - 三层大纲生成（幕→卷→章），支持循环升级/多线交织/四幕等模板
+  - 角色档案系统: 性格标签、说话风格、口头禅、成长弧线、关系网
+  - 世界观构建: 时代/地域/力量体系/专有名词
+  - 逐场景章节生成，每章 2000-3000 字，反 AI 味指令
+  - 三层一致性检查: SQLite / NetworkX / Chroma 向量搜索
+  - 风格预设系统: 6 大类风格（网文/武侠/文学/轻小说），量化指标约束
+  - 质量评审: 规则硬指标（零成本）+ LLM 打分，不达标自动重写（最多 2 次）
+  - ConsistencyChecker 和 StyleKeeper 并行执行 (ThreadPoolExecutor)
+  - LangGraph 为可选依赖，未安装时自动 fallback 为顺序执行
+- **Token 优化策略**
+  - BM25 关键词检索 (jieba + rank_bm25) 替代 LLM 全文比对
+  - ChapterDigest 章节摘要压缩（~500 字）替代全文 LLM 打分
+  - 前 3 章跳过一致性检查，非 9 倍数章用 BM25 轻量检查
+  - LLM 打分仅每 5 章一次 + 末章（budget_mode）
+  - Writer 使用 max_tokens + 硬截断控制章节长度
+- **读者反馈系统**
+  - FeedbackAnalyzer Agent: LLM 分析反馈类型、影响范围、重写指令
+  - Writer.rewrite_chapter(): 直接修改 + 传播调整两种模式
+  - 章节版本备份: 重写前自动保存旧版本，支持回滚
+  - dry_run 模式: 先分析影响范围，确认后再执行
+  - pipeline.apply_feedback() API
+- **LLM 接口增强**
+  - 所有后端 (OpenAI/Gemini/Ollama) 新增 `max_tokens` 参数支持
+  - 大纲生成使用 max_tokens=8192 避免长输出截断
+- **801 个测试** 覆盖所有新功能
+
+### 变更
+- 章节默认长度从 4000 字调整为 2000-3000 字
+- 每章场景数从 4 个调整为 3 个
+- ChapterOutline.estimated_words 默认值从 3000 改为 2500，最小值从 1000 改为 500
+
 ## [0.8.0] - 2026-03-11
 
 ### 新增

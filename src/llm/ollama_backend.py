@@ -27,12 +27,16 @@ class OllamaBackend(LLMClient):
         messages: list[dict],
         temperature: float = 0.7,
         json_mode: bool = False,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         client = self._get_client()
+        options: dict = {"temperature": temperature}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
         kwargs: dict = {
             "model": self._model,
             "messages": messages,
-            "options": {"temperature": temperature},
+            "options": options,
         }
         if json_mode:
             kwargs["format"] = "json"
