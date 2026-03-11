@@ -656,9 +656,10 @@ class VideoAssembler:
             return video
 
         # tpad: stop_mode=clone 克隆最后一帧，stop_duration 为填充时长
+        # 使用 crop 模式填满竖屏，避免黑边
         filter_v = (
-            f"scale={self.width}:{self.height}:force_original_aspect_ratio=decrease,"
-            f"pad={self.width}:{self.height}:(ow-iw)/2:(oh-ih)/2,"
+            f"scale={self.width}:{self.height}:force_original_aspect_ratio=increase,"
+            f"crop={self.width}:{self.height},"
             f"setsar=1,"
             f"tpad=stop_mode=clone:stop_duration={pad_duration}"
         )
@@ -686,23 +687,48 @@ class VideoAssembler:
     ) -> None:
         """裁剪视频到指定时长，替换音频，叠加 SRT 字幕。"""
         # 构建视频滤镜: 缩放 + 字幕叠加
+        # AI 视频通常是横屏 (16:9)，目标是竖屏 (9:16)
+        # 使用 crop+scale 方式填满画面，避免黑边
         filter_parts = [
-            f"scale={self.width}:{self.height}:force_original_aspect_ratio=decrease",
-            f"pad={self.width}:{self.height}:(ow-iw)/2:(oh-ih)/2",
+            f"scale={self.width}:{self.height}:force_original_aspect_ratio=increase",
+            f"crop={self.width}:{self.height}",
             "setsar=1",
         ]
 
-        # 如果有 SRT 字幕，使用 subtitles 滤镜叠加
+        # 如果有 SRT 字幕，尝试使用 subtitles 滤镜叠加
+        # 注意: subtitles filter 需要 FFmpeg 编译时启用 libass
         srt_path = Path(srt)
         if srt_path.exists() and srt_path.stat().st_size > 0:
-            # FFmpeg subtitles 滤镜需要转义路径中的特殊字符
-            escaped_srt = str(srt_path.resolve()).replace("\\", "/").replace(":", "\\:")
-            filter_parts.append(
-                f"subtitles='{escaped_srt}'"
-                f":force_style='FontSize=20,PrimaryColour=&HFFFFFF,"
-                f"OutlineColour=&H000000,Outline=2,Shadow=1,"
-                f"Alignment=2,MarginV=60'"
-            )
+            if self._has_subtitles_filter():
+                escaped_srt = (
+                    str(srt_path.resolve())
+                    .replace("\\", "\\\\")
+                    .replace(":", "\\:")
+                    .replace("'", "\\'")
+                )
+                style = (
+                    "FontSize=20,PrimaryColour=&HFFFFFF,"
+                    "OutlineColour=&H000000,Outline=2,Shadow=1,"
+                    "Alignment=2,MarginV=60"
+                )
+                filter_parts.append(
+                    f"subtitles=filename='{escaped_srt}':force_style='{style}'"
+                )
+            else:
+                # libass 不可用，尝试 drawtext 滤镜作为备选
+                drawtext_filters = self._srt_to_drawtext_filters(srt_path)
+                if drawtext_filters:
+                    log.info(
+                        "FFmpeg 未启用 subtitles filter (需要 libass)，"
+                        "使用 drawtext 滤镜渲染字幕 (%d 条)",
+                        len(drawtext_filters),
+                    )
+                    filter_parts.extend(drawtext_filters)
+                else:
+                    log.warning(
+                        "FFmpeg 未启用 subtitles filter (需要 libass)，"
+                        "且 drawtext 备选方案不可用，跳过视频片段字幕"
+                    )
 
         filter_v = ",".join(filter_parts)
 
@@ -908,6 +934,123 @@ class VideoAssembler:
             str(dst),
         ]
         self._run_ffmpeg(cmd, "复制输出")
+
+    @staticmethod
+    def _find_font_path() -> str | None:
+        """查找 CJK 字体文件路径（返回路径字符串，不加载字体对象）。
+
+        按平台依次尝试常见中文字体路径，全部失败返回 None。
+        """
+        system = platform.system()
+
+        candidates: list[str] = []
+        if system == "Darwin":
+            candidates = [
+                "/System/Library/Fonts/PingFang.ttc",
+                "/System/Library/Fonts/STHeiti Light.ttc",
+                "/Library/Fonts/Arial Unicode.ttf",
+            ]
+        elif system == "Linux":
+            candidates = [
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            ]
+            # 尝试 fc-match 自动查找
+            try:
+                result = subprocess.run(
+                    ["fc-match", "-f", "%{file}", ":lang=zh"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    candidates.append(result.stdout.strip())
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+        elif system == "Windows":
+            candidates = [
+                "C:\\Windows\\Fonts\\msyh.ttc",
+                "C:\\Windows\\Fonts\\simsun.ttc",
+                "C:\\Windows\\Fonts\\simhei.ttf",
+            ]
+
+        for path in candidates:
+            if Path(path).exists():
+                return path
+
+        return None
+
+    def _srt_to_drawtext_filters(self, srt_path: Path) -> list[str]:
+        """解析 SRT 文件，生成 FFmpeg drawtext 滤镜字符串列表。
+
+        当 FFmpeg 未启用 libass (subtitles filter) 时，用 drawtext 作为
+        字幕渲染的备选方案。每条字幕对应一个 drawtext 滤镜，通过
+        ``enable='between(t,start,end)'`` 控制显示时间。
+
+        Args:
+            srt_path: SRT 字幕文件路径。
+
+        Returns:
+            drawtext 滤镜字符串列表，可直接拼接到 FFmpeg -vf 滤镜链中。
+        """
+        entries = self._parse_srt_entries(srt_path)
+        if not entries:
+            return []
+
+        font_path = self._find_font_path()
+        if not font_path:
+            log.warning("未找到 CJK 字体，drawtext 字幕可能无法显示中文")
+            return []
+
+        filters: list[str] = []
+        for entry in entries:
+            start = entry["start"]
+            end = entry["end"]
+            text = entry["text"]
+            if not text:
+                continue
+
+            # FFmpeg drawtext 特殊字符转义: \ -> \\, ' -> '\\'', : -> \\:
+            # 顺序很重要：先转义反斜杠，再转义其他字符
+            escaped = text.replace("\\", "\\\\\\\\")
+            escaped = escaped.replace("'", "'\\\\\\''")
+            escaped = escaped.replace(":", "\\\\:")
+            # 转义 % (drawtext 中 % 用于时间码等特殊序列)
+            escaped = escaped.replace("%", "%%")
+
+            # 转义 fontfile 路径中的特殊字符
+            escaped_font = font_path.replace("\\", "\\\\\\\\")
+            escaped_font = escaped_font.replace(":", "\\\\:")
+            escaped_font = escaped_font.replace("'", "'\\\\\\''")
+
+            f = (
+                f"drawtext=fontfile='{escaped_font}'"
+                f":text='{escaped}'"
+                f":fontsize=40"
+                f":fontcolor=white"
+                f":borderw=2"
+                f":bordercolor=black"
+                f":x=(w-text_w)/2"
+                f":y=h-h/6"
+                f":enable='between(t,{start:.3f},{end:.3f})'"
+            )
+            filters.append(f)
+
+        return filters
+
+    def _has_subtitles_filter(self) -> bool:
+        """检测 FFmpeg 是否支持 subtitles filter (需要 libass)。"""
+        if not hasattr(self, "_subtitles_supported"):
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-filters"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                self._subtitles_supported = "subtitles" in result.stdout
+            except Exception:
+                self._subtitles_supported = False
+        return self._subtitles_supported
 
     def _run_ffmpeg(self, cmd: list[str], description: str) -> None:
         """执行 FFmpeg 命令并处理错误。

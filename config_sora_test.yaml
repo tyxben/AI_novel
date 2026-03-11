@@ -1,0 +1,63 @@
+# Sora Agent 模式测试配置
+
+llm:
+  provider: openai
+
+project:
+  default_workspace: workspace
+  default_output: output
+
+segmenter:
+  method: simple
+  max_chars: 100
+  min_chars: 20
+
+promptgen:
+  style: anime
+  llm:
+    model: gpt-4o-mini
+    temperature: 0.7
+  character_tracking: true
+
+# Sora 视频生成
+videogen:
+  backend: sora
+  model: sora-2
+  size: 720x1280         # 竖屏原生分辨率 (无需裁剪)
+  duration: 12           # Sora-2 支持 4/8/12s 固定档位
+  use_image_as_first_frame: false   # 图片尺寸需与视频一致，先关闭
+  poll_interval: 10
+  poll_timeout: 600      # Sora 生成较慢，给 10 分钟
+
+imagegen:
+  backend: siliconflow
+  model: black-forest-labs/FLUX.1-schnell
+  width: 1024
+  height: 1792
+
+tts:
+  voice: zh-CN-YunxiNeural
+  rate: "+0%"
+  volume: "+0%"
+
+subtitle:
+  font_size: 48
+  font_color: white
+  outline_color: black
+  outline_width: 2
+  position: bottom
+
+video:
+  resolution: [1080, 1920]
+  fps: 30
+  codec: libx265
+  crf: 18
+  ken_burns:
+    zoom_range: [1.0, 1.15]
+    pan_speed: 0.02
+  transition:
+    type: crossfade
+    duration: 0.5
+  bgm:
+    path: ""
+    volume: 0.15

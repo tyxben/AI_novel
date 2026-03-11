@@ -4,6 +4,7 @@ from src.tools.prompt_gen_tool import PromptGenTool
 from src.tools.segment_tool import SegmentTool
 from src.tools.tts_tool import TTSTool
 from src.tools.video_assemble_tool import VideoAssembleTool
+from src.tools.video_gen_tool import VideoGenTool
 
 __all__ = [
     "EvaluateQualityTool",
@@ -12,13 +13,14 @@ __all__ = [
     "ImageGenTool",
     "TTSTool",
     "VideoAssembleTool",
+    "VideoGenTool",
     "create_tools",
 ]
 
 
 def create_tools(config: dict) -> dict:
     """统一初始化所有 Tool，返回 {name: tool_instance} 字典。"""
-    return {
+    tools = {
         "segment": SegmentTool(config),
         "prompt_gen": PromptGenTool(config),
         "image_gen": ImageGenTool(config),
@@ -26,3 +28,6 @@ def create_tools(config: dict) -> dict:
         "video_assemble": VideoAssembleTool(config),
         "evaluate_quality": EvaluateQualityTool(config),
     }
+    if config.get("videogen", {}).get("backend"):
+        tools["video_gen"] = VideoGenTool(config)
+    return tools

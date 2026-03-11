@@ -1,4 +1,4 @@
-"""美术指导 Agent - 图片生成 + 质量控制"""
+"""美术指导 Agent - 图片生成 + 质量控制 + 视频片段生成"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,6 +21,14 @@ class ArtDirectorAgent:
         self.prompt_gen = PromptGenTool(config)
         self.image_gen = ImageGenTool(config)
         self.quality_tool = EvaluateQualityTool(config)
+        self._video_gen = None  # 懒加载
+
+    @property
+    def video_gen(self):
+        if self._video_gen is None:
+            from src.tools.video_gen_tool import VideoGenTool
+            self._video_gen = VideoGenTool(self.config)
+        return self._video_gen
 
     def _optimize_prompt(
         self,
@@ -154,6 +162,40 @@ class ArtDirectorAgent:
 
         return best_path, best_score, retry_count, decisions  # type: ignore[return-value]
 
+    def generate_video_clip(
+        self,
+        text: str,
+        index: int,
+        workspace: Path,
+        image_path: Path | None = None,
+    ) -> tuple[Path, list[Decision]]:
+        """生成 AI 视频片段。返回 (path, decisions)"""
+        clip_dir = Path(workspace) / "video_clips"
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        decisions: list[Decision] = []
+
+        # 生成视频专用 prompt
+        video_prompt = self.prompt_gen.run_video_prompt(text, segment_index=index)
+
+        # 是否使用图片作为首帧
+        use_first_frame = self.config.get("videogen", {}).get(
+            "use_image_as_first_frame", True
+        )
+        first_frame = image_path if use_first_frame else None
+
+        out_path = clip_dir / f"{index:04d}.mp4"
+        self.video_gen.run(video_prompt, out_path, image_path=first_frame)
+
+        decisions.append(make_decision(
+            "ArtDirector",
+            f"video_seg{index}",
+            f"视频片段生成完成",
+            f"prompt: {video_prompt[:80]}...",
+            data={"image_as_first_frame": first_frame is not None},
+        ))
+
+        return out_path, decisions
+
 
 def art_director_node(state: AgentState) -> dict:
     """ArtDirector 节点"""
@@ -204,9 +246,43 @@ def art_director_node(state: AgentState) -> dict:
         f"{len(images)} 张图片",
     ))
 
-    return {
+    result: dict = {
         "images": images,
         "quality_scores": quality_scores,
         "retry_counts": retry_counts,
         "decisions": decisions,
     }
+
+    # --- 视频片段生成（可选） ---
+    video_enabled = (state.get("pipeline_plan") or {}).get("video_enabled", False)
+    if video_enabled:
+        video_clips: list[str] = []
+        decisions.append(make_decision(
+            "ArtDirector", "video_start",
+            f"开始生成 {len(segments)} 个视频片段",
+            f"backend={config.get('videogen', {}).get('backend', '?')}",
+        ))
+
+        for i, seg in enumerate(segments):
+            image_path = Path(images[i]) if i < len(images) else None
+            clip_path, clip_decisions = agent.generate_video_clip(
+                seg["text"], i, Path(workspace), image_path=image_path
+            )
+            video_clips.append(str(clip_path))
+            decisions.extend(clip_decisions)
+            log.info(
+                "[ArtDirector] 视频片段 %d/%d 完成",
+                i + 1, len(segments),
+            )
+
+        decisions.append(make_decision(
+            "ArtDirector", "video_summary",
+            f"视频片段生成完成：{len(video_clips)} 个",
+            "全部完成",
+        ))
+        result["video_clips"] = video_clips
+
+        # 释放视频生成资源
+        agent.video_gen.close()
+
+    return result
