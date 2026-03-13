@@ -55,6 +55,9 @@ agent-gemini = [
 web = [
     "gradio>=4.0",
 ]
+mcp = [
+    "fastmcp>=2.0",
+]
 build = [
     "pyinstaller>=6.0",
 ]

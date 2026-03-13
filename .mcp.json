@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "novel": {
+      "command": "python",
+      "args": ["mcp_server.py"]
+    }
+  }
+}
