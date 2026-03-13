@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -233,6 +234,8 @@ class NovelDirector:
             except Exception as exc:
                 last_error = f"LLM 调用失败: {exc}"
                 log.warning("大纲生成第 %d 次尝试失败: %s", attempt + 1, last_error)
+                if attempt < self.MAX_OUTLINE_RETRIES - 1:
+                    time.sleep(2 ** attempt)
 
         if outline_data is None:
             raise RuntimeError(

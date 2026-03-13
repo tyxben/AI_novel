@@ -18,8 +18,9 @@ class OllamaBackend(LLMClient):
     def _get_client(self):
         if self._client is None:
             from ollama import Client
+            from httpx import Timeout
 
-            self._client = Client(host=self._host)
+            self._client = Client(host=self._host, timeout=Timeout(120.0))
         return self._client
 
     def chat(

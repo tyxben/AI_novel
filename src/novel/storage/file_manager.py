@@ -321,6 +321,11 @@ class FileManager:
             "total_chapters": total_chapters,
             "total_words": total_words,
             "target_words": novel_data.get("target_words", 0),
+            "author_name": novel_data.get("author_name", ""),
+            "target_audience": novel_data.get("target_audience", ""),
+            "protagonist_names": novel_data.get("protagonist_names", []),
+            "synopsis": novel_data.get("synopsis", ""),
+            "tags": novel_data.get("tags", []),
         }
 
     def novel_exists(self, novel_id: str) -> bool:

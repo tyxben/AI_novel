@@ -25,7 +25,10 @@ class GeminiBackend(LLMClient):
         if self._client is None:
             from google import genai
 
-            self._client = genai.Client(api_key=self._api_key)
+            self._client = genai.Client(
+                api_key=self._api_key,
+                http_options={"timeout": 120_000},
+            )
         return self._client
 
     def chat(

@@ -12,9 +12,9 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from src.novel.agents.graph import build_chapter_graph, build_init_graph
+from src.novel.agents.graph import build_chapter_graph, build_init_graph, _merge_state
 from src.novel.config import NovelConfig, load_novel_config
 from src.novel.storage.file_manager import FileManager
 
@@ -121,6 +121,9 @@ class NovelPipeline:
         style: str = "",
         template: str = "",
         custom_ideas: str = "",
+        author_name: str = "",
+        target_audience: str = "",
+        progress_callback: Callable[[float, str], None] | None = None,
     ) -> dict:
         """Create a new novel project.
 
@@ -164,9 +167,61 @@ class NovelPipeline:
             "should_continue": True,
         }
 
-        # Run init graph
-        init_graph = build_init_graph()
-        state = init_graph.invoke(state)
+        # Run init graph nodes one by one with progress callbacks
+        from src.novel.agents.graph import _get_node_functions
+
+        nodes = _get_node_functions()
+
+        if progress_callback:
+            progress_callback(0.1, "正在生成大纲（可能需要1-2分钟）...")
+        result = nodes["novel_director"](state)
+        state = _merge_state(state, result)
+
+        if progress_callback:
+            progress_callback(0.4, "正在构建世界观...")
+        result = nodes["world_builder"](state)
+        state = _merge_state(state, result)
+
+        if progress_callback:
+            progress_callback(0.7, "正在设计角色...")
+        result = nodes["character_designer"](state)
+        state = _merge_state(state, result)
+
+        # Extract protagonist names from characters
+        protagonist_names = []
+        for c in state.get("characters", []):
+            if isinstance(c, dict):
+                role = c.get("role", "")
+                if "主角" in role or "protagonist" in role.lower():
+                    protagonist_names.append(c.get("name", ""))
+        # If no explicit protagonist found, take first character
+        if not protagonist_names and state.get("characters"):
+            first = state["characters"][0]
+            if isinstance(first, dict):
+                protagonist_names.append(first.get("name", ""))
+
+        # Generate synopsis from outline
+        outline = state.get("outline", {})
+        synopsis = outline.get("synopsis", "") if isinstance(outline, dict) else ""
+        if not synopsis:
+            # Build from theme + first few chapter goals
+            chapters_list = outline.get("chapters", []) if isinstance(outline, dict) else []
+            ch_goals = [ch.get("goal", "") for ch in chapters_list[:3] if ch.get("goal")]
+            synopsis = f"{theme}。" + "；".join(ch_goals) if ch_goals else theme
+
+        # Generate tags from genre + theme
+        tags = [genre]
+        if target_audience:
+            tags.append(target_audience)
+        # Extract mood types from outline chapters as tags
+        moods: set[str] = set()
+        outline_chapters = outline.get("chapters", []) if isinstance(outline, dict) else []
+        for ch in outline_chapters:
+            m = ch.get("mood")
+            if m:
+                moods.add(m)
+        if moods:
+            tags.extend(list(moods)[:3])
 
         # Save novel metadata
         novel_data = {
@@ -178,8 +233,15 @@ class NovelPipeline:
             "status": "initialized",
             "current_chapter": 0,
             "outline": state.get("outline"),
+            "characters": state.get("characters", []),
+            "world_setting": state.get("world_setting"),
             "style_name": state.get("style_name", style),
             "template": state.get("template", template),
+            "author_name": author_name,
+            "target_audience": target_audience,
+            "protagonist_names": protagonist_names,
+            "synopsis": synopsis,
+            "tags": tags,
         }
         fm.save_novel(novel_id, novel_data)
 
@@ -197,6 +259,11 @@ class NovelPipeline:
             "world_setting": state.get("world_setting"),
             "total_chapters": state.get("total_chapters", 0),
             "errors": state.get("errors", []),
+            "author_name": author_name,
+            "target_audience": target_audience,
+            "protagonist_names": protagonist_names,
+            "synopsis": synopsis,
+            "tags": tags,
         }
 
     # ------------------------------------------------------------------
@@ -209,6 +276,7 @@ class NovelPipeline:
         start_chapter: int = 1,
         end_chapter: int | None = None,
         silent: bool = False,
+        progress_callback: Callable[[float, str], None] | None = None,
     ) -> dict:
         """Generate chapters for an existing project.
 
@@ -241,10 +309,18 @@ class NovelPipeline:
         review_interval = state.get("review_interval", self.config.human_in_loop.review_interval)
 
         chapters_generated = []
+        consecutive_failures = 0
         chapter_graph = build_chapter_graph()
 
         for ch_num in range(start_chapter, end_chapter + 1):
             log.info("=== 生成第 %d/%d 章 ===", ch_num, total_chapters)
+
+            # Report progress
+            if progress_callback:
+                total_in_batch = end_chapter - start_chapter + 1
+                done_in_batch = ch_num - start_chapter
+                pct = done_in_batch / total_in_batch
+                progress_callback(pct, f"正在生成第{ch_num}/{total_chapters}章...")
 
             # Set up current chapter in state
             ch_outline = self._get_chapter_outline(outline, ch_num)
@@ -268,7 +344,14 @@ class NovelPipeline:
                 )
                 # Save checkpoint even on failure
                 self._save_checkpoint(novel_id, state)
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    log.error("连续 %d 章生成失败，中止批量生成", consecutive_failures)
+                    break
                 continue
+
+            # Reset consecutive failure counter on success
+            consecutive_failures = 0
 
             # Save chapter
             chapter_text = state.get("current_chapter_text", "")
@@ -412,6 +495,7 @@ class NovelPipeline:
         chapter_number: int | None = None,
         max_propagation: int = 10,
         dry_run: bool = False,
+        progress_callback: Callable[[float, str], None] | None = None,
     ) -> dict:
         """应用读者反馈，重写受影响章节。
 
@@ -444,6 +528,8 @@ class NovelPipeline:
         llm = create_llm_client(llm_config)
 
         # Analyze feedback
+        if progress_callback:
+            progress_callback(0.1, "正在分析反馈...")
         analyzer = FeedbackAnalyzer(llm)
         outline_chapters = state.get("outline", {}).get("chapters", [])
         characters = state.get("characters", [])
@@ -471,6 +557,8 @@ class NovelPipeline:
         }
 
         if dry_run:
+            if progress_callback:
+                progress_callback(1.0, "分析完成!")
             return result
 
         # Prepare writer
@@ -528,7 +616,10 @@ class NovelPipeline:
 
         rewrite_instructions = analysis.get("rewrite_instructions", {})
 
-        for ch_num in rewrite_queue:
+        for rw_idx, ch_num in enumerate(rewrite_queue):
+            if progress_callback:
+                pct = 0.3 + 0.7 * (rw_idx / max(len(rewrite_queue), 1))
+                progress_callback(pct, f"正在重写第{ch_num}章...")
             original_text = chapter_texts.get(ch_num)
             if not original_text:
                 log.warning("第%d章无原文，跳过重写", ch_num)

@@ -32,6 +32,7 @@ class OpenAIBackend(LLMClient):
                 kwargs["api_key"] = self._api_key
             if self._base_url:
                 kwargs["base_url"] = self._base_url
+            kwargs["timeout"] = 120.0
             self._client = OpenAI(**kwargs)
         return self._client
 

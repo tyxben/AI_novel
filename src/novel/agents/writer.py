@@ -78,6 +78,9 @@ class Writer:
             f"「{chapter_outline.title}」中的第{scene_plan.get('scene_number', 1)}个场景。\n"
             f"本章目标：{chapter_outline.goal}\n"
             f"本章情绪基调：{chapter_outline.mood}\n\n"
+            f"【极其重要的字数限制】你必须严格控制输出在{target_words}字左右。"
+            f"绝对不能超过{target_words + 200}字。宁可写少也不要写多。"
+            f"写到接近目标字数时，必须在一个完整的句子处自然收束，不要强行展开新情节。\n\n"
             f"【世界观设定】\n{world_desc}\n\n"
             f"【角色档案】\n{char_desc}\n\n"
             f"{_ANTI_AI_FLAVOR}"
@@ -98,8 +101,11 @@ class Writer:
 
         user_prompt += (
             f"请直接输出场景正文，不要输出标题、序号或任何元信息。\n"
-            f"【字数要求】严格控制在{max(target_words - 200, 300)}到{target_words + 200}字之间。"
-            f"超出上限的内容会被截断，请务必精炼。"
+            f"【字数要求 - 必须遵守】\n"
+            f"- 目标字数：{target_words}字（允许范围：{max(target_words - 200, 300)}-{target_words + 200}字）\n"
+            f"- 超过{target_words + 200}字的内容会被强制截断导致情节不完整，你必须自行控制节奏\n"
+            f"- 写到{target_words - 100}字左右时开始收束当前场景，在完整的句子处结束\n"
+            f"- 宁可少写50字，也不要超出上限"
         )
 
         messages = [
@@ -107,20 +113,31 @@ class Writer:
             {"role": "user", "content": user_prompt},
         ]
 
-        # 用 max_tokens 硬限制输出长度（1 中文字 ≈ 1.5 token）
-        max_tokens = min(2048, int((target_words + 200) * 1.5))
+        # 用 max_tokens 硬限制输出长度
+        # DeepSeek/GPT 对中文 tokenizer 效率高：1 中文字 ≈ 0.6~1.0 token
+        # 用 1.0 作为保守换算，确保 max_tokens 真正约束输出长度
+        max_tokens = min(2048, target_words + 200)
         response = self.llm.chat(messages, temperature=0.85, max_tokens=max_tokens)
         scene_text = response.content.strip()
 
-        # 硬截断：如果超过目标字数的 1.2 倍，在最近的句号处截断
-        hard_limit = int(target_words * 1.2)
+        # 安全截断：仅在严重超标（1.5 倍）时触发，优先在段落/句子边界截断
+        hard_limit = int(target_words * 1.5)
         if len(scene_text) > hard_limit:
-            cut_pos = scene_text.rfind("。", 0, hard_limit)
+            # 优先找段落边界（\n\n）
+            cut_pos = scene_text.rfind("\n\n", 0, hard_limit)
             if cut_pos > hard_limit // 2:
-                scene_text = scene_text[: cut_pos + 1]
+                scene_text = scene_text[:cut_pos]
             else:
-                scene_text = scene_text[:hard_limit]
-            log.info("场景文本超长(%d字)，截断至%d字", len(response.content), len(scene_text))
+                # 其次找句子边界（。！？）
+                for sep in ("。", "！", "？", "!", "?", "\n"):
+                    cut_pos = scene_text.rfind(sep, 0, hard_limit)
+                    if cut_pos > hard_limit // 2:
+                        scene_text = scene_text[: cut_pos + 1]
+                        break
+                else:
+                    # 最后兜底：硬截断（极少触发）
+                    scene_text = scene_text[:hard_limit]
+            log.warning("场景文本超长(%d字)，截断至%d字", len(response.content), len(scene_text))
 
         scene_chars = scene_plan.get("characters_involved", scene_plan.get("characters", []))
         return Scene(
@@ -278,7 +295,9 @@ class Writer:
                 user_prompt += f"【修改后的前文】\n{trimmed_context}\n\n"
             user_prompt += (
                 f"请在原文基础上做最小必要修改，保持连贯。直接输出修改后的完整章节正文。\n"
-                f"【字数要求】严格控制在{max(target_words - 300, 500)}到{target_words + 300}字之间。"
+                f"【字数要求 - 必须遵守】\n"
+                f"- 目标字数：{target_words}字（允许范围：{max(target_words - 300, 500)}-{target_words + 300}字）\n"
+                f"- 写到接近目标字数时在完整句子处自然收束，宁少勿多"
             )
         else:
             system_prompt = (
@@ -298,10 +317,13 @@ class Writer:
                 user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
             user_prompt += (
                 f"请根据修改指令重写此章节。直接输出重写后的完整正文，不要标题或元信息。\n"
-                f"【字数要求】严格控制在{max(target_words - 300, 500)}到{target_words + 300}字之间。"
+                f"【字数要求 - 必须遵守】\n"
+                f"- 目标字数：{target_words}字（允许范围：{max(target_words - 300, 500)}-{target_words + 300}字）\n"
+                f"- 写到接近目标字数时在完整句子处自然收束，宁少勿多"
             )
 
-        max_tokens = min(2048, int((target_words + 300) * 1.5))
+        # 1 中文字 ≈ 0.6~1.0 token，用 1.0 保守换算
+        max_tokens = min(2048, target_words + 300)
         response = self.llm.chat(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -313,14 +335,21 @@ class Writer:
 
         rewritten = response.content.strip()
 
-        # Hard truncation same as generate_scene
-        hard_limit = int(target_words * 1.2)
+        # 安全截断：仅在严重超标时触发，优先在段落/句子边界截断
+        hard_limit = int(target_words * 1.5)
         if len(rewritten) > hard_limit:
-            cut_pos = rewritten.rfind("。", 0, hard_limit)
+            cut_pos = rewritten.rfind("\n\n", 0, hard_limit)
             if cut_pos > hard_limit // 2:
-                rewritten = rewritten[:cut_pos + 1]
+                rewritten = rewritten[:cut_pos]
             else:
-                rewritten = rewritten[:hard_limit]
+                for sep in ("。", "！", "？", "!", "?", "\n"):
+                    cut_pos = rewritten.rfind(sep, 0, hard_limit)
+                    if cut_pos > hard_limit // 2:
+                        rewritten = rewritten[: cut_pos + 1]
+                        break
+                else:
+                    rewritten = rewritten[:hard_limit]
+            log.warning("重写文本超长(%d字)，截断至%d字", len(response.content), len(rewritten))
 
         return rewritten
 
@@ -449,13 +478,23 @@ def writer_node(state: dict) -> dict:
     if world_setting is None:
         world_setting = WorldSetting(era="未知", location="未知")
 
-    # 前文上下文：从已完成章节中取最后一章的末尾
+    # 前文上下文：取最后一章的结尾部分（而非开头），确保悬念和转折传递给下一章
     context = ""
     chapters_done = state.get("chapters", [])
     if chapters_done:
         last_ch = chapters_done[-1]
         last_text = last_ch.get("full_text", "")
-        context = truncate_text(last_text, _MAX_CONTEXT_CHARS) if last_text else ""
+        if last_text:
+            # 取结尾 _MAX_CONTEXT_CHARS 字符，在段落边界截断
+            if len(last_text) > _MAX_CONTEXT_CHARS:
+                tail = last_text[-_MAX_CONTEXT_CHARS:]
+                # 找到第一个段落边界，避免从半个段落开始
+                first_break = tail.find("\n\n")
+                if first_break > 0 and first_break < len(tail) // 3:
+                    tail = tail[first_break + 2:]
+                context = tail
+            else:
+                context = last_text
 
     # 如果没有 scene_plans，生成默认 4 场景
     if not scene_plans:

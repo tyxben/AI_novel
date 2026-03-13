@@ -18,7 +18,13 @@ _SYSTEM_PROMPT = """\
 3. 包含: 场景描述、角色外观、动作姿态、光影氛围、画面构图
 4. 使用标准 SD 关键词格式（逗号分隔的短语）
 5. 突出画面感，忽略对话内容本身
-6. 如果有角色，描述其外观特征（发型、服装、表情等）
+6. 角色描写是最重要的部分，必须做到:
+   - 明确每个角色的性别（male/female），绝不能搞混
+   - 详细描述外观: 发型、发色、服装、体型、表情
+   - 如果文中有男女两个角色，必须同时描写两人并明确区分
+   - 例: "a tall young man in delivery uniform, short black hair" 和 "a young woman in pajamas, long hair, opening the door"
+   - 角色的职业、身份要体现在服装和动作中
+7. 如果文本中有多个角色互动，prompt 中必须包含所有角色
 
 输出格式: 仅输出英文 prompt 文本，不要包含任何解释或前缀。
 """
@@ -31,7 +37,8 @@ _VIDEO_SYSTEM_PROMPT = """\
 1. 分析文本中的场景、角色、动作、情绪
 2. 生成英文视频生成 prompt（自然语言完整句子，非关键词堆叠）
 3. 必须包含以下层次:
-   - 主体: 角色外观、服装、表情
+   - 主体: 角色外观（必须明确性别male/female）、服装、体型、发型、表情
+   - 如果有多个角色，必须分别描述每个人的外观和性别，不能混淆
    - 动作: 具体动作过程，添加速度修饰（slowly, gently, dramatically）
    - 场景: 环境、天气、时间
    - 光影: 光源类型、色温、氛围
@@ -332,8 +339,9 @@ class PromptGenerator:
         try:
             user_msg = f"小说文本:\n{text}"
             if character_prompt:
-                user_msg += f"\n\n已知角色描述（请保持一致）:\n{character_prompt}"
+                user_msg += f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n{character_prompt}"
             user_msg += f"\n\n画面风格: {self._style_name}"
+            user_msg += "\n\n重要: 仔细分析文中每个角色的性别（他=male, 她=female），确保 prompt 中角色性别正确，不要搞混。"
 
             client = self._get_llm_client()
             response = client.chat(
@@ -472,8 +480,9 @@ class PromptGenerator:
         try:
             user_msg = f"小说文本:\n{text}"
             if character_prompt:
-                user_msg += f"\n\n已知角色描述（请保持一致）:\n{character_prompt}"
+                user_msg += f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n{character_prompt}"
             user_msg += f"\n\n画面风格: {self._style_name}"
+            user_msg += "\n\n重要: 仔细分析文中每个角色的性别（他=male, 她=female），确保 prompt 中角色性别正确，不要搞混。"
 
             client = self._get_llm_client()
             response = client.chat(

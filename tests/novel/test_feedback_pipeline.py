@@ -136,10 +136,10 @@ class TestWriterRewriteChapter:
         assert "微调" in system_msg or "最小修改" in system_msg
 
     def test_rewrite_hard_truncation(self):
-        """Text exceeding 1.2x estimated_words gets truncated."""
+        """Text exceeding 1.5x estimated_words gets truncated."""
         from src.novel.agents.writer import Writer
 
-        # estimated_words=2000, hard_limit = 2400
+        # estimated_words=2000, hard_limit = 3000 (1.5x)
         # Return text way longer than that
         long_text = "这是一段非常长的文本。" * 500  # ~5000 chars
         llm = make_llm_client(response_text=long_text)
@@ -156,7 +156,7 @@ class TestWriterRewriteChapter:
             is_propagation=False,
         )
 
-        hard_limit = int(2000 * 1.2)
+        hard_limit = int(2000 * 1.5)
         assert len(result) <= hard_limit + 1  # +1 for the 。 at cut point
 
     def test_rewrite_empty_context(self):

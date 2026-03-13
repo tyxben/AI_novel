@@ -41,6 +41,8 @@ def gradio_server():
             prevent_thread_lock=True,
             inbrowser=False,
             quiet=True,
+            css=web.CUSTOM_CSS,
+            head=web.DROPDOWN_FIX_HEAD,
         ),
         daemon=True,
     )
