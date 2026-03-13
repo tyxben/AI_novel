@@ -115,7 +115,9 @@ class DirectorPipeline:
 
         # === Stage 6: 合成视频 ===
         _notify(0.85, "正在合成视频...")
-        output_path = run_dir / f"{script.title or 'video'}_{run_id}.mp4"
+        import re as _re
+        safe_title = _re.sub(r'[^\w\u4e00-\u9fff-]', '_', script.title or 'video')[:50]
+        output_path = run_dir / f"{safe_title}_{run_id}.mp4"
         final_path = self._assemble_video(script, run_dir, output_path)
 
         _notify(1.0, "完成!")
@@ -348,21 +350,21 @@ class DirectorPipeline:
         has_video_clips = False
 
         for seg in script.segments:
-            if not seg.asset_path:
-                log.warning("segment %d 无素材，跳过", seg.id)
+            if not seg.asset_path or not seg.audio_path:
+                log.warning("segment %d 缺少素材或配音，跳过", seg.id)
                 continue
 
             asset_path = Path(seg.asset_path)
-            audio_path = Path(seg.audio_path) if seg.audio_path else None
+            audio_path = Path(seg.audio_path)
             srt_path = Path(seg.srt_path) if seg.srt_path else None
+
+            images.append(asset_path)
 
             if seg.asset_type in (AssetType.IMAGE2VIDEO, AssetType.VIDEO):
                 has_video_clips = True
                 video_clips.append(asset_path)
-                images.append(asset_path)  # 占位，assembler 需要对齐
             else:
-                images.append(asset_path)
-                video_clips.append(None)  # 占位
+                video_clips.append(asset_path)  # 静图也传路径，assembler 会用 Ken Burns
 
             audio_srt.append({
                 "audio": audio_path,
