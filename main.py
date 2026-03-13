@@ -340,5 +340,66 @@ def novel_status(project_path: str):
         raise click.Abort()
 
 
+@cli.command("create-video")
+@click.argument("inspiration")
+@click.option("--duration", "-d", default=45, help="目标视频时长(秒)")
+@click.option("--budget", "-b", default="low", type=click.Choice(["free", "low", "medium", "high"]), help="预算档位")
+@click.option("--config", "-c", "config_path", default=None, help="配置文件路径")
+@click.option("--workspace", "-w", default=None, help="工作目录")
+def create_video(inspiration, duration, budget, config_path, workspace):
+    """从灵感一键生成短视频。
+
+    INSPIRATION: 视频灵感/创意描述
+
+    示例:
+        python main.py create-video "凌晨三点外卖员接到一单送往废弃医院的外卖"
+        python main.py create-video "一个人发现自己的影子会独立行动" -d 60 -b medium
+    """
+    from src.director_pipeline import DirectorPipeline
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+    console = Console()
+    console.print(f"\n[bold blue]🎬 AI短视频导演[/bold blue]")
+    console.print(f"灵感: {inspiration}")
+    console.print(f"时长: {duration}s | 预算: {budget}\n")
+
+    pipeline = DirectorPipeline(
+        config_path=config_path,
+        workspace=workspace,
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("初始化...", total=100)
+
+        def on_progress(pct: float, desc: str):
+            progress.update(task, completed=int(pct * 100), description=desc)
+
+        try:
+            result = pipeline.run(
+                inspiration=inspiration,
+                target_duration=duration,
+                budget=budget,
+                progress_callback=on_progress,
+            )
+
+            console.print(f"\n[bold green]✅ 视频生成完成！[/bold green]")
+            console.print(f"标题: {result['script'].get('title', '未命名')}")
+            console.print(f"时长: {result['duration']:.1f}s")
+            console.print(f"段数: {len(result['segments'])}")
+            console.print(f"路径: {result['video_path']}")
+            console.print(f"工作目录: {result['run_dir']}")
+
+        except Exception as exc:
+            console.print(f"\n[bold red]❌ 生成失败: {exc}[/bold red]")
+            raise click.Abort()
+
+
 if __name__ == "__main__":
     cli()

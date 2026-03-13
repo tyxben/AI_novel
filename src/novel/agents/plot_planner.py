@@ -67,6 +67,11 @@ _DECOMPOSE_SYSTEM = """\
 3. 合理分配字数（关键场景字数更多）
 4. 叙事焦点要多样（对话/动作/描写/心理交替使用）
 5. 如果有伏笔提示，自然地织入场景中
+6. 每个场景必须服务于主线推进，不允许纯水字数的场景
+7. 至少有一个场景必须让主线产生实质性进展（不是"铺垫"而是"推进"）
+8. 如果有主线信息，场景必须体现主角朝目标靠近或遭遇新障碍
+9. 如果上一章有未解决的悬念或任务（角色去执行某事），本章必须有场景交代其结果
+10. 每个场景引入的问题/方案必须在本章或明确标注在后续章节中解决，不能悬而不决
 
 返回严格的 JSON 格式（不要添加任何额外文字）：
 {
@@ -95,7 +100,7 @@ _DECOMPOSE_USER = """\
 - 涉及角色: {involved_characters}
 - 情绪基调: {mood}
 - 预估字数: {estimated_words}
-
+{main_storyline_section}
 ## 卷上下文
 {volume_context}
 
@@ -159,8 +164,16 @@ class PlotPlanner:
         volume_context: dict,
         characters: list[CharacterProfile],
         foreshadowing_hints: list[dict] | None = None,
+        outline: dict | None = None,
     ) -> list[dict]:
-        """将章大纲分解为场景计划列表。"""
+        """将章大纲分解为场景计划列表。
+
+        Parameters
+        ----------
+        outline:
+            完整大纲字典，可选。用于提取 ``main_storyline`` 信息
+            以便场景分解时注入主线推进要求。
+        """
         target_scenes = _SCENE_COUNT_MAP.get(chapter_outline.mood, 3)
 
         char_lines = []
@@ -188,6 +201,27 @@ class PlotPlanner:
             )
         volume_ctx_str = "\n".join(vol_lines) if vol_lines else "无卷上下文"
 
+        # 构建主线信息 section
+        main_storyline_section = ""
+        if outline and isinstance(outline, dict):
+            main_sl = outline.get("main_storyline", {})
+            if main_sl and isinstance(main_sl, dict):
+                main_storyline_section = (
+                    "\n## 主线信息（场景必须服务于此）\n"
+                    f"- 主角目标：{main_sl.get('protagonist_goal', '未定义')}\n"
+                    f"- 核心冲突：{main_sl.get('core_conflict', '未定义')}\n"
+                    f"- 角色弧线：{main_sl.get('character_arc', '未定义')}\n"
+                    f"- 赌注：{main_sl.get('stakes', '未定义')}\n"
+                )
+        # 追加本章的主线推进要求
+        storyline_progress = getattr(
+            chapter_outline, "storyline_progress", ""
+        )
+        if storyline_progress:
+            if not main_storyline_section:
+                main_storyline_section = "\n## 主线信息（场景必须服务于此）\n"
+            main_storyline_section += f"- 本章主线推进：{storyline_progress}\n"
+
         user_msg = _DECOMPOSE_USER.format(
             chapter_number=chapter_outline.chapter_number,
             title=chapter_outline.title,
@@ -200,6 +234,7 @@ class PlotPlanner:
             else "未指定",
             mood=chapter_outline.mood,
             estimated_words=chapter_outline.estimated_words,
+            main_storyline_section=main_storyline_section,
             volume_context=volume_ctx_str,
             characters_info=characters_info,
             foreshadowing_info=foreshadowing_info,
@@ -396,6 +431,7 @@ def plot_planner_node(state: dict) -> dict:
             volume_context={},
             characters=characters,
             foreshadowing_hints=None,
+            outline=state.get("outline"),
         )
 
         decisions.append({

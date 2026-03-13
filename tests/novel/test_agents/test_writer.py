@@ -641,3 +641,220 @@ class TestContextWindow:
         user_msg = llm.chat.call_args[0][0][1]["content"]
         # 上下文部分不应超过原始长度（已截断）
         assert len(user_msg) < len(long_context)
+
+
+# ---------------------------------------------------------------------------
+# set_storyline_context 测试
+# ---------------------------------------------------------------------------
+
+
+class TestStorylineContext:
+    """set_storyline_context 主线意识和节奏位置感测试"""
+
+    def test_storyline_injected_into_system_prompt(self) -> None:
+        """设置主线后，system prompt 应包含主线信息。"""
+        llm = _make_llm("战斗场景。")
+        writer = Writer(llm)
+
+        writer.set_storyline_context(
+            main_storyline={
+                "protagonist_goal": "成为天下第一剑客",
+                "core_conflict": "宿敌追杀与自我突破",
+                "character_arc": "从懦弱少年成长为无畏剑客",
+                "stakes": "师门存亡",
+            },
+            current_chapter=5,
+            total_chapters=40,
+            storyline_progress="主角初入江湖",
+        )
+
+        writer.generate_scene(
+            scene_plan=_make_scene_plan(),
+            chapter_outline=_make_chapter_outline(chapter_number=5),
+            characters=[_make_character()],
+            world_setting=_make_world(),
+            context="",
+            style_name="webnovel.shuangwen",
+        )
+
+        system_msg = llm.chat.call_args[0][0][0]["content"]
+        assert "故事主线" in system_msg
+        assert "成为天下第一剑客" in system_msg
+        assert "宿敌追杀" in system_msg
+        assert "懦弱少年" in system_msg
+        assert "师门存亡" in system_msg
+
+    def test_position_injected_into_system_prompt(self) -> None:
+        """设置位置后，system prompt 应包含位置和节奏信息。"""
+        llm = _make_llm("高潮场景。")
+        writer = Writer(llm)
+
+        writer.set_storyline_context(
+            main_storyline={"protagonist_goal": "复仇"},
+            current_chapter=35,
+            total_chapters=40,
+            storyline_progress="最终决战前夕",
+        )
+
+        writer.generate_scene(
+            scene_plan=_make_scene_plan(),
+            chapter_outline=_make_chapter_outline(chapter_number=35),
+            characters=[_make_character()],
+            world_setting=_make_world(),
+            context="",
+            style_name="webnovel.shuangwen",
+        )
+
+        system_msg = llm.chat.call_args[0][0][0]["content"]
+        assert "当前故事位置" in system_msg
+        assert "第 35 章 / 共 40 章" in system_msg
+        assert "最终决战前夕" in system_msg
+        assert "高潮期" in system_msg
+
+    def test_no_storyline_no_extra_prompt(self) -> None:
+        """未设置主线时，system prompt 不应包含主线/位置 section。"""
+        llm = _make_llm("普通场景。")
+        writer = Writer(llm)
+
+        writer.generate_scene(
+            scene_plan=_make_scene_plan(),
+            chapter_outline=_make_chapter_outline(),
+            characters=[_make_character()],
+            world_setting=_make_world(),
+            context="",
+            style_name="webnovel.shuangwen",
+        )
+
+        system_msg = llm.chat.call_args[0][0][0]["content"]
+        assert "故事主线" not in system_msg
+        assert "当前故事位置" not in system_msg
+
+    def test_pacing_chapter_1(self) -> None:
+        """第1章应给出开场章节奏指令。"""
+        llm = _make_llm("开场。")
+        writer = Writer(llm)
+
+        writer.set_storyline_context(
+            main_storyline={"protagonist_goal": "test"},
+            current_chapter=1,
+            total_chapters=40,
+        )
+
+        assert writer._story_position is not None
+        assert "开场章" in writer._story_position["pacing_instruction"]
+        assert "禁止慢热" in writer._story_position["pacing_instruction"]
+
+    def test_pacing_early_chapters(self) -> None:
+        """第2-3章应给出前期章节奏指令。"""
+        writer = Writer(_make_llm())
+        writer.set_storyline_context(
+            main_storyline={"protagonist_goal": "test"},
+            current_chapter=2,
+            total_chapters=40,
+        )
+        assert "前期章节" in writer._story_position["pacing_instruction"]
+
+    def test_pacing_development_phase(self) -> None:
+        """25%-50%进度应给出发展期指令。"""
+        writer = Writer(_make_llm())
+        writer.set_storyline_context(
+            main_storyline={"protagonist_goal": "test"},
+            current_chapter=15,
+            total_chapters=40,
+        )
+        assert writer._story_position["progress_pct"] == 37
+        assert "发展期" in writer._story_position["pacing_instruction"]
+
+    def test_pacing_climax_phase(self) -> None:
+        """75%-90%进度应给出高潮期指令。"""
+        writer = Writer(_make_llm())
+        writer.set_storyline_context(
+            main_storyline={"protagonist_goal": "test"},
+            current_chapter=33,
+            total_chapters=40,
+        )
+        assert writer._story_position["progress_pct"] == 82
+        assert "高潮期" in writer._story_position["pacing_instruction"]
+
+    def test_pacing_ending_phase(self) -> None:
+        """90%+进度应给出收束期指令。"""
+        writer = Writer(_make_llm())
+        writer.set_storyline_context(
+            main_storyline={"protagonist_goal": "test"},
+            current_chapter=38,
+            total_chapters=40,
+        )
+        assert writer._story_position["progress_pct"] == 95
+        assert "收束期" in writer._story_position["pacing_instruction"]
+
+    def test_zero_total_chapters_no_crash(self) -> None:
+        """total_chapters 为 0 时不应崩溃（除零保护）。"""
+        writer = Writer(_make_llm())
+        writer.set_storyline_context(
+            main_storyline={"protagonist_goal": "test"},
+            current_chapter=1,
+            total_chapters=0,
+        )
+        assert writer._story_position is not None
+        assert writer._story_position["progress_pct"] == 100
+
+    def test_writer_node_sets_storyline_context(self) -> None:
+        """writer_node 应从 state 中提取 main_storyline 并设置到 Writer。"""
+        llm = _make_llm("节点生成。")
+        outline = _make_chapter_outline(chapter_number=10, title="暗流涌动")
+
+        state = {
+            "config": {},
+            "current_chapter": 10,
+            "total_chapters": 40,
+            "current_chapter_outline": outline.model_dump(),
+            "current_scenes": [_make_scene_plan(1)],
+            "characters": [],
+            "world_setting": _make_world().model_dump(),
+            "style_name": "webnovel.shuangwen",
+            "chapters": [],
+            "outline": {
+                "main_storyline": {
+                    "protagonist_goal": "修炼成仙",
+                    "core_conflict": "魔族入侵",
+                    "character_arc": "凡人成仙",
+                    "stakes": "人界存亡",
+                },
+                "chapters": [],
+            },
+        }
+
+        with patch("src.novel.agents.writer.create_llm_client", return_value=llm):
+            result = writer_node(state)
+
+        assert "current_chapter_text" in result
+
+        # 验证 system prompt 包含主线信息
+        system_msg = llm.chat.call_args[0][0][0]["content"]
+        assert "修炼成仙" in system_msg
+        assert "魔族入侵" in system_msg
+        assert "当前故事位置" in system_msg
+
+    def test_writer_node_no_outline_no_crash(self) -> None:
+        """state 中没有 outline 时 writer_node 不崩溃。"""
+        llm = _make_llm("无大纲。")
+        outline = _make_chapter_outline()
+
+        state = {
+            "config": {},
+            "current_chapter_outline": outline.model_dump(),
+            "current_scenes": [_make_scene_plan(1)],
+            "characters": [],
+            "world_setting": _make_world().model_dump(),
+            "style_name": "webnovel.shuangwen",
+            "chapters": [],
+        }
+
+        with patch("src.novel.agents.writer.create_llm_client", return_value=llm):
+            result = writer_node(state)
+
+        assert "current_chapter_text" in result
+
+        # 没有主线信息时不应有主线 section
+        system_msg = llm.chat.call_args[0][0][0]["content"]
+        assert "故事主线" not in system_msg

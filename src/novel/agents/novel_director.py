@@ -43,7 +43,7 @@ _GENRE_TEMPLATE_MAP: dict[str, str] = {
     "武侠": "four_act",
     "仙侠": "four_act",
     "言情": "four_act",
-    "科幻": "four_act",
+    "科幻": "scifi_crisis",
 }
 
 _GENRE_STYLE_MAP: dict[str, str] = {
@@ -57,7 +57,7 @@ _GENRE_STYLE_MAP: dict[str, str] = {
     "群像": "literary.realism",
     "悬疑": "literary.realism",
     "言情": "webnovel.romance",
-    "科幻": "literary.realism",
+    "科幻": "scifi.hardscifi",
     "轻小说": "light_novel.campus",
 }
 
@@ -328,8 +328,24 @@ class NovelDirector:
 每卷章节数：{chapters_per_volume}
 总章节数：{total_chapters}{custom_part}
 
+【专业写作原则 — 必须严格遵守】
+1. 主线为王：整部小说必须有一条清晰的主线（主角目标→障碍→成长→达成/失败）
+2. 开场即冲突：第1章必须用冲突或悬念抓住读者，禁止慢热开场
+3. 三章定生死：前3章内读者必须能明确感知到核心矛盾是什么
+4. 每章必推进：每章必须在主线上有实质性推进，不允许原地踏步的过渡章
+5. 赌注递增：故事赌注随章节推进不断升级，让读者越来越紧张
+6. 角色弧线：主角必须有内在成长，从开始到结束是不同的人
+
 请严格按以下 JSON 格式返回：
 {{
+  "main_storyline": {{
+    "protagonist": "主角姓名",
+    "protagonist_goal": "主角的核心目标/欲望（贯穿全书）",
+    "core_conflict": "主角实现目标的最大障碍",
+    "character_arc": "主角从什么状态变成什么状态（内在成长）",
+    "stakes": "如果主角失败会怎样（赌注）",
+    "theme_statement": "故事想传达的核心主题（一句话）"
+  }},
   "acts": [
     {{
       "name": "第一幕：xxx",
@@ -356,7 +372,9 @@ class NovelDirector:
       "involved_characters": [],
       "plot_threads": [],
       "estimated_words": 2500,
-      "mood": "蓄力"
+      "mood": "蓄力",
+      "storyline_progress": "本章如何推进主线（必须具体，不能空泛）",
+      "chapter_summary": "本章内容2-3句话摘要"
     }}
   ]
 }}
@@ -367,6 +385,11 @@ mood 可选值：蓄力、小爽、大爽、过渡、虐心、反转、日常。
 2. 每卷的 chapters 列表对应正确的章节号
 3. 每幕的 start_chapter 和 end_chapter 不重叠
 4. 情节有起伏，节奏合理
+5. 【主线清晰】每章的 storyline_progress 必须明确说明本章如何推进主角目标
+6. 【开场钩子】第1章必须以冲突/悬念/危机开场，禁止用日常铺垫开头
+7. 【节奏紧凑】前3章内必须进入核心冲突，不允许超过2章的纯铺垫
+8. 【章节摘要】每章必须有具体的 chapter_summary，不能为空
+9. 【赌注升级】随着故事推进，赌注必须不断升级（个人→团队→世界）
 """
 
     def _parse_outline(
@@ -444,8 +467,17 @@ mood 可选值：蓄力、小爽、大爽、过渡、虐心、反转、日常。
                 )
             ]
 
+        # 提取 main_storyline（防御 LLM 返回 null 或非 dict 类型）
+        main_storyline = data.get("main_storyline") or {}
+        if not isinstance(main_storyline, dict):
+            main_storyline = {}
+        elif not main_storyline.get("protagonist_goal"):
+            # protagonist_goal 缺失时仍可继续，但记录警告
+            pass  # 下游代码用 .get() 有默认值，不影响运行
+
         return Outline(
             template=template_name,
+            main_storyline=main_storyline,
             acts=acts,
             volumes=volumes,
             chapters=chapters,

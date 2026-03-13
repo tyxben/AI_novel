@@ -61,14 +61,24 @@ class ChapterOutline(BaseModel):
     mood: Literal["蓄力", "小爽", "大爽", "过渡", "虐心", "反转", "日常"] = Field(
         "蓄力", description="章节情绪基调"
     )
+    storyline_progress: str = Field(
+        "", description="本章如何推进主线（例：主角发现关键线索）"
+    )
+    chapter_summary: str = Field(
+        "", description="本章内容摘要（2-3句话）"
+    )
 
 
 class Outline(BaseModel):
     """三层大纲结构"""
 
     template: Literal[
-        "cyclic_upgrade", "multi_thread", "four_act", "custom"
+        "cyclic_upgrade", "multi_thread", "four_act", "scifi_crisis", "custom"
     ] = Field(..., description="大纲模板类型")
+    main_storyline: dict = Field(
+        default_factory=dict,
+        description="主线定义，包含 protagonist_goal, core_conflict, character_arc, stakes 等",
+    )
     acts: list[Act] = Field(default_factory=list)
     volumes: list[VolumeOutline] = Field(default_factory=list)
     chapters: list[ChapterOutline] = Field(default_factory=list)

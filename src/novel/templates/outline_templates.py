@@ -1,9 +1,10 @@
 """大纲模板定义
 
-提供三种标准大纲模板：
+提供四种标准大纲模板：
 - cyclic_upgrade: 循环升级模板，适合玄幻/都市/系统流
 - multi_thread: 多线交织模板，适合群像/宫斗/悬疑
 - classic_four_act: 经典四幕模板，适合武侠/仙侠/文学
+- scifi_crisis: 科幻危机模板，适合硬科幻/末日/太空歌剧
 """
 
 from __future__ import annotations
@@ -46,6 +47,16 @@ _TEMPLATES: dict[str, OutlineTemplate] = {
         ),
         act_count=4,
         default_chapters_per_volume=20,
+    ),
+    "scifi_crisis": OutlineTemplate(
+        name="scifi_crisis",
+        description=(
+            "科幻危机结构：危机开场 → 探索真相 → 绝境突围 → 代价与启示。"
+            "适合硬科幻、末日科幻、太空歌剧等题材。"
+            "开场即危机，节奏紧凑，概念揭示穿插在行动中。"
+        ),
+        act_count=4,
+        default_chapters_per_volume=15,
     ),
 }
 

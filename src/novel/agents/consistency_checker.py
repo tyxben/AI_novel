@@ -126,6 +126,96 @@ class ConsistencyChecker:
             "chapter_number": chapter_number,
         }
 
+    def check_narrative_logic(
+        self,
+        chapter_text: str,
+        chapter_number: int,
+        previous_summary: str,
+    ) -> list[dict[str, Any]]:
+        """LLM-based narrative logic check for the current chapter.
+
+        Detects:
+        - Character resurrection / disappearance
+        - Event duplication
+        - Data inconsistency (numbers, distances, times)
+        - Unresolved plans/schemes
+
+        Args:
+            chapter_text: Current chapter text
+            chapter_number: Current chapter number
+            previous_summary: Summary of previous chapters for context
+
+        Returns:
+            List of narrative logic issues found
+        """
+        if not previous_summary:
+            return []
+
+        prompt = (
+            f"请检查以下第{chapter_number}章内容是否存在叙事逻辑问题。\n\n"
+            f"【前文摘要】\n{previous_summary[:2000]}\n\n"
+            f"【第{chapter_number}章正文】\n{chapter_text[:3000]}\n\n"
+            "请检查以下问题（必须逐项检查）：\n"
+            "1. 角色生死状态：是否有已死角色复活或正常对话的情况？\n"
+            "2. 角色去向：是否有角色说要去做某事后就消失没有后续？\n"
+            "3. 事件重复：是否有同一个事件（战斗、会议、发现）被描写了两次以上？\n"
+            "4. 数据一致：距离、时间、数量等具体数字是否前后矛盾？\n"
+            "5. 方案闭环：是否有提出的计划/方案没有交代结果？\n\n"
+            "请以 JSON 格式返回：\n"
+            '{"issues": [{"type": "问题类型", "description": "具体描述", '
+            '"severity": "high/medium/low"}]}\n'
+            "如果没有发现问题，返回：{\"issues\": []}"
+        )
+
+        try:
+            response = self.llm.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一位严谨的小说编辑，专门检查叙事逻辑一致性。"
+                            "只报告确实存在的问题，不要捏造问题。"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                json_mode=True,
+            )
+
+            from src.novel.utils import extract_json_from_llm
+
+            parsed = extract_json_from_llm(response.content)
+            issues = parsed.get("issues", [])
+            if not isinstance(issues, list):
+                return []
+
+            # Convert to contradiction-compatible format
+            results: list[dict[str, Any]] = []
+            severity_confidence = {"high": 0.8, "medium": 0.6, "low": 0.4}
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    continue
+                severity = issue.get("severity", "medium")
+                results.append({
+                    "layer": "narrative_logic",
+                    "type": issue.get("type", "unknown"),
+                    "fact": {
+                        "chapter": chapter_number,
+                        "content": issue.get("description", ""),
+                    },
+                    "conflicting_fact": {
+                        "chapter": chapter_number,
+                        "content": "叙事逻辑检查",
+                    },
+                    "confidence": severity_confidence.get(severity, 0.6),
+                    "reason": issue.get("description", ""),
+                })
+            return results
+        except Exception as exc:
+            log.warning("叙事逻辑检查失败: %s", exc)
+            return []
+
 
 # ---------------------------------------------------------------------------
 # LangGraph 节点函数
@@ -286,14 +376,51 @@ def consistency_checker_node(state: NovelState) -> dict[str, Any]:
         except Exception:
             pass
 
+    # 叙事逻辑检查（在完整 LLM 检查时额外执行）
+    previous_summary = ""
+    chapters_done = state.get("chapters", [])
+    if chapters_done:
+        # 取最近几章的摘要作为前文上下文
+        recent_chapters = chapters_done[-3:]
+        summary_parts = []
+        for ch in recent_chapters:
+            ch_num = ch.get("chapter_number", "?")
+            ch_text = ch.get("full_text", "")
+            if ch_text:
+                summary_parts.append(f"第{ch_num}章：{ch_text[:500]}")
+        previous_summary = "\n".join(summary_parts)
+
+    narrative_issues: list[dict] = []
+    if previous_summary:
+        try:
+            narrative_issues = checker.check_narrative_logic(
+                chapter_text, chapter_number, previous_summary
+            )
+            if narrative_issues:
+                decisions.append(
+                    _make_decision(
+                        step="narrative_logic_check",
+                        decision=f"发现{len(narrative_issues)}个叙事逻辑问题",
+                        reason="叙事逻辑检查：角色状态/事件重复/数据一致性",
+                        data={"issues_count": len(narrative_issues)},
+                    )
+                )
+        except Exception as exc:
+            log.warning("叙事逻辑检查异常: %s", exc)
+
+    # Merge narrative issues into report contradictions
+    all_contradictions = report["contradictions"] + narrative_issues
+    overall_passed = report["passed"] and len(narrative_issues) == 0
+
     # 合并质量信息
     existing_quality = state.get("current_chapter_quality") or {}
     updated_quality = {
         **existing_quality,
         "consistency_check": {
-            "passed": report["passed"],
-            "contradictions": report["contradictions"],
+            "passed": overall_passed,
+            "contradictions": all_contradictions,
             "facts_count": len(report["facts"]),
+            "narrative_issues_count": len(narrative_issues),
         },
     }
 
@@ -340,11 +467,14 @@ def _bm25_check(
     # Death / disappearance keywords that signal permanent state
     _DEATH_KEYWORDS = ("死", "亡", "殒命", "丧命", "身亡", "去世", "陨落")
     _ALIVE_KEYWORDS = ("出现", "说道", "笑道", "走", "拿", "站", "坐")
+    # Departure keywords — character leaves to do something
+    _DEPARTURE_KEYWORDS = ("我去", "前去", "出发", "赶往", "动身", "启程", "去执行")
 
     for name in char_names:
         passages = retriever.query_by_entity(name, top_k=10)
         death_refs: list[dict] = []
         alive_refs: list[dict] = []
+        departure_refs: list[dict] = []
 
         for p in passages:
             text = p["text"]
@@ -354,15 +484,17 @@ def _bm25_check(
                 death_refs.append(p)
             if any(kw in text for kw in _ALIVE_KEYWORDS):
                 alive_refs.append(p)
+            if any(kw in text for kw in _DEPARTURE_KEYWORDS):
+                departure_refs.append(p)
 
-        # If a character has death references in earlier chapters
-        # but alive references in later chapters -> potential contradiction
+        # Check 1: Dead character reappearing alive
         for d_ref in death_refs:
             for a_ref in alive_refs:
                 if a_ref["chapter"] > d_ref["chapter"]:
                     contradictions.append({
                         "layer": "bm25",
                         "character": name,
+                        "type": "character_resurrection",
                         "fact": {
                             "chapter": a_ref["chapter"],
                             "content": a_ref["text"][:100],
@@ -374,6 +506,78 @@ def _bm25_check(
                         "confidence": 0.5,
                         "reason": f"{name}在第{d_ref['chapter']}章疑似死亡，但在第{a_ref['chapter']}章再次出现",
                     })
+
+        # Check 2: Character departed but never followed up
+        # If a character departed in an earlier chapter but has no further
+        # mentions in any subsequent chapter, flag as potential missing follow-up
+        if departure_refs and chapter_number > 1:
+            for dep_ref in departure_refs:
+                dep_ch = dep_ref["chapter"]
+                if dep_ch >= chapter_number:
+                    continue
+                # Check if character has any mention in chapters after departure
+                has_followup = any(
+                    p["chapter"] > dep_ch
+                    for p in passages
+                    if name in p["text"]
+                )
+                if not has_followup:
+                    contradictions.append({
+                        "layer": "bm25",
+                        "character": name,
+                        "type": "character_disappeared",
+                        "fact": {
+                            "chapter": dep_ch,
+                            "content": dep_ref["text"][:100],
+                        },
+                        "conflicting_fact": {
+                            "chapter": chapter_number,
+                            "content": f"第{dep_ch}章后{name}再无出现",
+                        },
+                        "confidence": 0.4,
+                        "reason": f"{name}在第{dep_ch}章说要去执行任务后消失，后续无任何交代",
+                    })
+
+    # Check 3: Event duplication — detect highly similar passages across chapters
+    _EVENT_KEYWORDS = (
+        "发布会", "会议", "战斗", "攻击", "爆炸", "仪式", "典礼",
+        "审判", "宣布", "签署", "演讲", "庆典",
+    )
+    event_passages: dict[str, list[dict]] = {}
+    all_chapters_text = dict(chapters_text)
+    all_chapters_text[chapter_number] = chapter_text
+    for ch_num in sorted(all_chapters_text):
+        retriever_temp = BM25Retriever()
+        retriever_temp.add_chapter(ch_num, all_chapters_text[ch_num])
+        for kw in _EVENT_KEYWORDS:
+            hits = retriever_temp.query(kw, top_k=3)
+            for h in hits:
+                if kw in h.get("text", ""):
+                    event_passages.setdefault(kw, []).append(h)
+
+    for kw, hits in event_passages.items():
+        # Group by chapter — if same event keyword appears in multiple chapters
+        chapters_with_event: dict[int, str] = {}
+        for h in hits:
+            ch = h["chapter"]
+            if ch not in chapters_with_event:
+                chapters_with_event[ch] = h["text"][:100]
+        if len(chapters_with_event) >= 2:
+            ch_list = sorted(chapters_with_event.keys())
+            contradictions.append({
+                "layer": "bm25",
+                "type": "event_duplication",
+                "fact": {
+                    "chapter": ch_list[-1],
+                    "content": chapters_with_event[ch_list[-1]],
+                },
+                "conflicting_fact": {
+                    "chapter": ch_list[0],
+                    "content": chapters_with_event[ch_list[0]],
+                },
+                "confidence": 0.35,
+                "reason": f"「{kw}」事件在第{ch_list[0]}章和第{ch_list[-1]}章重复出现，可能是重复描写",
+            })
 
     return {
         "passed": len(contradictions) == 0,

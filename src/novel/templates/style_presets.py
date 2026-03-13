@@ -210,6 +210,37 @@ _STYLE_PRESETS: dict[str, dict[str, Any]] = {
             "max_paragraph_sentences": 8,
         },
     },
+    # ===== 科幻 scifi =====
+    "scifi.hardscifi": {
+        "category": "scifi",
+        "subcategory": "hardscifi",
+        "display_name": "硬科幻",
+        "system_prompt": (
+            "你的写作风格参考刘慈欣、阿西莫夫。"
+            "用冷静克制的笔触描写宏大场景。"
+            "科学概念融入剧情，不做无意义的技术说明。"
+            "人物情感要克制但真实，通过行动而非内心独白展现。"
+            "对话简洁有力，避免废话。"
+            "场景描写注重视觉冲击力和空间感。"
+            "保持紧张感，每个段落都要推进情节。"
+        ),
+        "few_shot_examples": [
+            (
+                "警报声撕裂了指挥舱的寂静。全息屏上，"
+                "那个不明物体的轨迹曲线正以不可能的角度弯折——"
+                "没有任何已知天体的引力场能解释这种运动。\n"
+                "\"轨道异常，偏差率超过百分之三百。\"导航员的声音很稳，"
+                "但他握住扶手的指关节已经发白。\n"
+                "舰长盯着屏幕上不断刷新的数据，做了一个决定。"
+                "这个决定将在此后的二十七年里反复被人类审判。"
+            ),
+        ],
+        "constraints": {
+            "avg_sentence_length": [15, 30],
+            "dialogue_ratio": [0.2, 0.4],
+            "max_paragraph_sentences": 5,
+        },
+    },
     # ===== 轻小说 light_novel =====
     "light_novel.campus": {
         "category": "light_novel",

@@ -532,3 +532,170 @@ def test_decompose_missing_fields_defaults():
     # target_words 至少 200
     assert result[0]["target_words"] >= 200
     assert result[1]["target_words"] >= 200
+
+
+# ---------------------------------------------------------------------------
+# Tests: decompose_chapter 主线推进追踪
+# ---------------------------------------------------------------------------
+
+
+def test_decompose_chapter_with_main_storyline():
+    """传入 outline 包含 main_storyline 时，prompt 中应包含主线信息。"""
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat.return_value = _make_llm_response(_mock_llm_scenes(3))
+
+    planner = PlotPlanner(mock_llm)
+    outline = {
+        "main_storyline": {
+            "protagonist_goal": "成为天下第一",
+            "core_conflict": "魔族入侵",
+            "character_arc": "从懦弱少年成长为盖世英雄",
+            "stakes": "人族存亡",
+        },
+    }
+    result = planner.decompose_chapter(
+        chapter_outline=_make_chapter_outline(),
+        volume_context={},
+        characters=[_make_character()],
+        outline=outline,
+    )
+
+    assert len(result) == 3
+    call_args = mock_llm.chat.call_args
+    user_msg = call_args[0][0][1]["content"]
+    assert "主线信息" in user_msg
+    assert "成为天下第一" in user_msg
+    assert "魔族入侵" in user_msg
+    assert "从懦弱少年成长为盖世英雄" in user_msg
+    assert "人族存亡" in user_msg
+
+
+def test_decompose_chapter_with_storyline_progress():
+    """chapter_outline 有 storyline_progress 时，prompt 中应包含本章主线推进。"""
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat.return_value = _make_llm_response(_mock_llm_scenes(3))
+
+    planner = PlotPlanner(mock_llm)
+    chapter = _make_chapter_outline(storyline_progress="主角获得神器碎片")
+    result = planner.decompose_chapter(
+        chapter_outline=chapter,
+        volume_context={},
+        characters=[],
+    )
+
+    assert len(result) == 3
+    call_args = mock_llm.chat.call_args
+    user_msg = call_args[0][0][1]["content"]
+    assert "本章主线推进：主角获得神器碎片" in user_msg
+
+
+def test_decompose_chapter_with_both_outline_and_progress():
+    """同时有 outline.main_storyline 和 chapter_outline.storyline_progress。"""
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat.return_value = _make_llm_response(_mock_llm_scenes(3))
+
+    planner = PlotPlanner(mock_llm)
+    outline = {
+        "main_storyline": {
+            "protagonist_goal": "复仇",
+            "core_conflict": "家族灭门",
+        },
+    }
+    chapter = _make_chapter_outline(storyline_progress="发现仇人线索")
+    result = planner.decompose_chapter(
+        chapter_outline=chapter,
+        volume_context={},
+        characters=[],
+        outline=outline,
+    )
+
+    assert len(result) == 3
+    call_args = mock_llm.chat.call_args
+    user_msg = call_args[0][0][1]["content"]
+    assert "复仇" in user_msg
+    assert "家族灭门" in user_msg
+    assert "本章主线推进：发现仇人线索" in user_msg
+
+
+def test_decompose_chapter_no_outline_no_progress():
+    """不传 outline 且无 storyline_progress 时，prompt 中不应有主线 section。"""
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat.return_value = _make_llm_response(_mock_llm_scenes(3))
+
+    planner = PlotPlanner(mock_llm)
+    result = planner.decompose_chapter(
+        chapter_outline=_make_chapter_outline(),
+        volume_context={},
+        characters=[],
+    )
+
+    assert len(result) == 3
+    call_args = mock_llm.chat.call_args
+    user_msg = call_args[0][0][1]["content"]
+    assert "主线信息" not in user_msg
+
+
+def test_decompose_chapter_empty_main_storyline():
+    """outline 存在但 main_storyline 为空 dict 时，不注入主线 section。"""
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat.return_value = _make_llm_response(_mock_llm_scenes(3))
+
+    planner = PlotPlanner(mock_llm)
+    result = planner.decompose_chapter(
+        chapter_outline=_make_chapter_outline(),
+        volume_context={},
+        characters=[],
+        outline={"main_storyline": {}},
+    )
+
+    assert len(result) == 3
+    call_args = mock_llm.chat.call_args
+    user_msg = call_args[0][0][1]["content"]
+    assert "主线信息" not in user_msg
+
+
+def test_decompose_chapter_system_prompt_has_mainline_rules():
+    """system prompt 中应包含主线推进要求（规则 6/7/8）。"""
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat.return_value = _make_llm_response(_mock_llm_scenes(3))
+
+    planner = PlotPlanner(mock_llm)
+    planner.decompose_chapter(
+        chapter_outline=_make_chapter_outline(),
+        volume_context={},
+        characters=[],
+    )
+
+    call_args = mock_llm.chat.call_args
+    system_msg = call_args[0][0][0]["content"]
+    assert "每个场景必须服务于主线推进" in system_msg
+    assert "至少有一个场景必须让主线产生实质性进展" in system_msg
+    assert "主角朝目标靠近或遭遇新障碍" in system_msg
+
+
+def test_plot_planner_node_passes_outline():
+    """节点函数应将 state 中的 outline 传递给 decompose_chapter。"""
+    mock_llm = MagicMock(spec=LLMClient)
+    mock_llm.chat.return_value = _make_llm_response(_mock_llm_scenes(3))
+
+    outline_data = {
+        "main_storyline": {
+            "protagonist_goal": "修炼成仙",
+            "core_conflict": "天劫将至",
+        },
+    }
+    state = {
+        "config": {},
+        "current_chapter_outline": _make_chapter_outline().model_dump(),
+        "characters": [],
+        "outline": outline_data,
+    }
+
+    with patch("src.novel.agents.plot_planner.create_llm_client", return_value=mock_llm):
+        result = plot_planner_node(state)
+
+    assert len(result["current_scenes"]) == 3
+    call_args = mock_llm.chat.call_args
+    user_msg = call_args[0][0][1]["content"]
+    assert "修炼成仙" in user_msg
+    assert "天劫将至" in user_msg

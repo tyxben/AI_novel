@@ -81,18 +81,18 @@ _RHYTHM_PATTERNS: dict[str, list[MoodTag]] = {
         MoodTag.BUILDUP,
         MoodTag.BIG_WIN,
     ],
-    # 科幻：探索与发现驱动
+    # 科幻：开场即危机，紧凑推进，概念揭示穿插在行动中
     "科幻": [
-        MoodTag.DAILY,
-        MoodTag.BUILDUP,
+        MoodTag.TWIST,
         MoodTag.BUILDUP,
         MoodTag.SMALL_WIN,
         MoodTag.TRANSITION,
-        MoodTag.BUILDUP,
         MoodTag.TWIST,
         MoodTag.BUILDUP,
         MoodTag.HEARTBREAK,
+        MoodTag.BUILDUP,
         MoodTag.BIG_WIN,
+        MoodTag.TWIST,
     ],
     # 仙侠：修炼-历劫-突破的循环
     "仙侠": [

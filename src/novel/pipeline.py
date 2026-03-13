@@ -159,6 +159,7 @@ class NovelPipeline:
             "outline": None,
             "world_setting": None,
             "characters": [],
+            "main_storyline": {},
             "chapters": [],
             "decisions": [],
             "errors": [],
@@ -176,6 +177,13 @@ class NovelPipeline:
             progress_callback(0.1, "正在生成大纲（可能需要1-2分钟）...")
         result = nodes["novel_director"](state)
         state = _merge_state(state, result)
+
+        # 提取主线信息
+        outline = state.get("outline", {})
+        if isinstance(outline, dict):
+            state["main_storyline"] = outline.get("main_storyline", {})
+        else:
+            state["main_storyline"] = {}
 
         if progress_callback:
             progress_callback(0.4, "正在构建世界观...")
@@ -307,6 +315,14 @@ class NovelPipeline:
         # Determine effective silent mode
         effective_silent = silent or state.get("silent_mode", False)
         review_interval = state.get("review_interval", self.config.human_in_loop.review_interval)
+
+        # 确保主线信息存在（从 checkpoint 恢复时可能缺失）
+        if not state.get("main_storyline"):
+            outline_data = state.get("outline", {})
+            if isinstance(outline_data, dict):
+                state["main_storyline"] = outline_data.get("main_storyline", {})
+            else:
+                state["main_storyline"] = {}
 
         chapters_generated = []
         consecutive_failures = 0
@@ -483,6 +499,246 @@ class NovelPipeline:
             status["decisions_count"] = len(ckpt.get("decisions", []))
 
         return status
+
+    # ------------------------------------------------------------------
+    # polish_chapters
+    # ------------------------------------------------------------------
+
+    def polish_chapters(
+        self,
+        project_path: str,
+        start_chapter: int = 1,
+        end_chapter: int | None = None,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> dict:
+        """精修章节：AI 自审自改，提升章节质量。
+
+        与 apply_feedback 的区别：
+        - apply_feedback 需要人工输入反馈文本
+        - polish_chapters 是 AI 自己当编辑，自动发现问题并修改
+
+        流程：自审(self_critique) → 精修(polish_chapter)
+
+        Args:
+            project_path: 项目路径
+            start_chapter: 起始章节号
+            end_chapter: 结束章节号（None=所有章节）
+            progress_callback: 进度回调
+
+        Returns:
+            dict with polished_chapters, skipped_chapters, errors
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.novel.agents.writer import Writer
+        from src.novel.models.character import CharacterProfile
+        from src.novel.models.novel import ChapterOutline
+        from src.novel.models.world import WorldSetting
+
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+
+        # Load checkpoint
+        state = self._load_checkpoint(novel_id)
+        if state is None:
+            raise FileNotFoundError(f"找不到项目检查点: {project_path}")
+
+        outline = state.get("outline")
+        if not outline:
+            raise ValueError("项目大纲不存在")
+
+        outline_chapters = outline.get("chapters", [])
+        total_chapters = len(outline_chapters)
+        if end_chapter is None:
+            end_chapter = total_chapters
+
+        # Initialize LLM + Writer
+        llm_config = state.get("config", {}).get("llm", {})
+        llm = create_llm_client(llm_config)
+        writer = Writer(llm)
+
+        # 设置主线上下文
+        main_storyline = state.get("main_storyline", {})
+        if not main_storyline and isinstance(outline, dict):
+            main_storyline = outline.get("main_storyline", {})
+
+        # 恢复角色和世界观
+        characters: list[CharacterProfile] = []
+        for c_data in state.get("characters", []):
+            try:
+                characters.append(
+                    CharacterProfile(**c_data) if isinstance(c_data, dict) else c_data
+                )
+            except Exception:
+                pass
+
+        world_data = state.get("world_setting")
+        if world_data:
+            try:
+                world_setting = (
+                    WorldSetting(**world_data)
+                    if isinstance(world_data, dict)
+                    else world_data
+                )
+            except Exception:
+                world_setting = WorldSetting(era="未知", location="未知")
+        else:
+            world_setting = WorldSetting(era="未知", location="未知")
+
+        style_name = state.get("style_name", "webnovel.shuangwen")
+
+        # 加载所有章节文本
+        chapter_texts: dict[int, str] = {}
+        for ch_num in range(1, total_chapters + 1):
+            text = fm.load_chapter_text(novel_id, ch_num)
+            if text:
+                chapter_texts[ch_num] = text
+
+        # 构建各章摘要（用于跨章重复检测）
+        def build_chapter_summaries(exclude_chapter: int) -> str:
+            """构建除当前章外的所有章节摘要"""
+            summaries = []
+            for ch_num in sorted(chapter_texts.keys()):
+                if ch_num == exclude_chapter:
+                    continue
+                text = chapter_texts[ch_num]
+                # 取前150字+后150字
+                if len(text) > 300:
+                    summary = text[:150] + "…" + text[-150:]
+                else:
+                    summary = text
+                ch_title = ""
+                for ch_outline in outline_chapters:
+                    if ch_outline.get("chapter_number") == ch_num:
+                        ch_title = ch_outline.get("title", "")
+                        break
+                summaries.append(f"第{ch_num}章「{ch_title}」: {summary}")
+            return "\n\n".join(summaries)
+
+        # 精修结果
+        result: dict = {
+            "novel_id": novel_id,
+            "polished_chapters": [],
+            "skipped_chapters": [],
+            "errors": [],
+        }
+
+        total_in_batch = end_chapter - start_chapter + 1
+
+        for ch_num in range(start_chapter, end_chapter + 1):
+            if progress_callback:
+                done = ch_num - start_chapter
+                pct = done / total_in_batch
+                progress_callback(pct, f"正在精修第{ch_num}/{total_chapters}章...")
+
+            chapter_text = chapter_texts.get(ch_num)
+            if not chapter_text:
+                log.warning("第%d章无文本，跳过精修", ch_num)
+                result["skipped_chapters"].append(ch_num)
+                continue
+
+            # 获取章节大纲
+            ch_outline_data = next(
+                (ch for ch in outline_chapters if ch.get("chapter_number") == ch_num),
+                None,
+            )
+            if not ch_outline_data:
+                log.warning("第%d章无大纲，跳过精修", ch_num)
+                result["skipped_chapters"].append(ch_num)
+                continue
+
+            try:
+                ch_outline = ChapterOutline(**ch_outline_data)
+            except Exception:
+                log.warning("第%d章大纲解析失败，跳过", ch_num)
+                result["skipped_chapters"].append(ch_num)
+                continue
+
+            # 设置主线上下文
+            if main_storyline:
+                storyline_progress = ch_outline_data.get(
+                    "storyline_progress", ""
+                ) or ch_outline_data.get("goal", "")
+                writer.set_storyline_context(
+                    main_storyline=main_storyline,
+                    current_chapter=ch_num,
+                    total_chapters=total_chapters,
+                    storyline_progress=storyline_progress,
+                )
+
+            # 前文上下文
+            context = ""
+            if ch_num > 1 and (ch_num - 1) in chapter_texts:
+                context = chapter_texts[ch_num - 1][-2000:]  # 取上一章结尾
+
+            log.info("=== 精修第 %d/%d 章 ===", ch_num, total_chapters)
+
+            try:
+                # Step 1: 自审
+                log.info("第%d章：自审中...", ch_num)
+                all_summaries = build_chapter_summaries(ch_num)
+                critique = writer.self_critique(
+                    chapter_text=chapter_text,
+                    chapter_outline=ch_outline,
+                    context=context,
+                    all_chapter_summaries=all_summaries,
+                )
+
+                log.info("第%d章审稿意见:\n%s", ch_num, critique[:200])
+
+                # Step 2: 精修
+                if "审稿通过" in critique and "无需修改" in critique:
+                    log.info("第%d章审稿通过，跳过精修", ch_num)
+                    result["skipped_chapters"].append(ch_num)
+                    continue
+
+                log.info("第%d章：精修中...", ch_num)
+                polished_text = writer.polish_chapter(
+                    chapter_text=chapter_text,
+                    critique=critique,
+                    chapter_outline=ch_outline,
+                    characters=characters,
+                    world_setting=world_setting,
+                    context=context,
+                    style_name=style_name,
+                )
+
+                # 备份原文，保存精修版
+                fm.save_chapter_revision(novel_id, ch_num, chapter_text)
+                fm.save_chapter_text(novel_id, ch_num, polished_text)
+
+                # 更新内存中的章节文本（后续章节的上下文会用到）
+                chapter_texts[ch_num] = polished_text
+
+                result["polished_chapters"].append({
+                    "chapter_number": ch_num,
+                    "original_chars": len(chapter_text),
+                    "polished_chars": len(polished_text),
+                    "critique_summary": critique[:200],
+                })
+
+                log.info(
+                    "第%d章精修完成: %d → %d 字",
+                    ch_num,
+                    len(chapter_text),
+                    len(polished_text),
+                )
+
+            except Exception as exc:
+                log.error("第%d章精修失败: %s", ch_num, exc)
+                result["errors"].append({
+                    "chapter": ch_num,
+                    "error": str(exc),
+                })
+
+        # 更新小说状态
+        novel_data = fm.load_novel(novel_id) or {}
+        novel_data["status"] = "polished"
+        fm.save_novel(novel_id, novel_data)
+
+        if progress_callback:
+            progress_callback(1.0, "精修完成!")
+
+        return result
 
     # ------------------------------------------------------------------
     # apply_feedback

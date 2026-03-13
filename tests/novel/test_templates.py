@@ -56,11 +56,17 @@ class TestOutlineTemplates:
         t2 = get_template("cyclic_upgrade")
         assert t2.act_count == 3
 
+    def test_get_template_scifi_crisis(self) -> None:
+        t = get_template("scifi_crisis")
+        assert t.name == "scifi_crisis"
+        assert t.act_count == 4
+        assert t.default_chapters_per_volume == 15
+
     def test_list_templates(self) -> None:
         templates = list_templates()
-        assert len(templates) == 3
+        assert len(templates) == 4
         names = {t.name for t in templates}
-        assert names == {"cyclic_upgrade", "multi_thread", "classic_four_act"}
+        assert names == {"cyclic_upgrade", "multi_thread", "classic_four_act", "scifi_crisis"}
 
     def test_list_templates_returns_copies(self) -> None:
         t_list = list_templates()
@@ -117,6 +123,7 @@ class TestStylePresets:
             "webnovel.romance",
             "literary.realism",
             "literary.lyrical",
+            "scifi.hardscifi",
             "light_novel.campus",
             "light_novel.fantasy",
         ],
@@ -193,11 +200,16 @@ class TestRhythmTemplates:
         assert len(rhythm) == 10
         assert all(isinstance(m, MoodTag) for m in rhythm)
 
-    @pytest.mark.parametrize("genre", ["玄幻", "都市", "言情", "悬疑", "科幻", "仙侠"])
+    @pytest.mark.parametrize("genre", ["玄幻", "都市", "言情", "悬疑", "仙侠"])
     def test_most_genres_end_with_big_win(self, genre: str) -> None:
         """多数题材的节奏模板最后一个节点应是大爽"""
         rhythm = get_rhythm(genre, 10)
         assert rhythm[-1] == MoodTag.BIG_WIN
+
+    def test_scifi_ends_with_twist(self) -> None:
+        """科幻以反转收尾，留下开放式结局"""
+        rhythm = get_rhythm("科幻", 10)
+        assert rhythm[-1] == MoodTag.TWIST
 
     def test_wuxia_ends_with_transition(self) -> None:
         """武侠以过渡（余韵）收尾，符合侠义风格"""

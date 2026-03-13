@@ -51,6 +51,7 @@ class NovelState(TypedDict, total=False):
     outline: dict | None  # Outline.model_dump()
     world_setting: dict | None  # WorldSetting.model_dump()
     characters: list[dict]  # list[CharacterProfile.model_dump()]
+    main_storyline: dict  # {protagonist_goal, core_conflict, character_arc, stakes, theme_statement}
     chapters: list[dict]  # list[Chapter.model_dump()]
     volume_snapshots: list[dict]  # list[VolumeSnapshot.model_dump()]
 
