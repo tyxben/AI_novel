@@ -1,4 +1,4 @@
-"""MCP Server for AI Novel Writing - exposes novel pipeline tools via FastMCP (stdio)."""
+"""MCP Server for AI Novel/Video pipelines — FastMCP (streamable-http + stdio)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from fastmcp import FastMCP
 
 log = logging.getLogger("novel.mcp")
 
-mcp = FastMCP("AI Novel Writing")
+mcp = FastMCP("AI Creative Workshop")
 
 # ---------------------------------------------------------------------------
 # Lazy singleton for NovelPipeline
@@ -290,9 +290,211 @@ def novel_export(project_path: str) -> dict[str, Any]:
         return {"error": str(e)}
 
 
+# ===========================================================================
+# Video pipeline tools
+# ===========================================================================
+
+
+@mcp.tool()
+def video_generate(
+    input_file: str,
+    style: str = "anime",
+    voice: str = "zh-CN-YunxiNeural",
+    rate: str = "+0%",
+    mode: str = "classic",
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Generate a short video from a novel/story text file.
+
+    Runs the full pipeline: text segmentation → prompt generation →
+    image generation → TTS voiceover → FFmpeg video assembly.
+
+    Args:
+        input_file: Path to the input text file (e.g. "input/novel.txt").
+        style: Image style — "anime", "realistic", "watercolor",
+            "chinese_ink", "cyberpunk" (default "anime").
+        voice: TTS voice name (default "zh-CN-YunxiNeural").
+        rate: Speech rate like "+0%", "+20%", "-20%" (default "+0%").
+        mode: Pipeline mode — "classic" or "agent" (default "classic").
+        resume: Whether to resume from checkpoint (default False).
+
+    Returns:
+        Dict with output video path and stage info.
+    """
+    try:
+        input_path = Path(input_file)
+        if not input_path.exists():
+            return {"error": f"输入文件不存在: {input_file}"}
+
+        config_overrides: dict[str, Any] = {}
+        if style:
+            config_overrides.setdefault("promptgen", {})["style"] = style
+        if voice:
+            config_overrides.setdefault("tts", {})["voice"] = voice
+        if rate:
+            config_overrides.setdefault("tts", {})["rate"] = rate
+
+        if mode == "agent":
+            from src.agent_pipeline import AgentPipeline
+
+            pipe = AgentPipeline(
+                input_file=input_path,
+                resume=resume,
+            )
+        else:
+            from src.pipeline import Pipeline
+
+            pipe = Pipeline(
+                input_file=input_path,
+                resume=resume,
+                config=config_overrides if config_overrides else None,
+            )
+
+        output = pipe.run()
+        return {"output_path": str(output), "status": "success"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def video_segment(
+    input_file: str,
+    method: str = "llm",
+) -> dict[str, Any]:
+    """Segment a text file into scenes/paragraphs for video production.
+
+    Args:
+        input_file: Path to the input text file.
+        method: Segmentation method — "simple" (rule-based) or "llm"
+            (AI-powered, default).
+
+    Returns:
+        Dict with segment count and segment texts.
+    """
+    try:
+        from src.config_manager import load_config
+        from src.segmenter.text_segmenter import create_segmenter
+
+        input_path = Path(input_file)
+        if not input_path.exists():
+            return {"error": f"输入文件不存在: {input_file}"}
+
+        cfg = load_config()
+        cfg["segmenter"]["method"] = method
+        # Merge global llm config
+        global_llm = cfg.get("llm", {})
+        module_llm = cfg["segmenter"].get("llm", {})
+        cfg["segmenter"]["llm"] = {**global_llm, **module_llm}
+
+        text = input_path.read_text(encoding="utf-8")
+        segmenter = create_segmenter(cfg["segmenter"])
+        segments = segmenter.segment(text)
+
+        return {
+            "count": len(segments),
+            "segments": [
+                {"index": i, "text": seg["text"][:200] + ("..." if len(seg["text"]) > 200 else "")}
+                for i, seg in enumerate(segments)
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def video_status(workspace_dir: str) -> dict[str, Any]:
+    """Check the progress of a video generation project.
+
+    Args:
+        workspace_dir: Path to the workspace directory
+            (e.g. "workspace/novel").
+
+    Returns:
+        Dict with stage completion status and segment count.
+    """
+    try:
+        from src.checkpoint import Checkpoint
+
+        ws = Path(workspace_dir)
+        if not ws.exists():
+            return {"error": f"工作目录不存在: {workspace_dir}"}
+
+        ckpt = Checkpoint(ws)
+        data = ckpt.data
+
+        stages = {}
+        for key in ["segment", "prompt", "image", "tts", "video"]:
+            info = data.get("stages", {}).get(key, {})
+            stages[key] = info.get("done", False)
+
+        return {
+            "workspace": workspace_dir,
+            "stages": stages,
+            "segment_count": len(data.get("segments", [])),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def video_list_projects() -> list[dict[str, Any]]:
+    """List all video projects in the workspace.
+
+    Scans workspace/ for directories with checkpoint.json (excluding novels/).
+
+    Returns:
+        List of video project summaries.
+    """
+    try:
+        ws = Path(_DEFAULT_WORKSPACE)
+        if not ws.exists():
+            return []
+
+        projects: list[dict[str, Any]] = []
+        for d in sorted(ws.iterdir()):
+            if not d.is_dir() or d.name == "novels":
+                continue
+            ckpt_file = d / "checkpoint.json"
+            if not ckpt_file.exists():
+                continue
+            try:
+                with open(ckpt_file, encoding="utf-8") as f:
+                    data = json.load(f)
+                stages = data.get("stages", {})
+                done_stages = [k for k, v in stages.items() if v.get("done")]
+                projects.append({
+                    "project": d.name,
+                    "path": str(d),
+                    "done_stages": done_stages,
+                    "segment_count": len(data.get("segments", [])),
+                    "completed": stages.get("video", {}).get("done", False),
+                })
+            except (json.JSONDecodeError, OSError):
+                projects.append({"project": d.name, "path": str(d), "error": "无法读取检查点"})
+        return projects
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
 # ---------------------------------------------------------------------------
-# Entry point
+# Entry point — supports both stdio and streamable-http
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+
+    transport = "stdio"
+    for arg in sys.argv[1:]:
+        if arg in ("--http", "--streamable-http", "http"):
+            transport = "streamable-http"
+            break
+        if arg in ("--sse", "sse"):
+            transport = "sse"
+            break
+
+    if transport == "streamable-http":
+        mcp.run(transport="streamable-http", host="0.0.0.0", port=8000)
+    elif transport == "sse":
+        mcp.run(transport="sse", host="0.0.0.0", port=8000)
+    else:
+        mcp.run(transport="stdio")
