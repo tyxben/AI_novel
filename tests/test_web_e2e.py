@@ -8,9 +8,9 @@
 from __future__ import annotations
 
 import os
+import socket
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -31,7 +31,9 @@ def gradio_server():
     import web
 
     app = web.create_ui()
-    port = 7862
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
 
     server_thread = threading.Thread(
         target=lambda: app.launch(
@@ -77,21 +79,31 @@ def browser_page(gradio_server):
 
 def _input_story_text(page, text: str):
     """在故事文本框中输入文本。"""
-    # 找到 "故事文本" 标签对应的 textarea
-    textarea = page.locator("textarea").nth(1)  # 第二个 textarea 是故事文本
+    textarea = page.get_by_label("故事文本")
     textarea.fill(text)
     time.sleep(0.3)
 
 
 def _select_agent_mode(page):
     """选择 Agent 模式。"""
-    page.get_by_text("Agent模式（智能质控）").click()
+    _open_advanced_options(page)
+    page.get_by_text("Agent模式（智能质控）", exact=True).click()
     time.sleep(0.5)
 
 
 def _click_generate(page):
     """点击生成视频按钮。"""
     page.get_by_text("生成视频", exact=True).click()
+
+
+def _open_advanced_options(page):
+    advanced = page.locator("button.label-wrap", has_text="高级选项")
+    if advanced.count() == 0:
+        return
+    cls = advanced.first.get_attribute("class") or ""
+    if "open" not in cls:
+        advanced.first.click()
+        time.sleep(0.3)
 
 
 def _get_status_text(page) -> str:
@@ -131,30 +143,21 @@ def _wait_for_completion(page, timeout: int = 300000):
 
 
 def _fill_api_keys_quick(page):
-    """通过快捷配置区填入 API keys。"""
-    page.get_by_text("配置 AI 服务").click()
+    """通过设置页填入 API keys。"""
+    page.get_by_role("tab", name="设置").click()
     time.sleep(0.5)
 
-    # 选 OpenAI
-    page.get_by_text("OpenAI", exact=True).first.click()
-    time.sleep(0.3)
-    quick_key_inputs = page.locator("input[type='password']")
-    for i in range(quick_key_inputs.count()):
-        inp = quick_key_inputs.nth(i)
-        if inp.is_visible():
-            inp.fill(os.environ["OPENAI_API_KEY"])
-            break
+    page.get_by_label("OpenAI").fill(os.environ["OPENAI_API_KEY"])
+    page.get_by_label("SiliconFlow (图片)").fill(os.environ["SILICONFLOW_API_KEY"])
     time.sleep(0.3)
 
-    # 选 SiliconFlow
-    page.get_by_text("SiliconFlow", exact=True).first.click()
+    page.get_by_label("LLM 后端").click()
+    page.get_by_role("option", name="OpenAI", exact=True).click()
+    page.get_by_label("图片生成后端").click()
+    page.get_by_role("option", name="SiliconFlow", exact=True).click()
     time.sleep(0.3)
-    quick_key_inputs = page.locator("input[type='password']")
-    for i in range(quick_key_inputs.count()):
-        inp = quick_key_inputs.nth(i)
-        if inp.is_visible() and not inp.input_value():
-            inp.fill(os.environ["SILICONFLOW_API_KEY"])
-            break
+
+    page.get_by_role("tab", name="短视频制作").click()
     time.sleep(0.3)
 
 
@@ -163,55 +166,77 @@ def _fill_api_keys_quick(page):
 # ---------------------------------------------------------------------------
 
 
-@_skip_no_api
-class TestWebUIAgentMode:
-    """通过 Playwright 测试 Web UI Agent 模式完整流程。"""
+class TestWebUIQuickCheck:
+    """不依赖 API 的 UI 交互回归。"""
 
     def test_page_loads(self, browser_page):
         """页面能正常加载，关键元素都在。"""
         page = browser_page
-        assert page.title() == "AI 小说转视频"
+        assert page.title() == "AI 创作工坊"
 
         # 检查关键按钮存在
         assert page.get_by_text("生成视频").is_visible()
         assert page.get_by_text("AI 生成故事").is_visible()
 
-        # 检查模式选项存在
-        assert page.get_by_text("经典模式（快速）").is_visible()
-        assert page.get_by_text("Agent模式（智能质控）").is_visible()
-
-    def test_agent_mode_shows_options(self, browser_page):
-        """选择 Agent 模式后，省钱模式和质量阈值应该出现。"""
+    def test_advanced_options_hidden_by_default(self, browser_page):
         page = browser_page
 
-        # 默认应该看不到 Agent 选项
-        budget_label = page.get_by_text("省钱模式")
-        # Agent 选项初始隐藏（在 Group 内）
+        assert page.get_by_text("省钱模式").count() == 0
+        assert page.get_by_text("画面风格").count() == 0
 
-        # 点击 Agent 模式
+    def test_mode_toggle_shows_hides_options(self, browser_page):
+        """模式切换应正确显隐 Agent 选项。"""
+        page = browser_page
+        _open_advanced_options(page)
+
+        assert page.get_by_text("经典模式（快速）").is_visible()
+        assert page.get_by_text("Agent模式（智能质控）").is_visible()
         _select_agent_mode(page)
-        time.sleep(1)
-
-        # 现在应该能看到省钱模式
         assert page.get_by_text("省钱模式").is_visible()
+
+        page.get_by_text("经典模式（快速）", exact=True).click()
+        time.sleep(0.5)
+        assert not page.get_by_text("省钱模式").is_visible()
+
+    def test_empty_text_shows_error(self, browser_page):
+        """空文本点生成应该弹错误。"""
+        page = browser_page
+        _click_generate(page)
+        page.wait_for_selector(".toast-wrap, .error, [role='alert']", timeout=5000)
+
+    def test_story_prompt_editor_is_editable(self, browser_page):
+        page = browser_page
+
+        prompt_acc = page.locator("button.label-wrap", has_text="自定义提示词")
+        prompt_acc.first.click()
+        time.sleep(0.3)
+
+        prompt_field = page.get_by_label("系统提示词（控制 AI 写作风格）")
+        assert prompt_field.is_visible()
+        prompt_field.fill("你是一个悬疑故事写手。")
+        assert prompt_field.input_value() == "你是一个悬疑故事写手。"
+
+    def test_settings_tab_has_backend_controls(self, browser_page):
+        page = browser_page
+        page.get_by_role("tab", name="设置").click()
+        time.sleep(0.5)
+
+        assert page.get_by_label("LLM 后端").is_visible()
+        assert page.get_by_label("图片生成后端").is_visible()
+        assert page.get_by_text("视频编码").is_visible()
+
+
+@_skip_no_api
+class TestWebUIAgentMode:
+    """通过 Playwright 测试 Web UI Agent 模式完整流程。"""
 
     def test_classic_mode_generates_video(self, browser_page):
         """经典模式：输入文本 → 生成视频 → 验证输出。"""
         page = browser_page
-
-        # 输入短文本
         _input_story_text(page, "月光如水，少年拔剑而立。")
-
-        # 配置 API keys
         _fill_api_keys_quick(page)
-
-        # 经典模式（默认）
         _click_generate(page)
-
-        # 等待生成完成（最多 5 分钟）
         _wait_for_completion(page)
-
-        # 检查状态栏包含完成
         status = _get_status_text(page)
         assert "完成" in status
 
@@ -258,36 +283,3 @@ class TestWebUIAgentMode:
 
         # 截图保存
         page.screenshot(path="tests/screenshots/agent_mode_result.png")
-
-
-@_skip_no_api
-class TestWebUIQuickCheck:
-    """快速验证：只检查 UI 交互，不跑实际生成。"""
-
-    def test_mode_toggle_shows_hides_options(self, browser_page):
-        """模式切换应正确显隐 Agent 选项。"""
-        page = browser_page
-
-        # 选 Agent 模式
-        page.get_by_text("Agent模式（智能质控）").click()
-        time.sleep(1)
-        assert page.get_by_text("省钱模式").is_visible()
-
-        # 切回经典模式
-        page.get_by_text("经典模式（快速）").click()
-        time.sleep(1)
-        # 省钱模式应该隐藏了
-        # (Gradio 可能用 display:none，所以用 is_hidden)
-
-    def test_empty_text_shows_error(self, browser_page):
-        """空文本点生成应该弹错误。"""
-        page = browser_page
-
-        # 不输入任何文本，直接点生成
-        _click_generate(page)
-        time.sleep(2)
-
-        # Gradio 会弹出 error toast
-        error_toast = page.locator(".toast-wrap, .error, [role='alert']").first
-        # 错误应该出现
-        page.wait_for_selector(".toast-wrap, .error, [role='alert']", timeout=5000)

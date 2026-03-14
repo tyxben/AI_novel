@@ -1268,6 +1268,168 @@ def _novel_apply_feedback(
     return status
 
 
+def _novel_polish(
+    project, start_ch, end_ch,
+    llm_backend_val, key_gemini, key_deepseek, key_openai,
+):
+    """AI 精修"""
+    if not project:
+        return "请先选择项目"
+
+    project_path = _novel_extract_project_path(project)
+    _novel_set_env_keys(llm_backend_val, key_gemini, key_deepseek, key_openai)
+
+    try:
+        pipeline = _novel_create_pipeline(llm_backend_val)
+
+        start = int(start_ch) if start_ch and int(start_ch) > 0 else 1
+        end = int(end_ch) if end_ch and int(end_ch) > 0 else None
+
+        result = pipeline.polish_chapters(
+            project_path=project_path,
+            start_chapter=start,
+            end_chapter=end,
+        )
+
+        polished = result.get("polished_chapters", [])
+        skipped = result.get("skipped_chapters", [])
+        errors = result.get("errors", [])
+
+        status_parts = [f"精修完成: {len(polished)}章已修改, {len(skipped)}章跳过"]
+        if errors:
+            status_parts.append(f", {len(errors)}章出错")
+        for p in polished[:5]:
+            status_parts.append(
+                f"  第{p['chapter_number']}章: {p['original_chars']}->{p['polished_chars']}字"
+            )
+
+        return "\n".join(status_parts)
+
+    except Exception as exc:
+        return f"精修失败: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# AI 短视频导演 -- 后端函数
+# ---------------------------------------------------------------------------
+
+_DIRECTOR_BUDGET_MAP = {
+    "免费(纯图片)": "free",
+    "低(少量动态)": "low",
+    "中(部分视频)": "medium",
+    "高(全视频)": "high",
+}
+
+
+def _director_generate(
+    inspiration, duration, budget_label,
+    llm_service, img_service,
+    key_gemini, key_deepseek, key_openai,
+    key_siliconflow, key_dashscope,
+    key_kling, key_jimeng, key_minimax,
+    llm_backend_setting, img_backend_setting,
+):
+    """AI导演模式: 灵感 -> 视频"""
+    if not inspiration or not inspiration.strip():
+        return (
+            "请输入灵感/创意",
+            None, None, None, None, "请先输入灵感",
+        )
+
+    # 设置环境变量 (复用 generate() 中的逻辑)
+    env_map = {
+        "SILICONFLOW_API_KEY": key_siliconflow,
+        "GEMINI_API_KEY": key_gemini,
+        "DEEPSEEK_API_KEY": key_deepseek,
+        "OPENAI_API_KEY": key_openai,
+        "DASHSCOPE_API_KEY": key_dashscope,
+        "KLING_API_KEY": key_kling,
+        "JIMENG_API_KEY": key_jimeng,
+        "MINIMAX_API_KEY": key_minimax,
+    }
+    for k, v in env_map.items():
+        if v and v.strip():
+            os.environ[k] = v.strip()
+
+    budget = _DIRECTOR_BUDGET_MAP.get(budget_label, "low")
+
+    try:
+        from src.director_pipeline import DirectorPipeline
+
+        # 构建 config
+        llm_provider = LLM_MAP.get(llm_backend_setting, "auto")
+        img_backend = BACKEND_MAP.get(img_backend_setting, "siliconflow")
+        config = {
+            "llm": {"provider": llm_provider},
+            "imagegen": {"backend": img_backend},
+            "video": {
+                "codec": "libx265",
+                "crf": 18,
+                "resolution": [1080, 1920],
+            },
+        }
+
+        pipeline = DirectorPipeline(config=config, workspace="workspace/videos")
+
+        status_updates = []
+
+        def on_progress(pct, desc):
+            status_updates.append(f"[{int(pct * 100)}%] {desc}")
+
+        result = pipeline.run(
+            inspiration=inspiration.strip(),
+            target_duration=int(duration),
+            budget=budget,
+            progress_callback=on_progress,
+        )
+
+        # 格式化分段详情
+        segments_md = _format_director_segments(result.get("segments", []))
+
+        video_path = result.get("video_path", "")
+        status_text = "\n".join(status_updates[-5:]) if status_updates else "完成"
+
+        return (
+            status_text,
+            video_path if video_path and Path(video_path).exists() else None,
+            video_path if video_path and Path(video_path).exists() else None,
+            result.get("script"),
+            result.get("idea"),
+            segments_md,
+        )
+
+    except Exception as exc:
+        import traceback
+        return (
+            f"生成失败: {exc}\n\n{traceback.format_exc()}",
+            None, None, None, None,
+            f"错误: {exc}",
+        )
+
+
+def _format_director_segments(segments: list) -> str:
+    """格式化分段详情为 Markdown"""
+    if not segments:
+        return "无分段数据"
+
+    lines = []
+    for seg in segments:
+        purpose = seg.get("purpose", "?")
+        voiceover = seg.get("voiceover", "")
+        visual = seg.get("visual", "")
+        duration = seg.get("duration_sec", 0)
+        asset_type = seg.get("asset_type", "image")
+        motion = seg.get("motion", "static")
+
+        lines.append(
+            f"### 段{seg.get('id', '?')} [{purpose}] {duration:.1f}s\n"
+            f"**旁白:** {voiceover}\n\n"
+            f"**画面:** {visual}\n\n"
+            f"素材: `{asset_type}` | 镜头: `{motion}`\n\n---\n"
+        )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Qimao Publishing Agent
 # ---------------------------------------------------------------------------
@@ -1800,6 +1962,80 @@ def create_ui() -> gr.Blocks:
         with gr.Tabs(elem_classes="top-tabs") as top_tabs:
 
             # ============================================================
+            # Tab 0: AI 短视频导演（新流程）
+            # ============================================================
+            with gr.Tab("AI导演", id="tab_director"):
+                with gr.Row(equal_height=False):
+                    # ============== Left: Input ==============
+                    with gr.Column(scale=5, elem_classes="input-card"):
+                        gr.HTML('<div class="section-title">灵感输入</div>')
+                        director_inspiration = gr.Textbox(
+                            label="你的灵感/创意",
+                            placeholder="例: 凌晨三点外卖员接到一单送往废弃医院的外卖...",
+                            lines=3,
+                        )
+                        with gr.Row():
+                            director_duration = gr.Slider(
+                                label="目标时长(秒)",
+                                minimum=15,
+                                maximum=120,
+                                step=5,
+                                value=45,
+                                scale=1,
+                            )
+                            director_budget = gr.Radio(
+                                label="预算",
+                                choices=["免费(纯图片)", "低(少量动态)", "中(部分视频)", "高(全视频)"],
+                                value="低(少量动态)",
+                                scale=2,
+                            )
+                        with gr.Row():
+                            director_llm_select = gr.Dropdown(
+                                label="AI 服务",
+                                choices=_build_service_choices(_LLM_SERVICE_KEYS),
+                                value=_detect_default_llm_choice(),
+                                scale=1,
+                            )
+                            director_img_select = gr.Dropdown(
+                                label="图片服务",
+                                choices=_build_service_choices(_IMG_SERVICE_KEYS),
+                                value=_detect_default_img_choice(),
+                                scale=1,
+                            )
+
+                        director_generate_btn = gr.Button(
+                            "一键生成视频",
+                            variant="primary",
+                            size="lg",
+                            elem_classes="generate-btn",
+                        )
+
+                        # 脚本预览区（生成后显示）
+                        gr.HTML('<div class="section-title">脚本预览</div>')
+                        director_script_display = gr.JSON(
+                            label="结构化脚本",
+                        )
+
+                    # ============== Right: Output ==============
+                    with gr.Column(scale=4, elem_classes="output-card"):
+                        director_status = gr.Textbox(
+                            label="状态",
+                            interactive=False,
+                            lines=4,
+                            elem_classes="status-area",
+                        )
+                        with gr.Tabs():
+                            with gr.Tab("视频预览"):
+                                director_video = gr.Video(label="视频", height=400)
+                                director_file = gr.File(label="下载")
+                            with gr.Tab("视频方案"):
+                                director_idea_display = gr.JSON(label="视频方案")
+                            with gr.Tab("分段详情"):
+                                director_segments_display = gr.Markdown(
+                                    value="生成后显示各段详情..."
+                                )
+
+            # ============================================================
             # Tab 1: 短视频制作 (all existing content)
             # ============================================================
             with gr.Tab("短视频制作", id="tab_video"):
@@ -2112,6 +2348,31 @@ def create_ui() -> gr.Blocks:
                         )
                         novel_feedback_btn = gr.Button(
                             "应用反馈",
+                            variant="secondary",
+                            size="lg",
+                            elem_classes="story-btn",
+                        )
+
+                        # --- Section 3.5: AI 精修 ---
+                        gr.HTML('<div class="section-title">AI 精修</div>')
+                        gr.Markdown("*AI 自动审稿并修改，无需手动输入反馈*", elem_classes="hint-text")
+                        with gr.Row():
+                            novel_polish_start = gr.Number(
+                                label="起始章节",
+                                value=1,
+                                minimum=1,
+                                precision=0,
+                                scale=1,
+                            )
+                            novel_polish_end = gr.Number(
+                                label="结束章节（0=全部）",
+                                value=0,
+                                minimum=0,
+                                precision=0,
+                                scale=1,
+                            )
+                        novel_polish_btn = gr.Button(
+                            "开始精修",
                             variant="secondary",
                             size="lg",
                             elem_classes="story-btn",
@@ -2507,6 +2768,37 @@ def create_ui() -> gr.Blocks:
                 llm_backend, key_gemini, key_deepseek, key_openai,
             ],
             outputs=[novel_status_box],
+        )
+
+        # Polish chapters
+        novel_polish_btn.click(
+            fn=_novel_polish,
+            inputs=[
+                novel_project_select, novel_polish_start, novel_polish_end,
+                llm_backend, key_gemini, key_deepseek, key_openai,
+            ],
+            outputs=[novel_status_box],
+        )
+
+        # ====== Director event wiring ======
+        director_generate_btn.click(
+            fn=_director_generate,
+            inputs=[
+                director_inspiration, director_duration, director_budget,
+                director_llm_select, director_img_select,
+                key_gemini, key_deepseek, key_openai,
+                key_siliconflow, key_dashscope,
+                key_kling, key_jimeng, key_minimax,
+                llm_backend, image_backend,
+            ],
+            outputs=[
+                director_status,
+                director_video,
+                director_file,
+                director_script_display,
+                director_idea_display,
+                director_segments_display,
+            ],
         )
 
         # --- Qimao Publishing ---

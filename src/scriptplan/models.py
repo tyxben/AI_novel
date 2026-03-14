@@ -44,7 +44,7 @@ class ScriptSegment(BaseModel):
     id: int
     purpose: SegmentPurpose
     voiceover: str                          # 旁白文本
-    visual: str                             # 画面描述
+    visual: str                             # 画面描述（含角色性别/外观标注）
     motion: MotionType = MotionType.STATIC  # 镜头运动
     duration_sec: float = 3.0               # 目标时长
     asset_type: AssetType = AssetType.IMAGE  # 素材类型

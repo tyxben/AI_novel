@@ -16,6 +16,42 @@ from typing import Any, Callable
 
 log = logging.getLogger("director")
 
+# 画面描述 → 图片 prompt 的系统提示词（专用于导演流水线）
+_VISUAL_TO_IMAGE_PROMPT = """\
+你是一个中英翻译专家，负责将中文画面描述翻译为 Stable Diffusion 图片生成 prompt。
+
+规则：
+1. 直接翻译画面描述，保留所有细节
+2. 角色性别是最重要的信息，必须明确翻译：
+   - 男人/男性/男孩 → man/male/boy
+   - 女人/女性/女孩 → woman/female/girl
+   - 如果原文有多个角色，每个角色的性别和外观必须分别翻译
+3. 翻译角色的外观：年龄、发型、发色、服装、体型、表情
+4. 翻译场景：环境、光线、氛围
+5. 输出格式：英文关键词短语，逗号分隔
+6. 末尾添加：highly detailed, cinematic composition, dramatic lighting, 4K
+
+输出：仅输出英文 prompt，不要任何解释。
+"""
+
+# 画面描述 → 视频 prompt 的系统提示词
+_VISUAL_TO_VIDEO_PROMPT = """\
+你是一个中英翻译专家，负责将中文画面描述翻译为 AI 视频生成 prompt。
+
+规则：
+1. 直接翻译画面描述为 2-3 句英文自然语言句子
+2. 角色性别必须明确：
+   - 男人/男性 → a man/male figure
+   - 女人/女性 → a woman/female figure
+   - 多个角色必须分别描述性别和外观
+3. 包含角色外观（年龄、发型、服装）、动作、场景、光线
+4. 添加合适的运镜描述（dolly in, pan, tracking shot 等）
+5. 末尾添加：stable character appearance, natural smooth movements, cinematic quality, 4K
+6. 视频只有5-10秒，聚焦一个核心画面变化
+
+输出：仅输出英文 prompt，不要任何解释。
+"""
+
 
 class DirectorPipeline:
     """AI短视频导演流水线。
@@ -48,6 +84,7 @@ class DirectorPipeline:
 
         self.workspace = Path(workspace or "workspace/videos")
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self._llm_cached = None  # 懒初始化 LLM client
 
     def run(
         self,
@@ -76,8 +113,7 @@ class DirectorPipeline:
                 progress_callback(pct, desc)
 
         # 初始化 LLM
-        from src.llm.llm_client import create_llm_client
-        llm = create_llm_client(self.config.get("llm", {}))
+        llm = self._get_llm()
 
         # === Stage 1: 视频方案 ===
         _notify(0.05, "正在策划视频方案...")
@@ -130,6 +166,13 @@ class DirectorPipeline:
             "duration": script.total_duration,
             "run_dir": str(run_dir),
         }
+
+    def _get_llm(self):
+        """获取或创建缓存的 LLM client。"""
+        if self._llm_cached is None:
+            from src.llm.llm_client import create_llm_client
+            self._llm_cached = create_llm_client(self.config.get("llm", {}))
+        return self._llm_cached
 
     # ------------------------------------------------------------------
     # Stage 1: 视频方案
@@ -228,10 +271,8 @@ class DirectorPipeline:
         如果视频生成器不可用，自动降级为静图。
         """
         from src.scriptplan.models import AssetType
-        from src.promptgen.prompt_generator import PromptGenerator
         from src.imagegen.image_generator import create_image_generator
 
-        prompt_gen = PromptGenerator(self.config.get("promptgen", {}))
         image_gen = create_image_generator(self.config.get("imagegen", {}))
 
         # 初始化视频生成器（如果需要且可用）
@@ -251,7 +292,7 @@ class DirectorPipeline:
 
             try:
                 self._generate_segment_visual(
-                    seg, run_dir, prompt_gen, image_gen, video_gen,
+                    seg, run_dir, image_gen, video_gen,
                 )
             except Exception as exc:
                 log.error("素材生成失败 segment %d: %s", seg.id, exc)
@@ -276,13 +317,13 @@ class DirectorPipeline:
         return None
 
     def _generate_segment_visual(
-        self, seg, run_dir: Path, prompt_gen, image_gen, video_gen,
+        self, seg, run_dir: Path, image_gen, video_gen,
     ) -> None:
         """为单个段落生成画面素材。"""
         from src.scriptplan.models import AssetType
 
-        # 所有类型都需要先生成图片
-        image_prompt = prompt_gen.generate(seg.visual, seg.id)
+        # 使用专用的视觉描述翻译（而非小说文本解析）
+        image_prompt = self._visual_to_prompt(seg.visual, seg.id)
         seg.image_prompt = image_prompt
 
         image = image_gen.generate(image_prompt)
@@ -300,9 +341,7 @@ class DirectorPipeline:
 
         elif seg.asset_type == AssetType.IMAGE2VIDEO:
             # 图生视频
-            video_prompt = prompt_gen.generate_video_prompt(
-                seg.visual, seg.id,
-            )
+            video_prompt = self._visual_to_video_prompt(seg.visual, seg.id)
             seg.video_prompt = video_prompt
             result = video_gen.generate(
                 prompt=video_prompt,
@@ -313,15 +352,101 @@ class DirectorPipeline:
 
         elif seg.asset_type == AssetType.VIDEO:
             # 纯文生视频
-            video_prompt = prompt_gen.generate_video_prompt(
-                seg.visual, seg.id,
-            )
+            video_prompt = self._visual_to_video_prompt(seg.visual, seg.id)
             seg.video_prompt = video_prompt
             result = video_gen.generate(
                 prompt=video_prompt,
                 duration=seg.duration_sec,
             )
             seg.asset_path = str(result.video_path)
+
+    # ------------------------------------------------------------------
+    # 视觉描述 → 英文 Prompt 翻译（专用于导演流水线）
+    # ------------------------------------------------------------------
+
+    def _visual_to_prompt(self, visual: str, seg_id: int) -> str:
+        """将中文画面描述直接翻译为英文图片生成 prompt。
+
+        与 PromptGenerator.generate() 的区别：
+        - 输入是已经结构化的画面描述（含性别/外观标注），不是叙事文本
+        - 不需要 CharacterTracker 的"姓名+动词"解析
+        - 直接翻译，保留所有角色性别和外观信息
+        """
+        if not visual or not visual.strip():
+            return "a cinematic scene, highly detailed, 4K"
+
+        try:
+            llm = self._get_llm()
+            response = llm.chat(
+                messages=[
+                    {"role": "system", "content": _VISUAL_TO_IMAGE_PROMPT},
+                    {"role": "user", "content": visual},
+                ],
+                temperature=0.5,
+            )
+            prompt = response.content.strip()
+            if prompt:
+                return prompt
+        except Exception as exc:
+            log.warning("LLM 视觉翻译失败 seg %d: %s，使用规则翻译", seg_id, exc)
+
+        return self._visual_to_prompt_local(visual)
+
+    def _visual_to_video_prompt(self, visual: str, seg_id: int) -> str:
+        """将中文画面描述翻译为英文视频生成 prompt。"""
+        if not visual or not visual.strip():
+            return ""
+
+        try:
+            llm = self._get_llm()
+            response = llm.chat(
+                messages=[
+                    {"role": "system", "content": _VISUAL_TO_VIDEO_PROMPT},
+                    {"role": "user", "content": visual},
+                ],
+                temperature=0.5,
+            )
+            prompt = response.content.strip()
+            if prompt:
+                return prompt
+        except Exception as exc:
+            log.warning("LLM 视频prompt翻译失败 seg %d: %s", seg_id, exc)
+
+        return self._visual_to_prompt_local(visual)
+
+    @staticmethod
+    def _visual_to_prompt_local(visual: str) -> str:
+        """规则翻译兜底：从中文画面描述提取关键词。"""
+        import re
+        parts = []
+        # 性别检测
+        if re.search(r'女人|女性|女孩|少女|女子|姑娘|她', visual):
+            parts.append("a young woman")
+        elif re.search(r'男人|男性|男孩|少年|男子|他', visual):
+            parts.append("a young man")
+        # 场景关键词
+        scene_map = [
+            (r'城市|都市|高楼', 'modern city'),
+            (r'夜景|夜晚|深夜', 'night scene, city lights'),
+            (r'办公室|工位', 'modern office'),
+            (r'窗前|落地窗|窗户', 'standing by window'),
+            (r'沙发|客厅', 'living room, sofa'),
+            (r'厨房|做饭', 'kitchen'),
+            (r'卧室|床', 'bedroom'),
+            (r'街道|马路', 'city street'),
+            (r'森林|树林', 'forest'),
+            (r'海边|海滩|大海', 'beach, ocean'),
+            (r'太空|宇宙|星空', 'outer space, stars'),
+            (r'雨|下雨', 'rain'),
+            (r'雪|下雪', 'snow'),
+        ]
+        for pattern, desc in scene_map:
+            if re.search(pattern, visual):
+                parts.append(desc)
+        if not parts:
+            parts.append("a cinematic scene")
+        parts.append("highly detailed, cinematic lighting, 4K")
+        return ", ".join(parts)
 
     # ------------------------------------------------------------------
     # Stage 6: 合成视频
