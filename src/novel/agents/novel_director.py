@@ -374,7 +374,15 @@ class NovelDirector:
       "estimated_words": 2500,
       "mood": "蓄力",
       "storyline_progress": "本章如何推进主线（必须具体，不能空泛）",
-      "chapter_summary": "本章内容2-3句话摘要"
+      "chapter_summary": "本章内容2-3句话摘要",
+      "chapter_brief": {{
+        "main_conflict": "本章主冲突是什么（必须具体）",
+        "payoff": "本章必须兑现的爽点/情绪回报",
+        "character_arc_step": "主角在本章的变化（从X到Y）",
+        "foreshadowing_plant": ["本章要埋的伏笔"],
+        "foreshadowing_collect": ["本章要回收的伏笔"],
+        "end_hook_type": "悬疑|危机|反转|情感|发现|无"
+      }}
     }}
   ]
 }}
@@ -390,6 +398,7 @@ mood 可选值：蓄力、小爽、大爽、过渡、虐心、反转、日常。
 7. 【节奏紧凑】前3章内必须进入核心冲突，不允许超过2章的纯铺垫
 8. 【章节摘要】每章必须有具体的 chapter_summary，不能为空
 9. 【赌注升级】随着故事推进，赌注必须不断升级（个人→团队→世界）
+10. 【章节任务书】每章必须有 chapter_brief，包含 main_conflict、payoff、character_arc_step、foreshadowing_plant、foreshadowing_collect、end_hook_type
 """
 
     def _parse_outline(
@@ -422,6 +431,9 @@ mood 可选值：蓄力、小爽、大爽、过渡、虐心、反转、日常。
         chapters: list[ChapterOutline] = []
         for ch_data in data.get("chapters", []):
             try:
+                # 确保 chapter_brief 存在且为 dict
+                if "chapter_brief" not in ch_data or not isinstance(ch_data.get("chapter_brief"), dict):
+                    ch_data["chapter_brief"] = {}
                 chapters.append(ChapterOutline(**ch_data))
             except Exception:
                 log.warning("跳过无效 chapter 数据: %s", ch_data)

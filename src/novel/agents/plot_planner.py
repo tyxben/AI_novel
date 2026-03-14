@@ -100,6 +100,7 @@ _DECOMPOSE_USER = """\
 - 涉及角色: {involved_characters}
 - 情绪基调: {mood}
 - 预估字数: {estimated_words}
+{chapter_brief_section}
 {main_storyline_section}
 ## 卷上下文
 {volume_context}
@@ -222,6 +223,32 @@ class PlotPlanner:
                 main_storyline_section = "\n## 主线信息（场景必须服务于此）\n"
             main_storyline_section += f"- 本章主线推进：{storyline_progress}\n"
 
+        # 构建章节任务书 section
+        chapter_brief_section = ""
+        brief = getattr(chapter_outline, "chapter_brief", None) or {}
+        if brief and isinstance(brief, dict):
+            lines = ["\n## 章节任务书（场景必须完成以下任务）"]
+            if brief.get("main_conflict"):
+                lines.append(f"- 主冲突：{brief['main_conflict']}")
+            if brief.get("payoff"):
+                lines.append(f"- 本章爽点/回报：{brief['payoff']}")
+            if brief.get("character_arc_step"):
+                lines.append(f"- 角色弧线推进：{brief['character_arc_step']}")
+            if brief.get("foreshadowing_plant"):
+                plant = brief["foreshadowing_plant"]
+                if isinstance(plant, list):
+                    plant = "、".join(plant)
+                lines.append(f"- 需要埋设的伏笔：{plant}")
+            if brief.get("foreshadowing_collect"):
+                collect = brief["foreshadowing_collect"]
+                if isinstance(collect, list):
+                    collect = "、".join(collect)
+                lines.append(f"- 需要回收的伏笔：{collect}")
+            if brief.get("end_hook_type"):
+                lines.append(f"- 章尾钩子类型：{brief['end_hook_type']}")
+            if len(lines) > 1:
+                chapter_brief_section = "\n".join(lines)
+
         user_msg = _DECOMPOSE_USER.format(
             chapter_number=chapter_outline.chapter_number,
             title=chapter_outline.title,
@@ -234,6 +261,7 @@ class PlotPlanner:
             else "未指定",
             mood=chapter_outline.mood,
             estimated_words=chapter_outline.estimated_words,
+            chapter_brief_section=chapter_brief_section,
             main_storyline_section=main_storyline_section,
             volume_context=volume_ctx_str,
             characters_info=characters_info,

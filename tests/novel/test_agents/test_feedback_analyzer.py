@@ -70,7 +70,8 @@ class TestFeedbackAnalyzerAnalyze:
         assert 4 in result["propagation_chapters"]
         assert result["rewrite_instructions"]["2"] == "加强主角性格描写"
         assert result["summary"] == "主角性格不够鲜明，需加强刻画"
-        llm.chat.assert_called_once()
+        # analyze now calls LLM twice: diagnose + plan
+        assert llm.chat.call_count == 2
 
     def test_analyze_garbage_fallback(self):
         """LLM returns garbage text -- fallback to direct rewrite."""

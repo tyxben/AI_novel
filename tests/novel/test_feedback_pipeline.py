@@ -476,15 +476,15 @@ class TestApplyFeedback:
             "summary": "角色改进",
         }
 
-        # First call returns analysis, subsequent calls return rewritten text
+        # analyze now calls LLM twice (diagnose + plan), then rewrite calls
         mock_llm = MagicMock()
         call_count = 0
 
         def side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
-                # Analysis call
+            if call_count <= 2:
+                # Diagnose + plan calls both get analysis JSON
                 return FakeLLMResponse(
                     content=json.dumps(analysis_json, ensure_ascii=False)
                 )
@@ -550,13 +550,14 @@ class TestApplyFeedback:
             "summary": "情节漏洞",
         }
 
+        # analyze now calls LLM twice (diagnose + plan)
         mock_llm = MagicMock()
         call_count = 0
 
         def side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
+            if call_count <= 2:
                 return FakeLLMResponse(
                     content=json.dumps(analysis_json, ensure_ascii=False)
                 )

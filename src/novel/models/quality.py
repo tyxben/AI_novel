@@ -54,6 +54,10 @@ class QualityReport(BaseModel):
         default_factory=dict,
         description="各维度评分: plot_coherence, writing_quality, character_portrayal, ai_flavor_score",
     )
+    retention_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="追更价值评分: information_gain, conflict_effectiveness, memorable_moment, cliffhanger_strength, protagonist_appeal",
+    )
     need_rewrite: bool = Field(False, description="是否需要重写")
     rewrite_reason: str | None = None
     suggestions: list[str] = Field(default_factory=list, description="改进建议")

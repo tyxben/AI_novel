@@ -67,6 +67,10 @@ class ChapterOutline(BaseModel):
     chapter_summary: str = Field(
         "", description="本章内容摘要（2-3句话）"
     )
+    chapter_brief: dict = Field(
+        default_factory=dict,
+        description="章节任务书：main_conflict, payoff, character_arc_step, foreshadowing_plant, foreshadowing_collect, end_hook_type",
+    )
 
 
 class Outline(BaseModel):

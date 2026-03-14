@@ -68,6 +68,7 @@ class QualityReviewer:
         characters: list[dict] | None = None,
         style_name: str | None = None,
         budget_mode: bool = False,
+        chapter_brief: dict | None = None,
     ) -> dict:
         """完整质量审查流程。
 
@@ -77,12 +78,14 @@ class QualityReviewer:
             characters: 角色列表（可选）
             style_name: 目标风格名称（可选）
             budget_mode: 省钱模式，跳过 LLM 评分
+            chapter_brief: 章节任务书（可选，用于追更价值评估的任务完成度）
 
         Returns:
             综合质量报告字典，包含：
             - rule_check: RuleCheckResult 的字典形式
             - style_check: 风格检查结果（如有）
             - scores: LLM 评分（如有）
+            - retention_scores: 追更价值评分（如有）
             - need_rewrite: 是否需要重写
             - rewrite_reason: 重写原因
             - suggestions: 改进建议
@@ -139,6 +142,7 @@ class QualityReviewer:
                 chapter_text, chapter_outline
             )
             report["scores"] = quality_report.scores
+            report["retention_scores"] = quality_report.retention_scores
 
             if quality_report.need_rewrite and not report["need_rewrite"]:
                 report["need_rewrite"] = True
@@ -148,6 +152,7 @@ class QualityReviewer:
                 report["suggestions"].extend(quality_report.suggestions)
         else:
             report["scores"] = {}
+            report["retention_scores"] = {}
 
         return report
 
@@ -171,6 +176,13 @@ class QualityReviewer:
         if scores:
             avg_score = sum(scores.values()) / len(scores)
             if avg_score < threshold:
+                return True
+
+        # 追更价值评分极低 -> 重写
+        retention_scores = report.get("retention_scores", {})
+        if retention_scores:
+            retention_avg = sum(retention_scores.values()) / len(retention_scores)
+            if retention_avg < 4.0:
                 return True
 
         # 显式标记需要重写
@@ -218,12 +230,16 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
     # 规则检查每章都做（零成本），LLM 打分仅在卷末/每5章做一次
     budget_mode = current_chapter % 5 != 0 and current_chapter != total_chapters
 
+    # 尝试从 state 中获取章节任务书（chapter_brief）
+    chapter_brief = state.get("current_chapter_brief") or None
+
     report = reviewer.review_chapter(
         chapter_text=chapter_text,
         chapter_outline=state.get("current_chapter_outline"),
         characters=state.get("characters"),
         style_name=style_name,
         budget_mode=budget_mode,
+        chapter_brief=chapter_brief,
     )
 
     need_rewrite = reviewer.should_rewrite(

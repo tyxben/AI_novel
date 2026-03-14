@@ -861,6 +861,54 @@ class NovelPipeline:
                 if text:
                     chapter_texts[ch_num] = text
 
+        # --- Diagnosis chain: locate evidence + plan precise fix ---
+        diagnosis = analysis.get("diagnosis")
+        if diagnosis and analysis.get("target_chapters"):
+            if progress_callback:
+                progress_callback(0.2, "正在正文中定位问题...")
+            # Collect texts for target + propagation chapters
+            affected_chs = set(
+                analysis.get("target_chapters", [])
+                + analysis.get("propagation_chapters", [])
+            )
+            texts_subset = {
+                ch: chapter_texts[ch]
+                for ch in affected_chs
+                if ch in chapter_texts
+            }
+            evidence = analyzer.locate_evidence(
+                diagnosis=diagnosis,
+                chapter_texts=texts_subset,
+                chapter_number=chapter_number,
+            )
+
+            if evidence:
+                if progress_callback:
+                    progress_callback(0.25, "基于证据生成精准修改方案...")
+                enhanced = analyzer.plan_fix(
+                    diagnosis=diagnosis,
+                    evidence=evidence,
+                    outline_chapters=outline_chapters,
+                )
+                # Merge enhanced instructions into analysis
+                if enhanced.get("rewrite_instructions"):
+                    analysis["rewrite_instructions"] = enhanced[
+                        "rewrite_instructions"
+                    ]
+                if enhanced.get("target_chapters"):
+                    analysis["target_chapters"] = enhanced["target_chapters"]
+                if enhanced.get("propagation_chapters"):
+                    analysis["propagation_chapters"] = enhanced[
+                        "propagation_chapters"
+                    ]
+                analysis["evidence"] = evidence
+                log.info(
+                    "诊断链完成: 找到%d条证据，已增强修改指令",
+                    len(evidence),
+                )
+            else:
+                log.info("诊断链: 未在正文中找到确切证据，使用原始分析结果")
+
         # Rewrite chapters in order
         target_set = set(analysis.get("target_chapters", []))
         rewrite_queue = sorted(

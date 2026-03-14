@@ -239,6 +239,129 @@ class QualityCheckTool:
         return issues
 
     # ------------------------------------------------------------------
+    # Layer 1.5: 追更价值评估（LLM）
+    # ------------------------------------------------------------------
+
+    def evaluate_retention(
+        self,
+        chapter_text: str,
+        chapter_outline: dict | None = None,
+        chapter_brief: dict | None = None,
+    ) -> dict[str, float]:
+        """评估章节的追更价值（读者留存力）。
+
+        用 LLM 从网文编辑视角评估 5 个维度（0-10 分）：
+        - information_gain: 信息增量
+        - conflict_effectiveness: 冲突有效性
+        - memorable_moment: 可记忆点
+        - cliffhanger_strength: 章尾钩子强度
+        - protagonist_appeal: 主角魅力变化
+
+        Args:
+            chapter_text: 章节文本
+            chapter_outline: 章节大纲（可选）
+            chapter_brief: 章节任务书（可选，用于任务完成度评估）
+
+        Returns:
+            各维度评分字典；LLM 不可用时返回空 dict
+        """
+        if self.llm is None:
+            return {}
+
+        # Use chapter digest to save tokens when text is long
+        from src.novel.tools.chapter_digest import create_digest
+
+        if len(chapter_text) > 1500:
+            digest = create_digest(chapter_text)
+            scoring_text = digest["digest_text"]
+            scoring_label = "章节摘要"
+        else:
+            scoring_text = chapter_text
+            scoring_label = "章节正文"
+
+        outline_info = ""
+        if chapter_outline:
+            outline_info = f"\n章节大纲：{json.dumps(chapter_outline, ensure_ascii=False)[:500]}"
+
+        brief_section = ""
+        if chapter_brief:
+            brief_section = f"""
+
+如果提供了章节任务书，还要评估：
+- 主冲突是否清晰呈现
+- 爽点/回报是否兑现
+- 角色弧线是否推进
+- 伏笔是否按计划处理
+- 钩子是否按指定类型实现
+
+【章节任务书】
+{json.dumps(chapter_brief, ensure_ascii=False)[:800]}
+"""
+
+        prompt = f"""请从网文编辑的角度评估这章的追更价值——读者读完后是否愿意继续追下一章。
+{outline_info}
+
+【{scoring_label}】
+{scoring_text[:4000]}
+{brief_section}
+请严格按以下 JSON 格式返回，每项 0-10 分：
+{{
+    "information_gain": 0-10,
+    "conflict_effectiveness": 0-10,
+    "memorable_moment": 0-10,
+    "cliffhanger_strength": 0-10,
+    "protagonist_appeal": 0-10
+}}
+
+评分标准：
+- information_gain: 本章有没有信息增量（新角色/新设定/新发现/新线索），如果全章没有任何新信息给0-3分
+- conflict_effectiveness: 本章冲突是否有效（不是走过场，而是真正改变了局势），如果冲突敷衍或无实质结果给0-3分
+- memorable_moment: 本章有没有可记忆点（让读者印象深刻的场景/台词/画面），平淡无奇给0-3分
+- cliffhanger_strength: 章尾钩子强度（是否让人想继续看下一章），没有钩子或钩子无力给0-3分
+- protagonist_appeal: 主角魅力变化（本章主角有没有让读者更喜欢/更担心/更期待），主角路人感给0-3分
+"""
+
+        try:
+            response = self.llm.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一位资深网文编辑，不是文学评论家。你关心的是读者留存率——"
+                            "读者读完这章后会不会追下一章。用网文编辑的标准打分，不要用纯文学标准。"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+                json_mode=True,
+            )
+
+            data = _extract_json_obj(response.content)
+            if data is None:
+                log.warning("追更评估 LLM 返回无法解析: %s", response.content[:200])
+                return {}
+
+            retention_keys = (
+                "information_gain",
+                "conflict_effectiveness",
+                "memorable_moment",
+                "cliffhanger_strength",
+                "protagonist_appeal",
+            )
+            result: dict[str, float] = {}
+            for key in retention_keys:
+                val = data.get(key)
+                if isinstance(val, (int, float)):
+                    result[key] = max(0.0, min(10.0, float(val)))
+
+            return result
+
+        except Exception as exc:
+            log.warning("追更评估 LLM 调用失败: %s", exc)
+            return {}
+
+    # ------------------------------------------------------------------
     # Layer 2: LLM 对比式评估
     # ------------------------------------------------------------------
 
@@ -412,10 +535,21 @@ class QualityCheckTool:
         if rule_result.paragraph_length_issues:
             suggestions.append("调整段落长度")
 
+        # --- 追更价值评估 ---
+        retention_scores: dict[str, float] = {}
+        if self.llm is not None:
+            try:
+                retention_scores = self.evaluate_retention(
+                    chapter_text, chapter_outline
+                )
+            except Exception as exc:
+                log.warning("追更价值评估失败: %s", exc)
+
         return QualityReport(
             chapter_number=1,
             rule_check=rule_result,
             scores=scores,
+            retention_scores=retention_scores,
             need_rewrite=need_rewrite,
             rewrite_reason=rewrite_reason,
             suggestions=suggestions,

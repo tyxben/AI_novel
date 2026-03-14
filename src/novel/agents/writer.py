@@ -77,6 +77,11 @@ class Writer:
         self.llm = llm_client
         self._main_storyline: dict[str, Any] | None = None
         self._story_position: dict[str, Any] | None = None
+        self._chapter_brief: dict[str, Any] | None = None
+
+    def set_chapter_brief(self, chapter_brief: dict[str, Any] | None) -> None:
+        """设置章节任务书，让场景生成时具有明确的叙事目标。"""
+        self._chapter_brief = chapter_brief if chapter_brief else None
 
     # ------------------------------------------------------------------
     # 主线上下文设置
@@ -182,6 +187,22 @@ class Writer:
                 f"节奏要求：{pos.get('pacing_instruction', '')}\n"
             )
 
+        # 构建章节任务书提示
+        chapter_brief_prompt = ""
+        if self._chapter_brief and isinstance(self._chapter_brief, dict):
+            brief = self._chapter_brief
+            brief_lines = ["【本章任务书 — 场景必须服务于以下目标】"]
+            if brief.get("main_conflict"):
+                brief_lines.append(f"- 本章主冲突：{brief['main_conflict']}")
+            if brief.get("payoff"):
+                brief_lines.append(f"- 本章必须兑现：{brief['payoff']}")
+            if brief.get("character_arc_step"):
+                brief_lines.append(f"- 角色变化：{brief['character_arc_step']}")
+            if brief.get("end_hook_type"):
+                brief_lines.append(f"- 章尾钩子：{brief['end_hook_type']}")
+            if len(brief_lines) > 1:
+                chapter_brief_prompt = "\n".join(brief_lines) + "\n"
+
         system_prompt = (
             f"{style}\n\n"
             f"你是一位专业小说写手，正在创作第{chapter_outline.chapter_number}章"
@@ -190,6 +211,7 @@ class Writer:
             f"本章情绪基调：{chapter_outline.mood}\n\n"
             f"{main_storyline_prompt}"
             f"{position_prompt}"
+            f"{chapter_brief_prompt}"
             f"【极其重要的字数限制】你必须严格控制输出在{target_words}字左右。"
             f"绝对不能超过{target_words + 200}字。宁可写少也不要写多。"
             f"写到接近目标字数时，必须在一个完整的句子处自然收束，不要强行展开新情节。\n\n"
@@ -305,6 +327,11 @@ class Writer:
         style_name: str,
     ) -> Chapter:
         """生成完整章节（逐场景生成，滑动窗口传递上下文）。"""
+        # 从 chapter_outline 设置章节任务书
+        brief = getattr(chapter_outline, "chapter_brief", None)
+        if brief and isinstance(brief, dict) and brief:
+            self.set_chapter_brief(brief)
+
         scenes: list[Scene] = []
         running_context = context or ""
 
@@ -774,6 +801,13 @@ def writer_node(state: dict) -> dict:
             total_chapters=total_chapters,
             storyline_progress=storyline_progress,
         )
+
+    # 设置章节任务书
+    ch_outline_for_brief = state.get("current_chapter_outline")
+    if ch_outline_for_brief and isinstance(ch_outline_for_brief, dict):
+        chapter_brief = ch_outline_for_brief.get("chapter_brief")
+        if chapter_brief and isinstance(chapter_brief, dict):
+            writer.set_chapter_brief(chapter_brief)
 
     # 从 state 中恢复 ChapterOutline
     ch_outline_data = state.get("current_chapter_outline")
