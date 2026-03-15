@@ -69,6 +69,14 @@ class VideoIdea(BaseModel):
     tone: str = ""               # 整体调性: 悬疑/爽感/温情/恐怖/搞笑
 
 
+class VisualBible(BaseModel):
+    """全片视觉圣经 — 保证所有画面风格和角色外观一致"""
+    style_tags: str = ""         # 全片风格标签，如 "cinematic, dark moody, neon-lit"
+    negative_prompt: str = ""    # 全片 negative prompt
+    characters: list[dict] = Field(default_factory=list)
+    # 每个角色: {"name": "张伟", "prompt_anchor": "a 28yo Chinese man, short black hair, lean build, gray hoodie, scar on left eyebrow"}
+
+
 class VideoScript(BaseModel):
     """完整视频脚本"""
     title: str                   # 视频标题
@@ -77,6 +85,7 @@ class VideoScript(BaseModel):
     tone: str                    # 调性
     segments: list[ScriptSegment] = Field(default_factory=list)
     ending_hook: str = ""        # 结尾互动文案
+    visual_bible: VisualBible | None = None  # 全片视觉锚点
 
     # 元数据
     total_duration: float = 0.0  # 总时长(秒)

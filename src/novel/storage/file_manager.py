@@ -263,7 +263,12 @@ class FileManager:
             if ch_data is None:
                 continue
             ch_title = ch_data.get("title", f"第{ch_num}章")
-            lines.append(f"第{ch_num}章 {ch_title}")
+            # 避免标题已含"第X章"前缀时重复拼接
+            import re as _re
+            if _re.match(r"^第\d+章", ch_title):
+                lines.append(ch_title)
+            else:
+                lines.append(f"第{ch_num}章 {ch_title}")
             lines.append("")
             text = ch_data.get("full_text", "")
             if not text:
@@ -310,7 +315,7 @@ class FileManager:
                 total_words += ch_data.get("word_count", 0)
 
         # 从大纲获取总章节数
-        outline = novel_data.get("outline", {})
+        outline = novel_data.get("outline") or {}
         total_chapters = len(outline.get("chapters", []))
 
         return {

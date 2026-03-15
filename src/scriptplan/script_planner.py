@@ -11,6 +11,7 @@ from src.scriptplan.models import (
     SegmentPurpose,
     VideoIdea,
     VideoScript,
+    VisualBible,
     VoiceParams,
 )
 
@@ -79,11 +80,25 @@ class ScriptPlanner:
             "5. visual必须是具体画面（人物/场景/物体），不能是抽象概念\n"
             "6. 总时长要接近目标时长\n"
             "7. ending段要有互动感，引导观众评论\n\n"
+            "【视觉圣经 - visual_bible】\n"
+            "你还必须输出一个 visual_bible 对象，用于保证全片画面风格和角色外观的一致性：\n"
+            "- style_tags: 全片风格关键词（英文），如 'cinematic, dark moody, neon-lit, urban'\n"
+            "- negative_prompt: 全片负面提示词（英文），如 'blurry, deformed, extra limbs, text, watermark'\n"
+            "- characters: 出场角色列表，每个角色包含 name（中文名）和 prompt_anchor（英文外观锚点描述，必须包含性别、年龄、发型、服装、体型、标志性特征），例如：\n"
+            '  {"name": "张伟", "prompt_anchor": "a 28 year old Chinese man, short black hair, lean build, gray hoodie, scar on left eyebrow"}\n'
+            "角色的 prompt_anchor 一旦定义，全片所有 segment 中该角色的描写必须与此一致。\n\n"
             "请返回严格的 JSON 格式：\n"
             "{\n"
             '  "title": "视频标题（10字以内，有吸引力）",\n'
             '  "theme": "一句话主题",\n'
             '  "hook": "前3秒钩子的核心文案",\n'
+            '  "visual_bible": {\n'
+            '    "style_tags": "cinematic, dark moody, ...",\n'
+            '    "negative_prompt": "blurry, deformed, ...",\n'
+            '    "characters": [\n'
+            '      {"name": "角色名", "prompt_anchor": "英文外观锚点"}\n'
+            "    ]\n"
+            "  },\n"
             '  "segments": [\n'
             "    {\n"
             '      "id": 1,\n'
@@ -156,6 +171,21 @@ class ScriptPlanner:
                 voice_params=voice_params,
             ))
 
+        # 解析 visual_bible
+        visual_bible = None
+        vb_data = data.get("visual_bible")
+        if vb_data and isinstance(vb_data, dict):
+            visual_bible = VisualBible(
+                style_tags=vb_data.get("style_tags", ""),
+                negative_prompt=vb_data.get("negative_prompt", ""),
+                characters=vb_data.get("characters", []),
+            )
+            log.info(
+                "视觉圣经: style=%s, characters=%d",
+                visual_bible.style_tags[:50],
+                len(visual_bible.characters),
+            )
+
         script = VideoScript(
             title=data.get("title", "未命名视频"),
             theme=data.get("theme", ""),
@@ -163,6 +193,7 @@ class ScriptPlanner:
             tone=idea.tone,
             segments=segments,
             ending_hook=data.get("ending_hook", ""),
+            visual_bible=visual_bible,
             idea=idea,
         )
         script.compute_duration()

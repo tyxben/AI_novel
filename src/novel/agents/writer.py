@@ -58,11 +58,28 @@ _NARRATIVE_LOGIC = (
     "6. 同一个事件只能出现一次。如果前文已经写过新闻发布会，不要再写第二次\n"
 )
 
+_CHARACTER_NAME_LOCK = (
+    "【角色名称锁定 — 绝对禁止违反】\n"
+    "1. 每个角色只能使用【角色档案】中定义的名字，禁止自行给角色起新名字、加姓氏或改名\n"
+    "2. 禁止使用占位符称呼：禁止写「角色A」「女学生B」「老人C」「男子D」「路人甲」等编号式称呼\n"
+    "3. 如果需要引入新的路人/NPC，可以用职业/特征称呼（如「收银员」「保安」），但同一个NPC前后称呼必须一致\n"
+    "4. 角色名字一旦出现在前文中，后续必须使用完全相同的名字，不能缩写或扩展（如「小玲」不能变成「李小玲」）\n"
+)
+
 # ---------------------------------------------------------------------------
 # 上下文最大字符数
 # ---------------------------------------------------------------------------
 
-_MAX_CONTEXT_CHARS = 2000
+_MAX_CONTEXT_CHARS = 4000
+
+# ---------------------------------------------------------------------------
+# 场景去重：Jaccard 相似度阈值
+# ---------------------------------------------------------------------------
+
+# 去重分级阈值
+_DEDUP_HARD_DELETE = 0.6   # ≥60% 句子完全相同 → 删除整段（确定是照搬）
+_DEDUP_STRIP_OVERLAP = 0.4  # ≥40% → 只删重复句，保留独有句（可能是承接+新内容混合）
+# < 40% → 不处理（正常的呼应和承接）
 
 
 # ---------------------------------------------------------------------------
@@ -219,27 +236,57 @@ class Writer:
             f"【角色档案】\n{char_desc}\n\n"
             f"{_ANTI_AI_FLAVOR}\n"
             f"{_ANTI_REPETITION}\n"
-            f"{_NARRATIVE_LOGIC}"
+            f"{_NARRATIVE_LOGIC}\n"
+            f"{_CHARACTER_NAME_LOCK}"
         )
 
-        # 构建角色说话方式提醒
+        # 构建角色说话方式提醒 + 外貌锁定
         speech_style_prompt = ""
+        character_lock_prompt = ""
         characters_involved_names = set(
             scene_plan.get("characters_involved", scene_plan.get("characters", []))
         )
         if characters and characters_involved_names:
             speech_lines = []
+            lock_lines = []
             for c in characters:
-                if c.name in characters_involved_names and c.personality.speech_style:
+                if c.name not in characters_involved_names:
+                    continue
+                # 说话方式
+                if c.personality.speech_style:
                     line = f"- {c.name}: {c.personality.speech_style}"
                     if c.personality.catchphrases:
                         line += f"（口头禅：{'、'.join(c.personality.catchphrases)}）"
                     speech_lines.append(line)
+                # 【修复】角色外貌锁定：每个场景都强制提醒角色外貌
+                lock = f"- {c.name}（{c.gender}，{c.age}岁）"
+                if c.appearance:
+                    app = c.appearance
+                    lock += f"：{app.build}体型，{app.hair}，{app.eyes}，{app.clothing_style}"
+                    if app.distinctive_features:
+                        lock += f"，{'/'.join(app.distinctive_features)}"
+                if c.character_arc:
+                    lock += f"  弧线：{c.character_arc.initial_state} → {c.character_arc.final_state}"
+                lock_lines.append(lock)
             if speech_lines:
                 speech_style_prompt = (
                     "\n【出场角色的说话方式 — 每个角色必须有区分度】\n"
                     + "\n".join(speech_lines)
                     + "\n"
+                )
+            if lock_lines:
+                # 收集所有合法角色名（名字+别名）
+                all_names = []
+                for c in characters:
+                    all_names.append(c.name)
+                    if c.alias:
+                        all_names.extend(c.alias)
+                name_list = "、".join(all_names)
+                character_lock_prompt = (
+                    "\n【本场景出场角色外貌锁定 — 描写必须与以下一致，禁止偏离】\n"
+                    + "\n".join(lock_lines)
+                    + f"\n\n【合法角色名白名单】只允许使用以下名字：{name_list}\n"
+                    + "禁止自行创造新角色名或给已有角色改名/加姓氏。路人用职业称呼即可。\n"
                 )
 
         user_prompt = (
@@ -253,10 +300,13 @@ class Writer:
         )
 
         if scenes_written_summary:
-            user_prompt += f"【本章已写内容摘要 — 禁止重复以下内容】\n{scenes_written_summary}\n\n"
+            user_prompt += f"【本章已写内容 — 严禁重复以下任何段落、描写或对话】\n{scenes_written_summary}\n\n"
 
         if trimmed_context:
             user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
+
+        if character_lock_prompt:
+            user_prompt += f"{character_lock_prompt}\n"
 
         if speech_style_prompt:
             user_prompt += f"{speech_style_prompt}\n"
@@ -301,6 +351,9 @@ class Writer:
                     scene_text = scene_text[:hard_limit]
             log.warning("场景文本超长(%d字)，截断至%d字", len(response.content), len(scene_text))
 
+        # 角色名称校验：检测占位符和未知名称
+        scene_text = self._check_character_names(scene_text, characters)
+
         scene_chars = scene_plan.get("characters_involved", scene_plan.get("characters", []))
         return Scene(
             scene_number=scene_plan.get("scene_number", 1),
@@ -336,18 +389,29 @@ class Writer:
         running_context = context or ""
 
         for plan in scene_plans:
-            # 构建本章已写场景摘要，帮助 Writer 避免重复
+            # 构建本章已写场景上下文（渐进式：最近场景全文，更早场景给摘要）
+            # 这样既能有效检测重复，又控制 token 增长
             scenes_written_summary = ""
             if scenes:
                 summaries = []
-                for prev_scene in scenes:
-                    text = prev_scene.text
-                    if len(text) > 200:
-                        summary = text[:100] + "……" + text[-100:]
+                for i, prev_scene in enumerate(scenes):
+                    is_latest = (i == len(scenes) - 1)
+                    if is_latest:
+                        # 最近一个场景：给全文（去重最关键的参考）
+                        summaries.append(
+                            f"=== 场景{prev_scene.scene_number} 全文 ===\n{prev_scene.text}"
+                        )
                     else:
-                        summary = text
-                    summaries.append(f"场景{prev_scene.scene_number}摘要: {summary}")
-                scenes_written_summary = "\n".join(summaries)
+                        # 更早的场景：给结尾300字（保留关键转折和承接点）
+                        text = prev_scene.text
+                        if len(text) > 300:
+                            summary = "（前略）…" + text[-300:]
+                        else:
+                            summary = text
+                        summaries.append(
+                            f"=== 场景{prev_scene.scene_number} 摘要 ===\n{summary}"
+                        )
+                scenes_written_summary = "\n\n".join(summaries)
 
             scene = self.generate_scene(
                 scene_plan=plan,
@@ -358,8 +422,31 @@ class Writer:
                 style_name=style_name,
                 scenes_written_summary=scenes_written_summary,
             )
+
+            # 【修复】场景去重：移除与前文重复的段落
+            if scenes:
+                previous_texts = [s.text for s in scenes]
+                original_text = scene.text
+                deduped_text = self._deduplicate_paragraphs(original_text, previous_texts)
+                if len(deduped_text) < len(original_text):
+                    log.info(
+                        "场景%d去重：%d字 → %d字",
+                        scene.scene_number, len(original_text), len(deduped_text),
+                    )
+                    scene = Scene(
+                        scene_number=scene.scene_number,
+                        location=scene.location,
+                        time=scene.time,
+                        characters=scene.characters,
+                        goal=scene.goal,
+                        text=deduped_text,
+                        word_count=count_words(deduped_text),
+                        narrative_modes=scene.narrative_modes,
+                    )
+
             scenes.append(scene)
 
+            # 【修复】滑动窗口加大，保留更多前文
             running_context = truncate_text(
                 running_context + "\n" + scene.text,
                 _MAX_CONTEXT_CHARS,
@@ -693,6 +780,230 @@ class Writer:
     # 内部辅助方法
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # 场景去重
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _jaccard_similarity(text_a: str, text_b: str) -> float:
+        """计算两段文本的段落级 Jaccard 相似度。
+
+        将文本按句子切分，比较句子集合的重叠度。
+        """
+        import re as _re
+
+        def _split_sentences(text: str) -> set[str]:
+            # 按句号、感叹号、问号分句，过滤短句（< 6 字）
+            sents = _re.split(r'[。！？!?\n]', text)
+            return {s.strip() for s in sents if len(s.strip()) >= 6}
+
+        set_a = _split_sentences(text_a)
+        set_b = _split_sentences(text_b)
+
+        if not set_a or not set_b:
+            return 0.0
+
+        intersection = set_a & set_b
+        union = set_a | set_b
+        return len(intersection) / len(union) if union else 0.0
+
+    def _deduplicate_paragraphs(
+        self, new_text: str, previous_texts: list[str]
+    ) -> str:
+        """分级去重：区分"照搬"和"正常承接"。
+
+        三级处理：
+        - ≥60% 句子完全相同 → 删除整段（确定是照搬废段）
+        - ≥40% 句子重复 → 只剥离重复句，保留独有内容（混合段）
+        - <40% → 不处理（正常的叙事呼应和承接）
+        """
+        if not previous_texts:
+            return new_text
+
+        # 合并所有前文
+        all_previous = "\n\n".join(previous_texts)
+
+        import re as _re
+        prev_sentences = set()
+        for sent in _re.split(r'[。！？!?\n]', all_previous):
+            s = sent.strip()
+            if len(s) >= 6:
+                prev_sentences.add(s)
+
+        if not prev_sentences:
+            return new_text
+
+        # 按段落分级处理
+        paragraphs = new_text.split("\n\n")
+        kept = []
+        hard_deleted = 0
+        stripped = 0
+
+        for para in paragraphs:
+            # 拆句
+            raw_sentences = _re.split(r'(?<=[。！？!?\n])', para)
+            para_sentences = {
+                s.strip()
+                for s in _re.split(r'[。！？!?\n]', para)
+                if len(s.strip()) >= 6
+            }
+
+            if not para_sentences:
+                kept.append(para)
+                continue
+
+            overlap = para_sentences & prev_sentences
+            ratio = len(overlap) / len(para_sentences)
+
+            if ratio >= _DEDUP_HARD_DELETE:
+                # 级别1: 照搬 → 整段删除
+                hard_deleted += 1
+                log.warning(
+                    "去重[删除]：整段照搬前文（%d/%d句重复，%.0f%%）",
+                    len(overlap), len(para_sentences), ratio * 100,
+                )
+                continue
+
+            elif ratio >= _DEDUP_STRIP_OVERLAP:
+                # 级别2: 混合段 → 只剥离重复句，保留独有内容
+                unique_parts = []
+                for raw_sent in raw_sentences:
+                    clean = raw_sent.strip()
+                    # 检查这个句子片段是否包含重复句
+                    sent_core = _re.sub(r'[。！？!?\n]', '', clean).strip()
+                    if len(sent_core) >= 6 and sent_core in overlap:
+                        continue  # 跳过重复句
+                    if clean:
+                        unique_parts.append(clean)
+                if unique_parts:
+                    stripped += 1
+                    kept.append("".join(unique_parts))
+                    log.info(
+                        "去重[剥离]：保留独有内容，移除%d句重复",
+                        len(overlap),
+                    )
+                else:
+                    hard_deleted += 1
+                continue
+
+            else:
+                # 级别3: 正常呼应 → 保留
+                kept.append(para)
+
+        if hard_deleted > 0 or stripped > 0:
+            log.info(
+                "场景去重完成：删除%d段，剥离%d段",
+                hard_deleted, stripped,
+            )
+
+        return "\n\n".join(kept)
+
+    # ------------------------------------------------------------------
+    # 角色名称校验 + 占位符替换
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_character_names(
+        text: str, characters: list[CharacterProfile]
+    ) -> str:
+        """检测并修复场景文本中的角色名称问题。
+
+        三层校验：
+        1. 检测占位符（角色A、女学生B、老人C 等），替换为已知角色名
+        2. 扫描对话引语中的未知人名，记录警告
+        3. 检测中文人名模式，发现白名单外的新名字时警告
+        """
+        import re as _re
+
+        if not text or not characters:
+            return text
+
+        # 构建合法名称集合（名字 + 别名）
+        known_names: set[str] = set()
+        for c in characters:
+            known_names.add(c.name)
+            if c.alias:
+                known_names.update(c.alias)
+
+        # --- 层1: 占位符检测与替换 ---
+        placeholder_pattern = _re.compile(
+            r'(?:角色|人物|女学生|男学生|学生|老人|男子|女子|男人|女人|少年|少女|青年)'
+            r'[A-Za-z0-9甲乙丙丁]'
+        )
+        placeholders_found = placeholder_pattern.findall(text)
+        if placeholders_found:
+            log.warning(
+                "角色名校验：检测到占位符称呼 %s，应使用具体角色名",
+                placeholders_found,
+            )
+            for ph in set(placeholders_found):
+                type_keyword = _re.sub(r'[A-Za-z0-9甲乙丙丁]$', '', ph)
+                candidates = []
+                for c in characters:
+                    if type_keyword in ("女学生", "学生", "少女") and c.gender == "女":
+                        candidates.append(c.name)
+                    elif type_keyword in ("男学生", "学生", "少年") and c.gender == "男":
+                        candidates.append(c.name)
+                    elif type_keyword in ("老人",) and c.age >= 55:
+                        candidates.append(c.name)
+                    elif type_keyword in ("男子", "男人", "青年") and c.gender == "男":
+                        candidates.append(c.name)
+                    elif type_keyword in ("女子", "女人") and c.gender == "女":
+                        candidates.append(c.name)
+                if len(candidates) == 1:
+                    text = text.replace(ph, candidates[0])
+                    log.info("角色名校验：占位符「%s」→「%s」", ph, candidates[0])
+
+        # --- 层2: 未知人名检测 ---
+        # 扫描"X说"、"X问"、"X喊"等对话引语模式中的人名
+        # 以及"X走"、"X看"等动作主语
+        dialogue_name_pattern = _re.compile(
+            r'(?:^|[。！？!?\n""\s])([^\s。！？!?\n""]{1,4})'
+            r'(?:说|问|喊|叫|答|道|笑|哭|吼|嚷|叹|骂|低声|冷笑|咬牙|转身|走|站|蹲|跑|看|盯|抬头|回头)'
+        )
+        # 排除常见非人名的词
+        _NOT_NAMES = {
+            "他", "她", "它", "我", "你", "谁", "这", "那", "什么",
+            "大家", "所有人", "众人", "两人", "三人", "几个人",
+            "对方", "自己", "彼此", "有人", "没人", "别人",
+            "然后", "突然", "忽然", "于是", "但是", "因为",
+            "一个", "两个", "这个", "那个",
+        }
+
+        matches = dialogue_name_pattern.findall(text)
+        unknown_names: set[str] = set()
+        for name_candidate in matches:
+            name_candidate = name_candidate.strip('""\'"「」『』【】')
+            if not name_candidate or len(name_candidate) < 2:
+                continue
+            if name_candidate in _NOT_NAMES:
+                continue
+            # 检查是否在已知名称中（含部分匹配：如"陈工"匹配"陈远"）
+            is_known = False
+            for kn in known_names:
+                if name_candidate == kn or name_candidate in kn or kn in name_candidate:
+                    is_known = True
+                    break
+            if not is_known:
+                # 排除职业称呼（收银员、保安、老板等）
+                if not _re.match(
+                    r'^(?:收银员|保安|老板|司机|医生|护士|警察|服务员|店员|摊主|老头|中年|年轻)',
+                    name_candidate,
+                ):
+                    unknown_names.add(name_candidate)
+
+        if unknown_names:
+            log.warning(
+                "角色名校验：检测到白名单外的角色名 %s（合法名单：%s）",
+                unknown_names, known_names,
+            )
+
+        return text
+
+    # ------------------------------------------------------------------
+    # 角色档案构建（完整版，含外貌锁定）
+    # ------------------------------------------------------------------
+
     def _build_character_description(
         self, characters: list[CharacterProfile]
     ) -> str:
@@ -705,6 +1016,18 @@ class Writer:
             speech = c.personality.speech_style
             desc = (
                 f"- {c.name}（{c.gender}，{c.age}岁，{c.occupation}）\n"
+            )
+            # 外貌锁定：每次都包含完整外貌描述，防止角色漂移
+            if c.appearance:
+                app = c.appearance
+                desc += (
+                    f"  外貌：身高{app.height}，{app.build}体型，"
+                    f"{app.hair}，{app.eyes}，{app.clothing_style}"
+                )
+                if app.distinctive_features:
+                    desc += f"，特征：{'、'.join(app.distinctive_features)}"
+                desc += "\n"
+            desc += (
                 f"  性格：{traits}\n"
                 f"  说话风格：{speech}\n"
                 f"  核心信念：{c.personality.core_belief}\n"
@@ -712,6 +1035,10 @@ class Writer:
             )
             if c.personality.catchphrases:
                 desc += f"\n  口头禅：{'、'.join(c.personality.catchphrases)}"
+            # 角色弧线锁定
+            if c.character_arc:
+                desc += f"\n  初始状态：{c.character_arc.initial_state}"
+                desc += f"\n  最终状态：{c.character_arc.final_state}"
             parts.append(desc)
 
         return "\n".join(parts)

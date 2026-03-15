@@ -831,12 +831,20 @@ def _novel_create(
     if errors:
         status_text += f"\n警告: {len(errors)} 个错误"
 
-    # Refresh project list
+    # Refresh project list and select the newly created project
+    novel_id = result.get("novel_id", "")
     projects = _novel_list_projects()
+    selected = None
+    for p in projects:
+        if p.startswith(novel_id):
+            selected = p
+            break
+    if not selected and projects:
+        selected = projects[-1]
 
     # Project info JSON
     project_info = {
-        "novel_id": result.get("novel_id"),
+        "novel_id": novel_id,
         "workspace": result.get("workspace"),
         "total_chapters": total_ch,
         "genre": genre_val,
@@ -850,7 +858,7 @@ def _novel_create(
         chars_md,
         world_md,
         project_info,
-        gr.update(choices=projects, value=projects[-1] if projects else None),
+        gr.update(choices=projects, value=selected),
     )
 
 
@@ -1136,6 +1144,9 @@ def _novel_refresh_status(project: str):
         gr.Warning(f"获取状态失败: {e}")
         return (f"获取状态失败: {e}", gr.update(), gr.update(), "", "", "", None)
 
+    if not status:
+        return ("项目数据为空", gr.update(), gr.update(), "", "", "", None)
+
     # Load checkpoint for outline/characters/world
     ckpt = pipe._load_checkpoint(novel_id)
 
@@ -1179,6 +1190,30 @@ def _novel_refresh_status(project: str):
         chapter_text = _novel_load_chapter_text(project_path, current_ch)
 
     return status_text, chapter_text, chapter_list_md, outline_md, chars_md, world_md, status
+
+
+def _novel_delete_project(project: str):
+    """Delete a novel project. Returns (status_text, project_list_update)."""
+    if not project:
+        gr.Warning("请先选择项目")
+        return "请先选择项目", gr.update()
+
+    import shutil
+    project_path = _novel_extract_project_path(project)
+    novel_id = Path(project_path).name
+
+    if not Path(project_path).exists():
+        gr.Warning("项目不存在")
+        return "项目不存在", gr.update(choices=_novel_list_projects(), value=None)
+
+    try:
+        shutil.rmtree(project_path)
+        gr.Info(f"项目 {novel_id} 已删除")
+        projects = _novel_list_projects()
+        return f"项目 {novel_id} 已删除", gr.update(choices=projects, value=projects[0] if projects else None)
+    except Exception as e:
+        gr.Warning(f"删除失败: {e}")
+        return f"删除失败: {e}", gr.update()
 
 
 def _novel_export(project: str):
@@ -2308,7 +2343,6 @@ def create_ui() -> gr.Blocks:
                             label="项目选择",
                             choices=_novel_list_projects(),
                             value=None,
-                            allow_custom_value=True,
                         )
                         novel_batch_size = gr.Slider(
                             label="本次生成章节数",
@@ -2329,31 +2363,7 @@ def create_ui() -> gr.Blocks:
                             elem_classes="novel-btn",
                         )
 
-                        # --- Section 3: 反馈重写 ---
-                        gr.HTML('<div class="section-title">反馈重写</div>')
-                        novel_feedback_text = gr.Textbox(
-                            label="反馈内容",
-                            placeholder="例: 第5章主角性格突然变了，和前面不一致...",
-                            lines=3,
-                        )
-                        novel_feedback_chapter = gr.Number(
-                            label="针对章节（留空=全局）",
-                            value=0,
-                            minimum=0,
-                            precision=0,
-                        )
-                        novel_dry_run = gr.Checkbox(
-                            label="仅分析（不实际修改）",
-                            value=True,
-                        )
-                        novel_feedback_btn = gr.Button(
-                            "应用反馈",
-                            variant="secondary",
-                            size="lg",
-                            elem_classes="story-btn",
-                        )
-
-                        # --- Section 3.5: AI 精修 ---
+                        # --- Section 3: AI 精修 ---
                         gr.HTML('<div class="section-title">AI 精修</div>')
                         gr.Markdown("*AI 自动审稿并修改，无需手动输入反馈*", elem_classes="hint-text")
                         with gr.Row():
@@ -2376,47 +2386,6 @@ def create_ui() -> gr.Blocks:
                             variant="secondary",
                             size="lg",
                             elem_classes="story-btn",
-                        )
-
-                        # --- Section 4: 发布到七猫 ---
-                        gr.HTML('<div class="section-title">发布到七猫</div>')
-                        novel_publish_status = gr.Textbox(
-                            label="登录状态",
-                            value=_qimao_check_login(),
-                            interactive=False,
-                            lines=1,
-                        )
-                        novel_login_btn = gr.Button(
-                            "登录七猫作家中心",
-                            variant="secondary",
-                            size="sm",
-                        )
-                        with gr.Row():
-                            novel_pub_start = gr.Number(
-                                label="起始章节",
-                                value=1,
-                                minimum=1,
-                                precision=0,
-                                scale=1,
-                            )
-                            novel_pub_end = gr.Number(
-                                label="结束章节（0=全部）",
-                                value=0,
-                                minimum=0,
-                                precision=0,
-                                scale=1,
-                            )
-                        novel_publish_btn = gr.Button(
-                            "发布到七猫",
-                            variant="primary",
-                            size="lg",
-                            elem_classes="story-btn",
-                        )
-                        novel_publish_log = gr.Textbox(
-                            label="发布日志",
-                            interactive=False,
-                            lines=8,
-                            max_lines=20,
                         )
 
                     # ============== Right column: Novel Output ==============
@@ -2474,6 +2443,9 @@ def create_ui() -> gr.Blocks:
                             )
                             novel_export_btn = gr.Button(
                                 "导出 TXT", variant="secondary", scale=1,
+                            )
+                            novel_delete_btn = gr.Button(
+                                "删除项目", variant="stop", scale=1,
                             )
                             novel_export_file = gr.File(
                                 label="下载文件", visible=True, scale=1,
@@ -2656,6 +2628,10 @@ def create_ui() -> gr.Blocks:
 
         # Video generation -- includes Agent mode params and extended outputs
         generate_btn.click(
+            fn=lambda: gr.update(interactive=False, value="生成中..."),
+            inputs=None,
+            outputs=[generate_btn],
+        ).then(
             fn=generate,
             inputs=[
                 txt_input, file_input,
@@ -2674,6 +2650,10 @@ def create_ui() -> gr.Blocks:
                 # Tab visibility
                 agent_tab, decision_tab, quality_tab,
             ],
+        ).then(
+            fn=lambda: gr.update(interactive=True, value="生成视频"),
+            inputs=None,
+            outputs=[generate_btn],
         )
 
         # ====== Novel event wiring ======
@@ -2690,6 +2670,10 @@ def create_ui() -> gr.Blocks:
 
         # Create novel project
         novel_create_btn.click(
+            fn=lambda: gr.update(interactive=False, value="创建中..."),
+            inputs=None,
+            outputs=[novel_create_btn],
+        ).then(
             fn=_novel_create,
             inputs=[
                 novel_theme_input, novel_author, novel_audience,
@@ -2705,6 +2689,10 @@ def create_ui() -> gr.Blocks:
                 novel_info_display,
                 novel_project_select,
             ],
+        ).then(
+            fn=lambda: gr.update(interactive=True, value="创建项目"),
+            inputs=None,
+            outputs=[novel_create_btn],
         )
 
         # Auto-load project data when project is selected
@@ -2726,6 +2714,10 @@ def create_ui() -> gr.Blocks:
 
         # Generate chapters (continue from current progress)
         novel_generate_btn.click(
+            fn=lambda: gr.update(interactive=False, value="写作中..."),
+            inputs=None,
+            outputs=[novel_generate_btn],
+        ).then(
             fn=_novel_generate,
             inputs=[
                 novel_project_select, novel_batch_size,
@@ -2733,6 +2725,10 @@ def create_ui() -> gr.Blocks:
                 llm_backend, key_gemini, key_deepseek, key_openai,
             ],
             outputs=[novel_status_box, novel_chapter_display],
+        ).then(
+            fn=lambda: gr.update(interactive=True, value="继续写作"),
+            inputs=None,
+            outputs=[novel_generate_btn],
         )
 
         # Load specific chapter
@@ -2742,11 +2738,27 @@ def create_ui() -> gr.Blocks:
             outputs=[novel_chapter_display],
         )
 
-        # Refresh status
+        # Refresh: first update project list, then refresh status
         novel_refresh_btn.click(
+            fn=lambda: gr.update(choices=_novel_list_projects()),
+            inputs=[],
+            outputs=[novel_project_select],
+        ).then(
             fn=_novel_refresh_status,
             inputs=[novel_project_select],
             outputs=_refresh_outputs,
+        )
+
+        # Delete project (with JS confirm dialog)
+        novel_delete_btn.click(
+            fn=None,
+            inputs=None,
+            outputs=None,
+            js="() => { if (!confirm('确定要删除该项目吗？此操作无法恢复！')) { throw new Error('cancelled'); } }",
+        ).then(
+            fn=_novel_delete_project,
+            inputs=[novel_project_select],
+            outputs=[novel_status_box, novel_project_select],
         )
 
         # Export novel
@@ -2759,29 +2771,31 @@ def create_ui() -> gr.Blocks:
             outputs=[novel_status_box, novel_export_file],
         )
 
-        # Apply feedback
-        novel_feedback_btn.click(
-            fn=_novel_apply_feedback,
-            inputs=[
-                novel_project_select, novel_feedback_text,
-                novel_feedback_chapter, novel_dry_run,
-                llm_backend, key_gemini, key_deepseek, key_openai,
-            ],
-            outputs=[novel_status_box],
-        )
 
         # Polish chapters
         novel_polish_btn.click(
+            fn=lambda: gr.update(interactive=False, value="精修中..."),
+            inputs=None,
+            outputs=[novel_polish_btn],
+        ).then(
             fn=_novel_polish,
             inputs=[
                 novel_project_select, novel_polish_start, novel_polish_end,
                 llm_backend, key_gemini, key_deepseek, key_openai,
             ],
             outputs=[novel_status_box],
+        ).then(
+            fn=lambda: gr.update(interactive=True, value="开始精修"),
+            inputs=None,
+            outputs=[novel_polish_btn],
         )
 
         # ====== Director event wiring ======
         director_generate_btn.click(
+            fn=lambda: gr.update(interactive=False, value="生成中..."),
+            inputs=None,
+            outputs=[director_generate_btn],
+        ).then(
             fn=_director_generate,
             inputs=[
                 director_inspiration, director_duration, director_budget,
@@ -2799,19 +2813,12 @@ def create_ui() -> gr.Blocks:
                 director_idea_display,
                 director_segments_display,
             ],
+        ).then(
+            fn=lambda: gr.update(interactive=True, value="一键生成视频"),
+            inputs=None,
+            outputs=[director_generate_btn],
         )
 
-        # --- Qimao Publishing ---
-        novel_login_btn.click(
-            fn=_qimao_login,
-            inputs=[],
-            outputs=[novel_publish_status],
-        )
-        novel_publish_btn.click(
-            fn=_qimao_publish,
-            inputs=[novel_project_select, novel_pub_start, novel_pub_end],
-            outputs=[novel_publish_log],
-        )
 
         # Refresh novel project list on tab select
         def _on_novel_tab_select():

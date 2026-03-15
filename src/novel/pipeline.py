@@ -175,25 +175,43 @@ class NovelPipeline:
 
         if progress_callback:
             progress_callback(0.1, "正在生成大纲（可能需要1-2分钟）...")
-        result = nodes["novel_director"](state)
-        state = _merge_state(state, result)
+        try:
+            result = nodes["novel_director"](state)
+            state = _merge_state(state, result)
+        except Exception as e:
+            log.error("大纲生成失败: %s", e)
+            raise RuntimeError(f"大纲生成失败: {e}") from e
+
+        # 校验大纲是否有效
+        outline = state.get("outline")
+        if not outline or not isinstance(outline, dict) or not outline.get("chapters"):
+            errors = state.get("errors", [])
+            err_msg = f"大纲生成结果为空。errors={errors}" if errors else "大纲生成结果为空，请检查 LLM 配置和 API Key"
+            log.error(err_msg)
+            raise RuntimeError(err_msg)
 
         # 提取主线信息
-        outline = state.get("outline", {})
-        if isinstance(outline, dict):
-            state["main_storyline"] = outline.get("main_storyline", {})
-        else:
-            state["main_storyline"] = {}
+        state["main_storyline"] = outline.get("main_storyline", {})
 
         if progress_callback:
             progress_callback(0.4, "正在构建世界观...")
-        result = nodes["world_builder"](state)
-        state = _merge_state(state, result)
+        try:
+            result = nodes["world_builder"](state)
+            state = _merge_state(state, result)
+        except Exception as e:
+            log.warning("世界观构建失败，继续: %s", e)
 
         if progress_callback:
             progress_callback(0.7, "正在设计角色...")
-        result = nodes["character_designer"](state)
-        state = _merge_state(state, result)
+        try:
+            result = nodes["character_designer"](state)
+            state = _merge_state(state, result)
+        except Exception as e:
+            log.warning("角色设计失败，继续: %s", e)
+
+        # 校验角色
+        if not state.get("characters"):
+            log.warning("角色列表为空，项目仍可继续但质量可能受影响")
 
         # Extract protagonist names from characters
         protagonist_names = []

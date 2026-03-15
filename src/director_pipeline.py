@@ -275,6 +275,9 @@ class DirectorPipeline:
 
         image_gen = create_image_generator(self.config.get("imagegen", {}))
 
+        # 提取 visual_bible 用于全片一致性
+        visual_bible = getattr(script, "visual_bible", None)
+
         # 初始化视频生成器（如果需要且可用）
         video_gen = None
         needs_video = any(
@@ -293,6 +296,7 @@ class DirectorPipeline:
             try:
                 self._generate_segment_visual(
                     seg, run_dir, image_gen, video_gen,
+                    visual_bible=visual_bible,
                 )
             except Exception as exc:
                 log.error("素材生成失败 segment %d: %s", seg.id, exc)
@@ -318,12 +322,13 @@ class DirectorPipeline:
 
     def _generate_segment_visual(
         self, seg, run_dir: Path, image_gen, video_gen,
+        visual_bible=None,
     ) -> None:
         """为单个段落生成画面素材。"""
         from src.scriptplan.models import AssetType
 
-        # 使用专用的视觉描述翻译（而非小说文本解析）
-        image_prompt = self._visual_to_prompt(seg.visual, seg.id)
+        # 使用专用的视觉描述翻译，注入 visual_bible 保持全片一致性
+        image_prompt = self._visual_to_prompt(seg.visual, seg.id, visual_bible)
         seg.image_prompt = image_prompt
 
         image = image_gen.generate(image_prompt)
@@ -341,7 +346,7 @@ class DirectorPipeline:
 
         elif seg.asset_type == AssetType.IMAGE2VIDEO:
             # 图生视频
-            video_prompt = self._visual_to_video_prompt(seg.visual, seg.id)
+            video_prompt = self._visual_to_video_prompt(seg.visual, seg.id, visual_bible)
             seg.video_prompt = video_prompt
             result = video_gen.generate(
                 prompt=video_prompt,
@@ -352,7 +357,7 @@ class DirectorPipeline:
 
         elif seg.asset_type == AssetType.VIDEO:
             # 纯文生视频
-            video_prompt = self._visual_to_video_prompt(seg.visual, seg.id)
+            video_prompt = self._visual_to_video_prompt(seg.visual, seg.id, visual_bible)
             seg.video_prompt = video_prompt
             result = video_gen.generate(
                 prompt=video_prompt,
@@ -364,22 +369,45 @@ class DirectorPipeline:
     # 视觉描述 → 英文 Prompt 翻译（专用于导演流水线）
     # ------------------------------------------------------------------
 
-    def _visual_to_prompt(self, visual: str, seg_id: int) -> str:
+    def _visual_to_prompt(self, visual: str, seg_id: int, visual_bible=None) -> str:
         """将中文画面描述直接翻译为英文图片生成 prompt。
 
-        与 PromptGenerator.generate() 的区别：
-        - 输入是已经结构化的画面描述（含性别/外观标注），不是叙事文本
-        - 不需要 CharacterTracker 的"姓名+动词"解析
-        - 直接翻译，保留所有角色性别和外观信息
+        如果有 visual_bible，会将角色锚点和风格标签注入 prompt，
+        确保全片角色外观和画面风格一致。
         """
         if not visual or not visual.strip():
-            return "a cinematic scene, highly detailed, 4K"
+            style = ""
+            if visual_bible and visual_bible.style_tags:
+                style = visual_bible.style_tags + ", "
+            return f"{style}a cinematic scene, highly detailed, 4K"
+
+        # 构建角色锚点上下文（如果有 visual_bible）
+        bible_context = ""
+        if visual_bible:
+            if visual_bible.characters:
+                char_lines = []
+                for ch in visual_bible.characters:
+                    name = ch.get("name", "")
+                    anchor = ch.get("prompt_anchor", "")
+                    if name and anchor:
+                        char_lines.append(f"- {name} → {anchor}")
+                if char_lines:
+                    bible_context += (
+                        "【角色锚点 - 翻译时必须使用以下固定外观描述】\n"
+                        + "\n".join(char_lines) + "\n"
+                        "如果画面描述中提到以上角色，必须使用对应的英文锚点描述，不能自由发挥。\n\n"
+                    )
+            if visual_bible.style_tags:
+                bible_context += f"【全片风格标签（必须附加到末尾）】{visual_bible.style_tags}\n\n"
 
         try:
             llm = self._get_llm()
+            system = _VISUAL_TO_IMAGE_PROMPT
+            if bible_context:
+                system = bible_context + system
             response = llm.chat(
                 messages=[
-                    {"role": "system", "content": _VISUAL_TO_IMAGE_PROMPT},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": visual},
                 ],
                 temperature=0.5,
@@ -390,18 +418,36 @@ class DirectorPipeline:
         except Exception as exc:
             log.warning("LLM 视觉翻译失败 seg %d: %s，使用规则翻译", seg_id, exc)
 
-        return self._visual_to_prompt_local(visual)
+        return self._visual_to_prompt_local(visual, visual_bible)
 
-    def _visual_to_video_prompt(self, visual: str, seg_id: int) -> str:
+    def _visual_to_video_prompt(self, visual: str, seg_id: int, visual_bible=None) -> str:
         """将中文画面描述翻译为英文视频生成 prompt。"""
         if not visual or not visual.strip():
             return ""
 
+        # 注入角色锚点
+        bible_context = ""
+        if visual_bible and visual_bible.characters:
+            char_lines = []
+            for ch in visual_bible.characters:
+                name = ch.get("name", "")
+                anchor = ch.get("prompt_anchor", "")
+                if name and anchor:
+                    char_lines.append(f"- {name} → {anchor}")
+            if char_lines:
+                bible_context = (
+                    "【角色锚点 - 必须使用固定外观描述】\n"
+                    + "\n".join(char_lines) + "\n\n"
+                )
+
         try:
             llm = self._get_llm()
+            system = _VISUAL_TO_VIDEO_PROMPT
+            if bible_context:
+                system = bible_context + system
             response = llm.chat(
                 messages=[
-                    {"role": "system", "content": _VISUAL_TO_VIDEO_PROMPT},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": visual},
                 ],
                 temperature=0.5,
@@ -412,18 +458,59 @@ class DirectorPipeline:
         except Exception as exc:
             log.warning("LLM 视频prompt翻译失败 seg %d: %s", seg_id, exc)
 
-        return self._visual_to_prompt_local(visual)
+        return self._visual_to_prompt_local(visual, visual_bible)
 
     @staticmethod
-    def _visual_to_prompt_local(visual: str) -> str:
-        """规则翻译兜底：从中文画面描述提取关键词。"""
+    def _visual_to_prompt_local(visual: str, visual_bible=None) -> str:
+        """规则翻译兜底：从中文画面描述提取关键词 + 角色锚点注入。"""
         import re
         parts = []
-        # 性别检测
-        if re.search(r'女人|女性|女孩|少女|女子|姑娘|她', visual):
-            parts.append("a young woman")
-        elif re.search(r'男人|男性|男孩|少年|男子|他', visual):
-            parts.append("a young man")
+
+        # 如果有 visual_bible，尝试注入角色锚点
+        if visual_bible and visual_bible.characters:
+            for ch in visual_bible.characters:
+                name = ch.get("name", "")
+                anchor = ch.get("prompt_anchor", "")
+                if name and anchor and name in visual:
+                    parts.append(anchor)
+
+        # 性别检测（仅在未通过角色锚点匹配时）
+        if not parts:
+            if re.search(r'女人|女性|女孩|少女|女子|姑娘|她', visual):
+                parts.append("a young woman")
+            elif re.search(r'男人|男性|男孩|少年|男子|他', visual):
+                parts.append("a young man")
+
+        # 外观关键词
+        appearance_map = [
+            (r'西装|正装', 'wearing a suit'),
+            (r'黑色', 'black'),
+            (r'白色', 'white'),
+            (r'红色', 'red'),
+            (r'长发', 'long hair'),
+            (r'短发', 'short hair'),
+            (r'眼镜', 'wearing glasses'),
+            (r'帽子', 'wearing a hat'),
+        ]
+        for pattern, desc in appearance_map:
+            if re.search(pattern, visual):
+                parts.append(desc)
+
+        # 动作关键词
+        action_map = [
+            (r'站|站着|站立', 'standing'),
+            (r'坐|坐着', 'sitting'),
+            (r'跑|奔跑', 'running'),
+            (r'走|行走|走路', 'walking'),
+            (r'回头|转身', 'turning around'),
+            (r'微笑|笑', 'smiling'),
+            (r'哭|流泪', 'crying'),
+            (r'俯瞰|俯视', 'looking down from above'),
+        ]
+        for pattern, desc in action_map:
+            if re.search(pattern, visual):
+                parts.append(desc)
+
         # 场景关键词
         scene_map = [
             (r'城市|都市|高楼', 'modern city'),
@@ -439,12 +526,21 @@ class DirectorPipeline:
             (r'太空|宇宙|星空', 'outer space, stars'),
             (r'雨|下雨', 'rain'),
             (r'雪|下雪', 'snow'),
+            (r'咖啡|咖啡店', 'coffee shop'),
+            (r'医院|病房', 'hospital'),
+            (r'学校|教室', 'school, classroom'),
+            (r'车|汽车', 'car'),
         ]
         for pattern, desc in scene_map:
             if re.search(pattern, visual):
                 parts.append(desc)
         if not parts:
             parts.append("a cinematic scene")
+
+        # 注入全片风格标签
+        if visual_bible and visual_bible.style_tags:
+            parts.append(visual_bible.style_tags)
+
         parts.append("highly detailed, cinematic lighting, 4K")
         return ", ".join(parts)
 
