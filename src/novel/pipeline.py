@@ -277,6 +277,9 @@ class NovelPipeline:
         project_path = str(self._novel_dir(novel_id))
         log.info("项目创建完成: %s", project_path)
 
+        if progress_callback:
+            progress_callback(1.0, "项目创建完成!")
+
         return {
             "novel_id": novel_id,
             "workspace": project_path,
@@ -432,6 +435,9 @@ class NovelPipeline:
             novel_data = fm.load_novel(novel_id) or {}
             novel_data["status"] = "completed"
             fm.save_novel(novel_id, novel_data)
+
+        if progress_callback:
+            progress_callback(1.0, f"章节生成完成 ({len(chapters_generated)}章)")
 
         return {
             "novel_id": novel_id,
