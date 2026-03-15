@@ -1518,6 +1518,83 @@ def _format_director_segments(segments: list) -> str:
     return "\n".join(lines)
 
 
+def _director_list_projects() -> list[str]:
+    """Scan workspace/videos/ for existing runs, return choices list."""
+    videos_dir = Path("workspace/videos")
+    if not videos_dir.exists():
+        return []
+    projects = []
+    for d in sorted(videos_dir.iterdir(), reverse=True):
+        if not d.is_dir() or not d.name.startswith("run_"):
+            continue
+        script_file = d / "script.json"
+        mp4_files = list(d.glob("*.mp4"))
+        if not script_file.exists():
+            continue
+        try:
+            data = json.loads(script_file.read_text(encoding="utf-8"))
+            title = data.get("title", d.name)
+            duration = data.get("total_duration", 0)
+            seg_count = len(data.get("segments", []))
+            has_video = "✓" if mp4_files else "✗"
+            projects.append(
+                f"{d.name} | {title} [{seg_count}段 {duration:.0f}s] {has_video}"
+            )
+        except Exception:
+            projects.append(d.name)
+    return projects
+
+
+def _director_load_project(project_label: str):
+    """Load a previously generated director project.
+
+    Returns (status, video, file, script_json, idea_json, segments_md).
+    """
+    if not project_label:
+        return ("请选择一个项目", None, None, None, None, "")
+
+    run_id = project_label.split("|")[0].strip()
+    run_dir = Path("workspace/videos") / run_id
+
+    if not run_dir.exists():
+        return (f"项目目录不存在: {run_dir}", None, None, None, None, "")
+
+    script_file = run_dir / "script.json"
+    if not script_file.exists():
+        return ("脚本文件不存在", None, None, None, None, "")
+
+    try:
+        data = json.loads(script_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        return (f"读取脚本失败: {e}", None, None, None, None, "")
+
+    # Find video file
+    mp4_files = list(run_dir.glob("*.mp4"))
+    video_path = str(mp4_files[0]) if mp4_files else None
+
+    # Format segments
+    segments_md = _format_director_segments(data.get("segments", []))
+
+    # Extract idea
+    idea = data.get("idea")
+
+    title = data.get("title", "未知")
+    duration = data.get("total_duration", 0)
+    seg_count = len(data.get("segments", []))
+    status = f"已加载: {title}\n时长: {duration:.0f}s | {seg_count}段"
+    if video_path:
+        status += f"\n视频: {video_path}"
+
+    return (
+        status,
+        video_path if video_path and Path(video_path).exists() else None,
+        video_path if video_path and Path(video_path).exists() else None,
+        data,
+        idea,
+        segments_md,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Qimao Publishing Agent
 # ---------------------------------------------------------------------------
@@ -2362,6 +2439,22 @@ def create_ui() -> gr.Blocks:
                             elem_classes="generate-btn",
                         )
 
+                        # 历史记录
+                        gr.HTML('<div class="section-title">历史记录</div>')
+                        with gr.Row():
+                            director_project_select = gr.Dropdown(
+                                label="已生成的视频",
+                                choices=_director_list_projects(),
+                                value=None,
+                                scale=4,
+                            )
+                            director_load_btn = gr.Button(
+                                "加载", size="sm", scale=1, min_width=60,
+                            )
+                            director_refresh_btn = gr.Button(
+                                "刷新", size="sm", variant="secondary", scale=1, min_width=60,
+                            )
+
                         # 脚本预览区（生成后显示）
                         gr.HTML('<div class="section-title">脚本预览</div>')
                         director_script_display = gr.JSON(
@@ -3199,6 +3292,26 @@ def create_ui() -> gr.Blocks:
             ],
         )
 
+        # Director: load history project
+        director_load_btn.click(
+            fn=_director_load_project,
+            inputs=[director_project_select],
+            outputs=[
+                director_status,
+                director_video,
+                director_file,
+                director_script_display,
+                director_idea_display,
+                director_segments_display,
+            ],
+        )
+
+        # Director: refresh project list
+        director_refresh_btn.click(
+            fn=lambda: gr.update(choices=_director_list_projects()),
+            outputs=[director_project_select],
+            show_progress="hidden",
+        )
 
         # ====== Poll timer handler ======
         def _poll_all_tasks(
