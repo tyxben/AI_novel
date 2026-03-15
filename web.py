@@ -3,6 +3,9 @@
 import json
 import hashlib
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 # Try loading .env file
@@ -13,6 +16,53 @@ except ImportError:
     pass
 
 import gradio as gr
+from src.task_queue.client import TaskClient
+
+_task_client = TaskClient()
+
+
+def _ensure_task_server():
+    """Start the task queue server if not already running."""
+    if _task_client.is_server_running():
+        return True
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "src.task_queue.server"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Wait briefly for server to start
+        for _ in range(10):
+            time.sleep(0.5)
+            if _task_client.is_server_running():
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _collect_keys_dict(
+    key_gemini="", key_deepseek="", key_openai="",
+    key_siliconflow="", key_dashscope="",
+    key_kling="", key_jimeng="", key_minimax="",
+) -> dict:
+    """Build _keys dict for task queue from key values."""
+    keys = {}
+    mapping = {
+        "GEMINI_API_KEY": key_gemini,
+        "DEEPSEEK_API_KEY": key_deepseek,
+        "OPENAI_API_KEY": key_openai,
+        "SILICONFLOW_API_KEY": key_siliconflow,
+        "DASHSCOPE_API_KEY": key_dashscope,
+        "KLING_API_KEY": key_kling,
+        "JIMENG_API_KEY": key_jimeng,
+        "MINIMAX_API_KEY": key_minimax,
+    }
+    for env_key, val in mapping.items():
+        if val and val.strip():
+            keys[env_key] = val.strip()
+    return keys
 
 # ---------------------------------------------------------------------------
 # Settings persistence
@@ -1976,6 +2026,270 @@ def _detect_default_img_choice() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Task queue submit / poll helpers
+# ---------------------------------------------------------------------------
+
+_TASK_TYPE_LABELS = {
+    "novel_create": "创建小说",
+    "novel_generate": "章节生成",
+    "novel_polish": "AI 精修",
+    "novel_feedback": "反馈重写",
+    "director_generate": "AI 导演",
+    "video_generate": "视频生成",
+}
+
+
+def _submit_novel_create(
+    theme, author_name, target_audience, genre, target_words,
+    style, template, custom_ideas,
+    llm_backend, key_gemini, key_deepseek, key_openai,
+):
+    """Submit novel_create to task server. Returns (task_id, status_text)."""
+    if not theme or not theme.strip():
+        gr.Warning("请输入主题/灵感")
+        return "", "请输入主题/灵感"
+    if not _ensure_task_server():
+        gr.Warning("后端服务启动失败，请手动运行: python -m src.task_queue.server")
+        return "", "后端服务未启动"
+    try:
+        task_id = _task_client.submit_task("novel_create", {
+            "genre": NOVEL_GENRE_MAP.get(genre, "玄幻"),
+            "theme": theme.strip(),
+            "target_words": int(target_words * 10000) if target_words else 100000,
+            "style": NOVEL_STYLE_MAP.get(style, "webnovel.shuangwen"),
+            "template": NOVEL_TEMPLATE_MAP.get(template, "cyclic_upgrade"),
+            "custom_ideas": custom_ideas.strip() if custom_ideas else "",
+            "author_name": author_name.strip() if author_name else "",
+            "target_audience": target_audience or "通用",
+            "_keys": _collect_keys_dict(key_gemini, key_deepseek, key_openai),
+        })
+        return task_id, f"任务已提交 (ID: {task_id})，正在执行..."
+    except Exception as e:
+        gr.Warning(f"提交失败: {e}")
+        return "", f"提交失败: {e}"
+
+
+def _submit_novel_generate(
+    project, batch_size, silent,
+    llm_backend, key_gemini, key_deepseek, key_openai,
+):
+    """Submit novel_generate to task server."""
+    if not project:
+        gr.Warning("请先选择一个项目")
+        return "", "请先选择一个项目"
+    if not _ensure_task_server():
+        return "", "后端服务未启动"
+    project_path = _novel_extract_project_path(project)
+    try:
+        task_id = _task_client.submit_task("novel_generate", {
+            "project_path": project_path,
+            "start_chapter": None,  # auto-detect in worker
+            "end_chapter": None,
+            "batch_size": int(batch_size) if batch_size else 20,
+            "silent": bool(silent),
+            "_keys": _collect_keys_dict(key_gemini, key_deepseek, key_openai),
+        })
+        return task_id, f"章节生成任务已提交 (ID: {task_id})..."
+    except Exception as e:
+        return "", f"提交失败: {e}"
+
+
+def _submit_novel_polish(
+    project, start_ch, end_ch,
+    llm_backend, key_gemini, key_deepseek, key_openai,
+):
+    """Submit novel_polish to task server."""
+    if not project:
+        return "", "请先选择项目"
+    if not _ensure_task_server():
+        return "", "后端服务未启动"
+    project_path = _novel_extract_project_path(project)
+    try:
+        task_id = _task_client.submit_task("novel_polish", {
+            "project_path": project_path,
+            "start_chapter": int(start_ch) if start_ch and int(start_ch) > 0 else 1,
+            "end_chapter": int(end_ch) if end_ch and int(end_ch) > 0 else None,
+            "_keys": _collect_keys_dict(key_gemini, key_deepseek, key_openai),
+        })
+        return task_id, f"精修任务已提交 (ID: {task_id})..."
+    except Exception as e:
+        return "", f"提交失败: {e}"
+
+
+def _submit_director_generate(
+    inspiration, duration, budget_label,
+    llm_service, img_service,
+    key_gemini, key_deepseek, key_openai,
+    key_siliconflow, key_dashscope,
+    key_kling, key_jimeng, key_minimax,
+    llm_backend_setting, img_backend_setting,
+):
+    """Submit director_generate to task server."""
+    if not inspiration or not inspiration.strip():
+        return "", "请输入灵感/创意"
+    if not _ensure_task_server():
+        return "", "后端服务未启动"
+
+    llm_provider = LLM_MAP.get(llm_backend_setting, "auto")
+    img_backend = BACKEND_MAP.get(img_backend_setting, "siliconflow")
+    config = {
+        "llm": {"provider": llm_provider},
+        "imagegen": {"backend": img_backend},
+        "video": {"codec": "libx265", "crf": 18, "resolution": [1080, 1920]},
+    }
+    budget = _DIRECTOR_BUDGET_MAP.get(budget_label, "low")
+    try:
+        task_id = _task_client.submit_task("director_generate", {
+            "inspiration": inspiration.strip(),
+            "target_duration": int(duration),
+            "budget": budget,
+            "config": config,
+            "_keys": _collect_keys_dict(
+                key_gemini, key_deepseek, key_openai,
+                key_siliconflow, key_dashscope,
+                key_kling, key_jimeng, key_minimax,
+            ),
+        })
+        return task_id, f"导演任务已提交 (ID: {task_id})..."
+    except Exception as e:
+        return "", f"提交失败: {e}"
+
+
+def _submit_video_generate(
+    text, file, style, voice, rate,
+    image_backend, llm_backend, quality, resolution, codec,
+    video_mode, videogen_backend,
+    key_siliconflow, key_gemini, key_deepseek, key_openai, key_dashscope,
+    key_kling, key_jimeng, key_minimax,
+    run_mode, budget_mode, quality_threshold,
+):
+    """Submit video_generate to task server."""
+    # Resolve input text
+    if file is not None:
+        novel_text = Path(file).read_text(encoding="utf-8")
+    elif text and text.strip():
+        novel_text = text.strip()
+    else:
+        gr.Warning("请先输入或生成故事文本")
+        return "", "请先输入故事文本"
+    if len(novel_text) < 10:
+        return "", "文本太短"
+    if not _ensure_task_server():
+        return "", "后端服务未启动"
+
+    # Write to input file (same as original)
+    input_dir = Path("input")
+    input_dir.mkdir(exist_ok=True)
+    text_hash = hashlib.md5(novel_text.encode()).hexdigest()[:8]
+    input_file = input_dir / f"web_{text_hash}.txt"
+    input_file.write_text(novel_text, encoding="utf-8")
+
+    # Build config (same as original)
+    voice_id = VOICE_MAP.get(voice, "zh-CN-YunxiNeural")
+    config = {
+        "promptgen": {"style": STYLE_MAP.get(style, "anime")},
+        "tts": {"voice": voice_id, "rate": RATE_MAP.get(rate, "+0%")},
+        "imagegen": {"backend": BACKEND_MAP.get(image_backend, "siliconflow")},
+        "llm": {"provider": LLM_MAP.get(llm_backend, "auto")},
+        "video": {
+            "codec": CODEC_MAP.get(codec, "libx265"),
+            "crf": QUALITY_MAP.get(quality, 18),
+            "resolution": RESOLUTION_MAP.get(resolution, [1080, 1920]),
+        },
+    }
+    if VIDEO_MODE_MAP.get(video_mode):
+        vg_backend = VIDEOGEN_MAP.get(videogen_backend, "kling")
+        config["videogen"] = {
+            "backend": vg_backend, "duration": 5,
+            "aspect_ratio": "9:16", "use_image_as_first_frame": True,
+        }
+
+    is_agent = run_mode == "Agent模式（智能质控）"
+    try:
+        task_id = _task_client.submit_task("video_generate", {
+            "input_file": str(input_file),
+            "config": config,
+            "run_mode": "agent" if is_agent else "classic",
+            "budget_mode": bool(budget_mode),
+            "quality_threshold": quality_threshold if quality_threshold else None,
+            "_keys": _collect_keys_dict(
+                key_gemini, key_deepseek, key_openai,
+                key_siliconflow, key_dashscope,
+                key_kling, key_jimeng, key_minimax,
+            ),
+        })
+        mode_desc = "Agent模式" if is_agent else "经典模式"
+        return task_id, f"视频生成任务已提交 ({mode_desc}, ID: {task_id})..."
+    except Exception as e:
+        return "", f"提交失败: {e}"
+
+
+def _poll_task(task_id: str) -> dict:
+    """Poll a task's status. Returns raw task dict or empty dict."""
+    if not task_id:
+        return {}
+    try:
+        return _task_client.get_task(task_id)
+    except Exception:
+        return {}
+
+
+def _format_task_progress(task: dict) -> str:
+    """Format task status for display in status box."""
+    if not task:
+        return ""
+    status = task.get("status", "unknown")
+    progress = task.get("progress", 0)
+    msg = task.get("progress_msg", "")
+    pct = int(progress * 100)
+
+    task_type = task.get("task_type", "")
+    label = _TASK_TYPE_LABELS.get(task_type, task_type)
+
+    if status == "pending":
+        return f"[{label}] 排队中..."
+    elif status == "running":
+        bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+        return f"[{label}] {bar} {pct}%\n{msg}"
+    elif status == "completed":
+        return f"[{label}] 已完成!"
+    elif status == "failed":
+        error = task.get("error", "未知错误")
+        return f"[{label}] 失败: {error[:200]}"
+    elif status == "cancelled":
+        return f"[{label}] 已取消"
+    return f"[{label}] {status}"
+
+
+def _format_task_queue_table() -> str:
+    """Format all tasks as a markdown table for the task queue panel."""
+    try:
+        tasks = _task_client.list_tasks(limit=20)
+    except Exception:
+        return "无法连接后端服务"
+    if not tasks:
+        return "暂无任务"
+
+    lines = ["| 任务ID | 类型 | 状态 | 进度 | 信息 |",
+             "|--------|------|------|------|------|"]
+    status_icons = {
+        "pending": "⏳", "running": "🔄", "completed": "✅",
+        "failed": "❌", "cancelled": "🚫",
+    }
+    for t in tasks:
+        tid = t.get("task_id", "?")
+        ttype = _TASK_TYPE_LABELS.get(t.get("task_type", ""), "?")
+        status = t.get("status", "?")
+        icon = status_icons.get(status, "?")
+        pct = int(t.get("progress", 0) * 100)
+        msg = t.get("progress_msg", "")[:30]
+        if t.get("error"):
+            msg = t["error"][:30]
+        lines.append(f"| {tid} | {ttype} | {icon} {status} | {pct}% | {msg} |")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Build Gradio UI
 # ---------------------------------------------------------------------------
 def create_ui() -> gr.Blocks:
@@ -2544,6 +2858,40 @@ def create_ui() -> gr.Blocks:
                             value="H.265（推荐）",
                         )
 
+            # ============================================================
+            # Tab 4: 任务队列
+            # ============================================================
+            with gr.Tab("任务队列", id="tab_tasks"):
+                with gr.Row():
+                    with gr.Column(scale=8):
+                        task_queue_display = gr.Markdown(
+                            value="点击「刷新」查看任务列表",
+                            label="任务列表",
+                        )
+                    with gr.Column(scale=2):
+                        task_refresh_btn = gr.Button("刷新", variant="secondary")
+                        task_cancel_id = gr.Textbox(
+                            label="任务 ID",
+                            placeholder="输入要操作的任务ID",
+                        )
+                        task_cancel_btn = gr.Button("取消任务", variant="stop")
+                        task_delete_btn = gr.Button("删除记录", variant="stop")
+                        task_action_status = gr.Textbox(
+                            label="操作结果",
+                            interactive=False,
+                            lines=2,
+                        )
+
+        # ====== Hidden states for task polling ======
+        novel_create_task_id = gr.State("")
+        novel_gen_task_id = gr.State("")
+        novel_polish_task_id = gr.State("")
+        director_task_id = gr.State("")
+        video_task_id = gr.State("")
+
+        # Timer for polling (active when any task is running)
+        poll_timer = gr.Timer(value=2, active=False)
+
         # ====== Event wiring ======
         # Auto-save keys (advanced panel)
         for key_comp, key_name in [
@@ -2626,13 +2974,31 @@ def create_ui() -> gr.Blocks:
             outputs=[txt_input],
         )
 
-        # Video generation -- includes Agent mode params and extended outputs
+        # Video generation (submit to task queue)
+        def _on_video_submit(
+            text, file, style, voice, rate,
+            img_be, llm_be, quality, res, codec,
+            vid_mode, vg_be,
+            k_sf, k_gem, k_ds, k_oai, k_dash,
+            k_kl, k_jm, k_mm,
+            run_mode, budget_mode, quality_threshold,
+        ):
+            task_id, status = _submit_video_generate(
+                text, file, style, voice, rate,
+                img_be, llm_be, quality, res, codec,
+                vid_mode, vg_be,
+                k_sf, k_gem, k_ds, k_oai, k_dash,
+                k_kl, k_jm, k_mm,
+                run_mode, budget_mode, quality_threshold,
+            )
+            return (
+                task_id, status,
+                gr.update(interactive=False, value="生成中..."),
+                gr.Timer(active=bool(task_id)),
+            )
+
         generate_btn.click(
-            fn=lambda: gr.update(interactive=False, value="生成中..."),
-            inputs=None,
-            outputs=[generate_btn],
-        ).then(
-            fn=generate,
+            fn=_on_video_submit,
             inputs=[
                 txt_input, file_input,
                 style_dropdown, voice_dropdown, rate_radio,
@@ -2640,20 +3006,12 @@ def create_ui() -> gr.Blocks:
                 video_mode, videogen_backend,
                 key_siliconflow, key_gemini, key_deepseek, key_openai, key_dashscope,
                 key_kling, key_jimeng, key_minimax,
-                # Agent mode params
                 run_mode_radio, budget_mode_checkbox, quality_threshold_slider,
             ],
             outputs=[
-                status_box, video_output, file_output,
-                # Agent outputs
-                agent_analysis, agent_gallery, decision_display, quality_report,
-                # Tab visibility
-                agent_tab, decision_tab, quality_tab,
+                video_task_id, status_box,
+                generate_btn, poll_timer,
             ],
-        ).then(
-            fn=lambda: gr.update(interactive=True, value="生成视频"),
-            inputs=None,
-            outputs=[generate_btn],
         )
 
         # ====== Novel event wiring ======
@@ -2668,13 +3026,24 @@ def create_ui() -> gr.Blocks:
             show_progress="hidden",
         )
 
-        # Create novel project
+        # Create novel project (submit to task queue)
+        def _on_novel_create_submit(
+            theme, author, audience, genre, words, style, template, custom,
+            llm_be, k_gem, k_ds, k_oai,
+        ):
+            task_id, status = _submit_novel_create(
+                theme, author, audience, genre, words, style, template, custom,
+                llm_be, k_gem, k_ds, k_oai,
+            )
+            return (
+                task_id,
+                status,
+                gr.update(interactive=False, value="创建中..."),
+                gr.Timer(active=bool(task_id)),
+            )
+
         novel_create_btn.click(
-            fn=lambda: gr.update(interactive=False, value="创建中..."),
-            inputs=None,
-            outputs=[novel_create_btn],
-        ).then(
-            fn=_novel_create,
+            fn=_on_novel_create_submit,
             inputs=[
                 novel_theme_input, novel_author, novel_audience,
                 novel_genre, novel_words,
@@ -2682,17 +3051,11 @@ def create_ui() -> gr.Blocks:
                 llm_backend, key_gemini, key_deepseek, key_openai,
             ],
             outputs=[
+                novel_create_task_id,
                 novel_status_box,
-                novel_outline_display,
-                novel_chars_display,
-                novel_world_display,
-                novel_info_display,
-                novel_project_select,
+                novel_create_btn,
+                poll_timer,
             ],
-        ).then(
-            fn=lambda: gr.update(interactive=True, value="创建项目"),
-            inputs=None,
-            outputs=[novel_create_btn],
         )
 
         # Auto-load project data when project is selected
@@ -2712,23 +3075,28 @@ def create_ui() -> gr.Blocks:
             show_progress="hidden",
         )
 
-        # Generate chapters (continue from current progress)
+        # Generate chapters (submit to task queue)
+        def _on_novel_gen_submit(project, batch, silent, llm_be, k_gem, k_ds, k_oai):
+            task_id, status = _submit_novel_generate(
+                project, batch, silent, llm_be, k_gem, k_ds, k_oai,
+            )
+            return (
+                task_id, status,
+                gr.update(interactive=False, value="写作中..."),
+                gr.Timer(active=bool(task_id)),
+            )
+
         novel_generate_btn.click(
-            fn=lambda: gr.update(interactive=False, value="写作中..."),
-            inputs=None,
-            outputs=[novel_generate_btn],
-        ).then(
-            fn=_novel_generate,
+            fn=_on_novel_gen_submit,
             inputs=[
                 novel_project_select, novel_batch_size,
                 novel_silent,
                 llm_backend, key_gemini, key_deepseek, key_openai,
             ],
-            outputs=[novel_status_box, novel_chapter_display],
-        ).then(
-            fn=lambda: gr.update(interactive=True, value="继续写作"),
-            inputs=None,
-            outputs=[novel_generate_btn],
+            outputs=[
+                novel_gen_task_id, novel_status_box,
+                novel_generate_btn, poll_timer,
+            ],
         )
 
         # Load specific chapter
@@ -2772,31 +3140,48 @@ def create_ui() -> gr.Blocks:
         )
 
 
-        # Polish chapters
+        # Polish chapters (submit to task queue)
+        def _on_novel_polish_submit(project, start, end, llm_be, k_gem, k_ds, k_oai):
+            task_id, status = _submit_novel_polish(
+                project, start, end, llm_be, k_gem, k_ds, k_oai,
+            )
+            return (
+                task_id, status,
+                gr.update(interactive=False, value="精修中..."),
+                gr.Timer(active=bool(task_id)),
+            )
+
         novel_polish_btn.click(
-            fn=lambda: gr.update(interactive=False, value="精修中..."),
-            inputs=None,
-            outputs=[novel_polish_btn],
-        ).then(
-            fn=_novel_polish,
+            fn=_on_novel_polish_submit,
             inputs=[
                 novel_project_select, novel_polish_start, novel_polish_end,
                 llm_backend, key_gemini, key_deepseek, key_openai,
             ],
-            outputs=[novel_status_box],
-        ).then(
-            fn=lambda: gr.update(interactive=True, value="开始精修"),
-            inputs=None,
-            outputs=[novel_polish_btn],
+            outputs=[
+                novel_polish_task_id, novel_status_box,
+                novel_polish_btn, poll_timer,
+            ],
         )
 
-        # ====== Director event wiring ======
+        # ====== Director event wiring (submit to task queue) ======
+        def _on_director_submit(
+            insp, dur, budget, llm_svc, img_svc,
+            k_gem, k_ds, k_oai, k_sf, k_dash, k_kl, k_jm, k_mm,
+            llm_be, img_be,
+        ):
+            task_id, status = _submit_director_generate(
+                insp, dur, budget, llm_svc, img_svc,
+                k_gem, k_ds, k_oai, k_sf, k_dash, k_kl, k_jm, k_mm,
+                llm_be, img_be,
+            )
+            return (
+                task_id, status,
+                gr.update(interactive=False, value="生成中..."),
+                gr.Timer(active=bool(task_id)),
+            )
+
         director_generate_btn.click(
-            fn=lambda: gr.update(interactive=False, value="生成中..."),
-            inputs=None,
-            outputs=[director_generate_btn],
-        ).then(
-            fn=_director_generate,
+            fn=_on_director_submit,
             inputs=[
                 director_inspiration, director_duration, director_budget,
                 director_llm_select, director_img_select,
@@ -2806,19 +3191,149 @@ def create_ui() -> gr.Blocks:
                 llm_backend, image_backend,
             ],
             outputs=[
-                director_status,
-                director_video,
-                director_file,
-                director_script_display,
-                director_idea_display,
-                director_segments_display,
+                director_task_id, director_status,
+                director_generate_btn, poll_timer,
             ],
-        ).then(
-            fn=lambda: gr.update(interactive=True, value="一键生成视频"),
-            inputs=None,
-            outputs=[director_generate_btn],
         )
 
+
+        # ====== Poll timer handler ======
+        def _poll_all_tasks(
+            nc_tid, ng_tid, np_tid, dir_tid, vid_tid,
+        ):
+            """Poll all active tasks. Returns updated status boxes + button states + timer."""
+            results = {
+                "novel_create": _poll_task(nc_tid) if nc_tid else {},
+                "novel_generate": _poll_task(ng_tid) if ng_tid else {},
+                "novel_polish": _poll_task(np_tid) if np_tid else {},
+                "director": _poll_task(dir_tid) if dir_tid else {},
+                "video": _poll_task(vid_tid) if vid_tid else {},
+            }
+
+            # Determine which tasks are still active
+            any_active = False
+            outputs = []
+
+            # Novel create status
+            nc = results["novel_create"]
+            nc_status = nc.get("status", "") if nc else ""
+            nc_done = nc_status in ("completed", "failed", "cancelled")
+            if nc_tid and not nc_done:
+                any_active = True
+
+            # Novel generate status
+            ng = results["novel_generate"]
+            ng_status = ng.get("status", "") if ng else ""
+            ng_done = ng_status in ("completed", "failed", "cancelled")
+            if ng_tid and not ng_done:
+                any_active = True
+
+            # Novel polish status
+            np_ = results["novel_polish"]
+            np_status = np_.get("status", "") if np_ else ""
+            np_done = np_status in ("completed", "failed", "cancelled")
+            if np_tid and not np_done:
+                any_active = True
+
+            # Director status
+            dr = results["director"]
+            dr_status = dr.get("status", "") if dr else ""
+            dr_done = dr_status in ("completed", "failed", "cancelled")
+            if dir_tid and not dr_done:
+                any_active = True
+
+            # Video status
+            vd = results["video"]
+            vd_status = vd.get("status", "") if vd else ""
+            vd_done = vd_status in ("completed", "failed", "cancelled")
+            if vid_tid and not vd_done:
+                any_active = True
+
+            # Build status text for the most recently active task
+            # (update the appropriate status box)
+            novel_status = ""
+            if nc_tid and nc:
+                novel_status = _format_task_progress(nc)
+            elif ng_tid and ng:
+                novel_status = _format_task_progress(ng)
+            elif np_tid and np_:
+                novel_status = _format_task_progress(np_)
+
+            dir_status_text = _format_task_progress(dr) if dir_tid and dr else gr.update()
+            vid_status_text = _format_task_progress(vd) if vid_tid and vd else gr.update()
+
+            return (
+                # Status boxes
+                novel_status if novel_status else gr.update(),
+                dir_status_text,
+                vid_status_text,
+                # Button re-enable when done
+                gr.update(interactive=True, value="创建项目") if nc_done else gr.update(),
+                gr.update(interactive=True, value="继续写作") if ng_done else gr.update(),
+                gr.update(interactive=True, value="开始精修") if np_done else gr.update(),
+                gr.update(interactive=True, value="一键生成视频") if dr_done else gr.update(),
+                gr.update(interactive=True, value="生成视频") if vd_done else gr.update(),
+                # Timer
+                gr.Timer(active=any_active),
+                # Clear task_ids when done
+                "" if nc_done else gr.update(),
+                "" if ng_done else gr.update(),
+                "" if np_done else gr.update(),
+                "" if dr_done else gr.update(),
+                "" if vd_done else gr.update(),
+            )
+
+        poll_timer.tick(
+            fn=_poll_all_tasks,
+            inputs=[
+                novel_create_task_id, novel_gen_task_id, novel_polish_task_id,
+                director_task_id, video_task_id,
+            ],
+            outputs=[
+                novel_status_box, director_status, status_box,
+                novel_create_btn, novel_generate_btn, novel_polish_btn,
+                director_generate_btn, generate_btn,
+                poll_timer,
+                novel_create_task_id, novel_gen_task_id, novel_polish_task_id,
+                director_task_id, video_task_id,
+            ],
+        )
+
+        # ====== Task queue tab events ======
+        task_refresh_btn.click(
+            fn=_format_task_queue_table,
+            outputs=[task_queue_display],
+        )
+
+        def _on_task_cancel(task_id):
+            if not task_id:
+                return "请输入任务 ID"
+            try:
+                result = _task_client.cancel_task(task_id)
+                return result.get("msg", "已取消")
+            except Exception as e:
+                return f"取消失败: {e}"
+
+        task_cancel_btn.click(
+            fn=_on_task_cancel,
+            inputs=[task_cancel_id],
+            outputs=[task_action_status],
+        )
+
+        def _on_task_delete(task_id):
+            if not task_id:
+                return "请输入任务 ID"
+            try:
+                _task_client.delete_task(task_id)
+                return "已删除"
+            except Exception as e:
+                return f"删除失败: {e}"
+
+        task_delete_btn.click(
+            fn=_on_task_delete,
+            inputs=[task_cancel_id],
+            outputs=[task_action_status],
+        )
 
         # Refresh novel project list on tab select
         def _on_novel_tab_select():
@@ -2848,6 +3363,7 @@ def create_ui() -> gr.Blocks:
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    _ensure_task_server()
     app = create_ui()
     app.launch(
         server_name="0.0.0.0",
