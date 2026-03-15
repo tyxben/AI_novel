@@ -9,25 +9,40 @@ from .models import TaskType, TaskStatus
 from .db import TaskDB
 
 
+class TaskCancelled(Exception):
+    """Raised when a task is cancelled via progress callback."""
+
+
 def run_task(task_id: str, task_type: TaskType, params: dict, db: TaskDB):
     """Execute a task. Called in a thread by the server."""
     keys = params.pop("_keys", {})
+    injected = []
     for k, v in keys.items():
         if v:
             os.environ[k] = v
+            injected.append(k)
 
     db.update_status(task_id, TaskStatus.running)
 
     def progress_cb(pct, msg=""):
+        # Cooperative cancellation: check DB status
+        task = db.get_task(task_id)
+        if task and task.status == TaskStatus.cancelled:
+            raise TaskCancelled("Task cancelled by user")
         db.update_progress(task_id, pct, msg)
 
     try:
         result = _dispatch(task_type, params, progress_cb)
         result_str = json.dumps(result, ensure_ascii=False, default=str) if result else ""
         db.update_status(task_id, TaskStatus.completed, result=result_str)
+    except TaskCancelled:
+        db.update_status(task_id, TaskStatus.cancelled)
     except Exception as e:
         error_msg = f"{e}\n\n{traceback.format_exc()}"
         db.update_status(task_id, TaskStatus.failed, error=error_msg)
+    finally:
+        for k in injected:
+            os.environ.pop(k, None)
 
 
 def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:

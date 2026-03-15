@@ -44,14 +44,23 @@ class TaskDB:
             str(self._db_path),
             check_same_thread=False,
         )
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_db(self) -> None:
         conn = self._connect()
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_CREATE_TABLE)
+            # Recover orphaned running tasks from prior crash
+            conn.execute(
+                "UPDATE tasks SET status = ?, error = ? WHERE status = ?",
+                (
+                    TaskStatus.failed.value,
+                    "Server restarted — task interrupted",
+                    TaskStatus.running.value,
+                ),
+            )
             conn.commit()
         finally:
             conn.close()

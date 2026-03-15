@@ -12,3 +12,6 @@ Thumbs.db
 .claude/
 .env
 test_screenshots/
+tests/screenshots/
+.coverage
+input/web_*.txt

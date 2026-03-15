@@ -10,7 +10,7 @@ from .models import TaskType, TaskStatus, TaskRecord
 from .db import TaskDB
 from .workers import run_task
 
-MAX_WORKERS = int(os.environ.get("TASK_QUEUE_WORKERS", "2"))
+MAX_WORKERS = int(os.environ.get("TASK_QUEUE_WORKERS", "1"))
 
 db = TaskDB()
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -32,7 +32,9 @@ class SubmitRequest(BaseModel):
 
 @app.post("/api/tasks", status_code=201)
 def submit_task(req: SubmitRequest):
-    task = db.create_task(req.task_type, req.params)
+    # Strip _keys from persisted params — only pass to worker in memory
+    persist_params = {k: v for k, v in req.params.items() if k != "_keys"}
+    task = db.create_task(req.task_type, persist_params)
     executor.submit(run_task, task.task_id, task.task_type, req.params, db)
     return {"task_id": task.task_id}
 

@@ -26,11 +26,14 @@ def _ensure_task_server():
     if _task_client.is_server_running():
         return True
     try:
+        log_dir = Path.home() / ".novel-video"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_dir / "server.log", "a")
         subprocess.Popen(
             [sys.executable, "-m", "src.task_queue.server"],
             start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
         )
         # Wait briefly for server to start
         for _ in range(10):

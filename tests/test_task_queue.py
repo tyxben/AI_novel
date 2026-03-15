@@ -160,6 +160,18 @@ class TestTaskDB:
         assert errors == [], f"Concurrent write errors: {errors}"
         assert len(db.list_tasks(limit=100)) == 10
 
+    def test_orphaned_running_tasks_recovered(self, tmp_path):
+        """Tasks stuck in 'running' should be marked failed on DB init."""
+        db1 = TaskDB(db_path=tmp_path / "orphan_test.db")
+        task = db1.create_task(TaskType.novel_create, {})
+        db1.update_status(task.task_id, TaskStatus.running)
+
+        # Simulate server restart — create new TaskDB instance
+        db2 = TaskDB(db_path=tmp_path / "orphan_test.db")
+        fetched = db2.get_task(task.task_id)
+        assert fetched.status == TaskStatus.failed
+        assert "Server restarted" in fetched.error
+
 
 # ==========================================================================
 # Workers tests
@@ -251,27 +263,63 @@ class TestWorkers:
         assert fetched.status == TaskStatus.failed
         assert "Unknown task type" in fetched.error
 
-    def test_keys_injected_to_env(self, db):
+    def test_keys_injected_and_cleaned_up(self, db):
         from src.task_queue.workers import run_task
+        import os
 
+        env_key = "TEST_FAKE_KEY_CLEANUP"
         task = db.create_task(TaskType.novel_create, {
             "genre": "玄幻", "theme": "修仙",
-            "_keys": {"TEST_FAKE_KEY_XYZ": "secret_val"},
+            "_keys": {env_key: "secret_val"},
         })
 
         captured = {}
 
         def mock_create(params, progress_cb):
-            captured["key"] = os.environ.get("TEST_FAKE_KEY_XYZ")
+            captured["key"] = os.environ.get(env_key)
             return {}
 
-        import os
         with patch("src.task_queue.workers._run_novel_create", side_effect=mock_create):
             run_task(task.task_id, task.task_type, task.params.copy(), db)
 
+        # Key was available during execution
         assert captured["key"] == "secret_val"
-        # cleanup
-        os.environ.pop("TEST_FAKE_KEY_XYZ", None)
+        # Key is cleaned up after execution
+        assert os.environ.get(env_key) is None
+
+    def test_keys_cleaned_up_on_failure(self, db):
+        from src.task_queue.workers import run_task
+        import os
+
+        env_key = "TEST_FAKE_KEY_FAIL"
+        task = db.create_task(TaskType.novel_create, {
+            "genre": "玄幻", "theme": "修仙",
+            "_keys": {env_key: "fail_val"},
+        })
+
+        with patch("src.task_queue.workers._run_novel_create", side_effect=RuntimeError("boom")):
+            run_task(task.task_id, task.task_type, task.params.copy(), db)
+
+        assert db.get_task(task.task_id).status == TaskStatus.failed
+        assert os.environ.get(env_key) is None
+
+    def test_cancel_via_progress_callback(self, db):
+        from src.task_queue.workers import run_task
+
+        task = db.create_task(TaskType.novel_create, {"genre": "玄幻", "theme": "修仙"})
+
+        def mock_create(params, progress_cb):
+            progress_cb(0.2, "step 1")
+            # Simulate cancel: update DB status before next progress call
+            db.update_status(task.task_id, TaskStatus.cancelled)
+            progress_cb(0.5, "step 2")  # should raise TaskCancelled
+            return {"should": "not reach here"}
+
+        with patch("src.task_queue.workers._run_novel_create", side_effect=mock_create):
+            run_task(task.task_id, task.task_type, task.params.copy(), db)
+
+        fetched = db.get_task(task.task_id)
+        assert fetched.status == TaskStatus.cancelled
 
 
 # ==========================================================================
@@ -308,6 +356,22 @@ class TestServerAPI:
         })
         assert r.status_code == 201
         assert "task_id" in r.json()
+
+    def test_submit_strips_keys_from_db(self):
+        """API keys must not be persisted in SQLite."""
+        r = self.client.post("/api/tasks", json={
+            "task_type": "novel_create",
+            "params": {
+                "theme": "修仙",
+                "_keys": {"GEMINI_API_KEY": "secret123"},
+            },
+        })
+        assert r.status_code == 201
+        task_id = r.json()["task_id"]
+        # Check DB directly — _keys should not be stored
+        task = self.db.get_task(task_id)
+        assert "_keys" not in task.params
+        assert task.params["theme"] == "修仙"
 
     def test_submit_invalid_type_returns_422(self):
         r = self.client.post("/api/tasks", json={
