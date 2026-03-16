@@ -1,64 +1,75 @@
-# AI 小说推文自动化
+# AI 创意工坊
 
 ## 项目概述
-将小说文本一键转换为短视频（有声书+配图风格），适用于抖音/小红书等平台。
+AI 驱动的一站式内容创作平台：短视频自动制作 + AI 长篇小说创作。
+支持三种使用方式：CLI 命令行 / Gradio Web UI / MCP Server（AI 助手调用）。
 
 ## 技术栈
-- Python 3.10+ / Click CLI
+- Python 3.10+ / Click CLI / Gradio Web UI / FastMCP Server
 - edge-tts (微软免费TTS)
 - 多 LLM 后端: OpenAI / DeepSeek / Gemini(免费) / Ollama(本地) — 统一接口 `src/llm/`
-- 图片生成: diffusers(本地SD) / Together.ai Flux(云端免费) — 统一接口 `src/imagegen/`
-- AI视频片段: 可灵(Kling) / 即梦(Seedance) / MiniMax(海螺) — 统一接口 `src/videogen/`
+- 图片生成: SiliconFlow(免费) / 阿里云万相 / Together.ai / diffusers(本地SD) — 统一接口 `src/imagegen/`
+- AI视频片段: 可灵(Kling) / 即梦(Seedance) / MiniMax(海螺) / OpenAI Sora — 统一接口 `src/videogen/`
 - FFmpeg (视频合成)
+- FastAPI + SQLite (任务队列)
 
 ## 项目结构
 - `main.py` - CLI 入口 (click)
-- `src/pipeline.py` - 流水线调度器，编排5个阶段
+- `web.py` - Web UI 入口 (Gradio 三合一创作平台)
+- `mcp_server.py` - MCP Server (FastMCP streamable-http + stdio)
+- `src/pipeline.py` - 经典流水线调度器，编排5个阶段
+- `src/agent_pipeline.py` - Agent 模式入口，LangGraph StateGraph 编排
+- `src/director_pipeline.py` - AI 导演模式流水线（灵感→视频）
 - `src/config_manager.py` - YAML 配置加载/验证
 - `src/checkpoint.py` - 断点续传 (JSON)
 - `src/logger.py` - Rich 日志
 - `src/llm/` - LLM 统一抽象层 (OpenAI/DeepSeek/Gemini/Ollama)
 - `src/segmenter/` - 文本分段 (simple规则 / LLM智能)
 - `src/promptgen/` - 小说文本→图片/视频prompt生成
-- `src/imagegen/` - 图片生成 (diffusers本地 / SiliconFlow / DashScope云端)
-- `src/videogen/` - AI视频片段生成 (可灵Kling / 即梦Seedance / MiniMax海螺)
+- `src/imagegen/` - 图片生成 (SiliconFlow / 阿里云万相 / Together.ai / diffusers本地)
+- `src/videogen/` - AI视频片段生成 (可灵Kling / 即梦Seedance / MiniMax海螺 / OpenAI Sora)
 - `src/tts/` - edge-tts 配音 + SRT字幕
 - `src/video/` - FFmpeg 视频合成 (静态图Ken Burns特效 / AI视频片段拼接)
+- `src/scriptplan/` - AI 导演脚本规划 (灵感→概念→分段脚本→素材策略)
+- `src/task_queue/` - 后台任务队列 (FastAPI + SQLite + Worker)
 
 ## 常用命令
 ```bash
 # 安装
-./setup.sh
+pip install -e '.[web,cloud-image,gemini]'  # 推荐：Web UI + 云端生图 + Gemini
+pip install -e '.[all]'                      # 全部安装
 
-# 或使用 pyproject.toml
-pip install -e .              # 基础依赖
-pip install -e '.[gpu]'       # + Stable Diffusion
-pip install -e '.[llm]'       # + OpenAI
-pip install -e '.[gemini]'    # + Google Gemini
-pip install -e '.[ollama]'    # + Ollama
-pip install -e '.[cloud-image]' # + Together.ai
-pip install -e '.[cloud-video]' # + 视频生成API (可灵/即梦/MiniMax)
-pip install -e '.[all]'       # 全部
+# Web UI 启动
+./start.sh                    # 或 python web.py
 
-# 全流程
+# 视频制作 - 经典模式
 python main.py run input/novel.txt
+python main.py run input/novel.txt --resume  # 断点续传
 
-# 断点续传
-python main.py run input/novel.txt --resume
+# 视频制作 - Agent 模式
+python main.py run input/novel.txt --mode agent
+python main.py run input/novel.txt --mode agent --budget-mode
 
-# 仅分段
+# 视频制作 - 导演模式
+python main.py create-video "一句灵感"
+
+# 小说创作
+python main.py novel write --genre 玄幻 --theme "少年修炼逆天改命" --target-words 100000
+python main.py novel resume workspace/novels/novel_xxx
+python main.py novel export workspace/novels/novel_xxx
+python main.py novel status workspace/novels/novel_xxx
+
+# 仅分段 / 查看进度
 python main.py segment input/novel.txt
-
-# 查看进度
 python main.py status workspace/novel/
 ```
 
 ## 配置
 全局配置在 `config.yaml`，可通过 `--config` 指定自定义配置。
 - `llm.provider` 默认 `auto`，按优先级检测: GEMINI_API_KEY → DEEPSEEK_API_KEY → OPENAI_API_KEY → Ollama
-- `imagegen.backend` 支持 `diffusers`(本地) 和 `together`(云端，需 TOGETHER_API_KEY)
+- `imagegen.backend` 支持 `siliconflow`(免费) / `dashscope` / `together` / `diffusers`(本地)
 - `imagegen.device` 默认 `auto`，自动检测: CUDA > MPS > CPU
-- `videogen.backend` 支持 `kling` / `seedance` / `minimax`（可选，不配置则用静态图模式）
+- `videogen.backend` 支持 `kling` / `seedance` / `minimax` / `sora`（可选，不配置则用静态图模式）
 
 ## Agent 模式 (LangGraph)
 - `src/agents/` - 5个 Agent: Director / ContentAnalyzer / ArtDirector / VoiceDirector / Editor

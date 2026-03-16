@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "novel-video"
 version = "0.9.0"
-description = "AI 小说推文自动化 - 小说一键转短视频"
+description = "AI 创意工坊 - 短视频自动制作 + AI 长篇小说创作"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -65,7 +65,7 @@ build = [
     "pyinstaller>=6.0",
 ]
 all = [
-    "novel-video[gpu,llm,gemini,ollama,cloud-image,cloud-video,agent,web]",
+    "novel-video[gpu,llm,gemini,ollama,cloud-image,cloud-video,agent,web,mcp]",
 ]
 
 [project.scripts]

@@ -1,8 +1,14 @@
 # 更新日志
 
-## [0.9.0] - 2026-03-11
+## [0.9.0] - 2026-03-16
 
 ### 新增
+- **AI 短视频导演模式** (`src/director_pipeline.py` + `src/scriptplan/`)
+  - 从一句灵感/主题出发，AI 自动生成完整短视频
+  - IdeaPlanner: 灵感 → 概念（主题/情绪/风格/目标受众）
+  - ScriptPlanner: 概念 → 分段脚本（镜头语言、画面描述、旁白）
+  - AssetStrategy: 智能决策每段使用静态图 or AI 视频片段
+  - CLI: `python main.py create-video "灵感文本"` / Web UI 导演 Tab
 - **AI 长篇小说写作模块** (`src/novel/`)
   - 9 Agent LangGraph 编排: NovelDirector / WorldBuilder / CharacterDesigner / PlotPlanner / Writer / ConsistencyChecker / StyleKeeper / QualityReviewer / FeedbackAnalyzer
   - 三层大纲生成（幕→卷→章），支持循环升级/多线交织/四幕等模板
@@ -14,6 +20,21 @@
   - 质量评审: 规则硬指标（零成本）+ LLM 打分，不达标自动重写（最多 2 次）
   - ConsistencyChecker 和 StyleKeeper 并行执行 (ThreadPoolExecutor)
   - LangGraph 为可选依赖，未安装时自动 fallback 为顺序执行
+  - 章节任务书 (ChapterBrief)、追更价值评估 (RetentionQuality)、反馈诊断链
+  - Writer 去重/锁定机制防止重复生成
+- **MCP Server** (`mcp_server.py`)
+  - FastMCP (streamable-http + stdio) 协议，供 Claude Code 等 AI 助手调用
+  - 小说工具: 创建项目 / 生成章节 / 查看状态 / 读取章节 / 应用反馈 / 导出
+  - 视频工具: 生成视频 / 文本分段 / 查看状态 / 列出项目
+- **任务队列系统** (`src/task_queue/`)
+  - FastAPI 后台任务服务，前后端分离架构
+  - SQLite 持久化，支持任务提交/轮询/取消
+  - Worker 异步执行视频生成和小说创作任务
+  - Web UI 全面异步化，不再阻塞前端
+- **Web UI 三合一创作平台** (`web.py`)
+  - 短视频制作 Tab: 经典/Agent/导演三种模式 + 快捷键场景 + 历史记录加载/回放
+  - AI 小说 Tab: 创建/续写/反馈/导出/七猫自动发布
+  - 设置 Tab: 统一 API Key 管理 + LLM/图片/TTS 后端选择
 - **Token 优化策略**
   - BM25 关键词检索 (jieba + rank_bm25) 替代 LLM 全文比对
   - ChapterDigest 章节摘要压缩（~500 字）替代全文 LLM 打分
@@ -29,9 +50,18 @@
 - **LLM 接口增强**
   - 所有后端 (OpenAI/Gemini/Ollama) 新增 `max_tokens` 参数支持
   - 大纲生成使用 max_tokens=8192 避免长输出截断
-- **801 个测试** 覆盖所有新功能
+- **Sora 视频生成后端** (`src/videogen/sora_backend.py`)
+  - OpenAI Sora 2 原生竖屏 720x1280
+  - 支持 sora-2 ($0.10/s) 和 sora-2-pro ($0.30~0.50/s)
+
+### 修复
+- Pipeline 完成时回调 progress(1.0)，进度条正确显示 100%
+- 视频图片角色性别混乱问题
+- DirectorPipeline 合成阶段 crash
+- 修复 code review 发现的 3 个安全/可靠性问题
 
 ### 变更
+- 项目定位升级为「AI 创意工坊」，涵盖短视频制作 + AI 小说创作
 - 章节默认长度从 4000 字调整为 2000-3000 字
 - 每章场景数从 4 个调整为 3 个
 - ChapterOutline.estimated_words 默认值从 3000 改为 2500，最小值从 1000 改为 500

@@ -1,6 +1,6 @@
-# 🎬 AI 小说转视频
+# 🎬 AI 创意工坊
 
-> 小说文本一键转短视频 — 输入文字，输出可直接发布到抖音/小红书的竖屏视频。
+> AI 驱动的一站式内容创作平台 — 短视频自动制作 + AI 长篇小说创作，支持 CLI / Web UI / MCP 三种使用方式。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
@@ -10,26 +10,45 @@
 
 ## 功能亮点
 
-- **AI 自动写故事** — LLM 智能分段 + 自动生成画面描述，小说秒变分镜脚本
+### 短视频制作
+- **三种生成模式** — 经典流水线 / Agent 智能质控 / AI 导演（灵感一键出片）
+- **AI 导演模式** `NEW` — 输入一句灵感，AI 自动生成脚本 → 分镜 → 画面 → 配音 → 成片
 - **多 LLM 后端** — Gemini（免费）/ DeepSeek / OpenAI / Ollama（本地离线），自动检测可用 Key
 - **多图片生成后端** — SiliconFlow（免费）/ 阿里云万相 / Together.ai / 本地 Stable Diffusion
-- **AI 视频片段生成** — 可灵 Kling / 即梦 Seedance / MiniMax 海螺，让画面动起来
-- **Agent 智能模式** `NEW` — LangGraph 多 Agent 编排，5 个专职 Agent（导演/内容分析/美术总监/配音导演/剪辑师），自动质量评估与重试优化
+- **AI 视频片段生成** — 可灵 Kling / 即梦 Seedance / MiniMax 海螺 / OpenAI Sora
+- **Agent 智能模式** — LangGraph 5 Agent 编排（导演/内容分析/美术总监/配音导演/剪辑师），自动质量评估与重试
 - **省钱模式** — 规则替代 LLM，跳过质量检查，成本降低约 40%
-- **决策追踪** — 全流程决策日志，可视化审计每个 Agent 的判断依据
+
+### AI 长篇小说
+- **9 Agent 协作** — 导演/世界观/角色/情节/写手/一致性/风格/质量/反馈，全自动 10 万字小说
+- **读者反馈系统** — 分析反馈影响范围，自动重写受影响章节
+- **风格预设** — 玄幻爽文 / 都市 / 武侠 / 仙侠 / 文学 / 轻小说 6 大类
+
+### 平台能力
+- **Web UI** — Gradio 三合一创作平台（短视频 / AI 小说 / 设置），异步任务队列
+- **CLI 命令行** — Click 驱动的完整 CLI，适合批量处理和脚本集成
+- **MCP Server** — FastMCP 协议，可被 Claude Code 等 AI 助手直接调用
 - **免费 TTS 配音** — 微软 edge-tts 高质量语音合成 + SRT 字幕自动生成
 - **H.265 编码** — 相比 H.264 体积减少约一半，画质不变
 - **Ken Burns 特效** — 图片自动缩放平移，告别静态幻灯片感
-- **Web UI** — 基于 Gradio 的三合一创作平台（短视频制作 / AI 小说创作 / 全局设置），支持 Agent 分析 / 决策日志 / 质量报告
-- **CLI 命令行** — Click 驱动的完整 CLI，适合批量处理和脚本集成
 - **断点续传** — 中断后从上次进度继续，不浪费已完成的工作
 - **桌面应用打包** — 支持 PyInstaller 打包为独立可执行文件
 
 ---
 
-## 两种视频模式
+## 三种视频制作模式
 
-本项目支持两种视频生成模式，按需选择：
+| 对比项 | 经典模式 | Agent 模式 | 导演模式 |
+|--------|---------|-----------|---------|
+| **输入** | 小说文本文件 | 小说文本文件 | 一句灵感/主题 |
+| **流程** | 固定 5 阶段流水线 | 5 Agent 智能编排 | AI 自动编剧 + 制片 |
+| **质量控制** | 无 | GPT-4V/Gemini 评分 + 自动重试 | AI 自动决策 |
+| **适用场景** | 快速量产 | 精品内容 | 零素材创作 |
+| **CLI** | `python main.py run novel.txt` | `--mode agent` | `python main.py create-video "灵感"` |
+
+## 两种画面模式
+
+本项目支持两种画面生成模式，按需选择：
 
 | 对比项 | 静态图 + Ken Burns | AI 视频片段 |
 |--------|-------------------|------------|
@@ -44,9 +63,24 @@
 
 ---
 
+## AI 导演模式
+
+v0.9.0 新增，从一句灵感出发，AI 自动完成编剧 + 制片全流程：
+
+```bash
+# CLI
+python main.py create-video "一个程序员在深夜发现自己写的AI开始有了自我意识"
+
+# Web UI — 切换到「导演模式」Tab 输入灵感即可
+```
+
+**流程**: 灵感 → IdeaPlanner(概念) → ScriptPlanner(分段脚本) → AssetStrategy(素材策略) → 图片/视频生成 → TTS → 合成
+
+---
+
 ## Agent 智能模式
 
-v0.7.0 新增基于 LangGraph 的多 Agent 编排系统，在经典流水线基础上增加智能决策层：
+基于 LangGraph 的多 Agent 编排系统，在经典流水线基础上增加智能决策层：
 
 ### 5 个专职 Agent
 
@@ -285,7 +319,7 @@ imagegen:
 
 ```yaml
 videogen:
-  backend: kling        # kling | seedance | minimax
+  backend: kling        # kling | seedance | minimax | sora
   duration: 5           # 视频时长（秒）
   aspect_ratio: "9:16"  # 竖屏
   mode: std             # std | pro（仅 kling）
@@ -315,6 +349,7 @@ export TOGETHER_API_KEY=xxx       # Together.ai
 export KLING_API_KEY=xxx          # 可灵 Kling
 export SEEDANCE_API_KEY=xxx       # 即梦 Seedance（火山方舟）
 export MINIMAX_API_KEY=xxx        # MiniMax 海螺
+export OPENAI_API_KEY=xxx         # OpenAI Sora（与 LLM 共用）
 ```
 
 也支持在项目根目录创建 `.env` 文件配置环境变量。
@@ -328,16 +363,19 @@ export MINIMAX_API_KEY=xxx        # MiniMax 海螺
 ```
 AI_novel/
 ├── main.py                  # CLI 入口（Click）
-├── web.py                   # Web UI（Gradio）
+├── web.py                   # Web UI（Gradio 三合一创作平台）
+├── mcp_server.py            # MCP Server（FastMCP，供 AI 助手调用）
 ├── config.yaml              # 全局配置
-├── start.sh                 # 一键启动脚本
+├── start.sh / start.bat     # 一键启动脚本
 ├── pyproject.toml           # 项目元数据 & 依赖
 ├── src/
-│   ├── pipeline.py          # 流水线调度器
+│   ├── pipeline.py          # 经典流水线调度器
+│   ├── agent_pipeline.py    # Agent 模式流水线
+│   ├── director_pipeline.py # AI 导演模式流水线
 │   ├── config_manager.py    # YAML 配置加载/验证
 │   ├── checkpoint.py        # 断点续传（JSON）
 │   ├── logger.py            # Rich 日志
-│   ├── agents/              # Agent 智能编排（LangGraph）
+│   ├── agents/              # 视频 Agent 智能编排（LangGraph）
 │   │   ├── graph.py         #   状态图构建 + 断点续传
 │   │   ├── director.py      #   导演 Agent
 │   │   ├── content_analyzer.py  # 内容分析 Agent
@@ -345,6 +383,16 @@ AI_novel/
 │   │   ├── voice_director.py    # 配音导演 Agent
 │   │   └── editor.py       #   剪辑师 Agent
 │   ├── tools/               # Tool 层（封装执行模块）
+│   ├── scriptplan/          # AI 导演脚本规划
+│   │   ├── idea_planner.py  #   灵感 → 概念
+│   │   ├── script_planner.py    # 概念 → 分段脚本
+│   │   ├── asset_strategy.py    # 素材策略决策
+│   │   └── models.py       #   Pydantic 数据模型
+│   ├── task_queue/          # 后台任务队列
+│   │   ├── server.py        #   FastAPI 任务服务
+│   │   ├── client.py        #   客户端接口
+│   │   ├── workers.py       #   任务 Worker
+│   │   └── db.py            #   SQLite 持久化
 │   ├── llm/                 # LLM 统一抽象层
 │   │   ├── llm_client.py    #   ABC + 工厂 + 自动检测
 │   │   ├── openai_backend.py    # OpenAI / DeepSeek
@@ -363,21 +411,23 @@ AI_novel/
 │   │   ├── base_backend.py      # 公共轮询逻辑
 │   │   ├── kling_backend.py     # 可灵
 │   │   ├── seedance_backend.py  # 即梦
-│   │   └── minimax_backend.py   # MiniMax 海螺
+│   │   ├── minimax_backend.py   # MiniMax 海螺
+│   │   └── sora_backend.py     # OpenAI Sora
 │   ├── tts/                 # edge-tts 配音 + SRT 字幕
 │   ├── video/               # FFmpeg 视频合成 + Ken Burns 特效
 │   ├── utils/               # 工具函数（FFmpeg 检测等）
 │   └── novel/               # AI 长篇小说创作模块
 │       ├── pipeline.py      #   小说创作流水线
-│       ├── config.py         #   小说模块配置
-│       ├── agents/           #   9 个 Agent（导演/世界观/角色/情节/写手/一致性/风格/质量/反馈）
-│       ├── models/           #   Pydantic 数据模型
-│       ├── storage/          #   存储层（FileManager）
-│       ├── tools/            #   BM25 检索 / 章节摘要 / 质量检查
-│       └── templates/        #   风格预设 / 节奏模板 / AI味黑名单
+│       ├── config.py        #   小说模块配置
+│       ├── agents/          #   9 个 Agent（导演/世界观/角色/情节/写手/一致性/风格/质量/反馈）
+│       ├── models/          #   Pydantic 数据模型
+│       ├── storage/         #   存储层（SQLite + NetworkX + Chroma）
+│       ├── tools/           #   BM25 检索 / 章节摘要 / 质量检查
+│       ├── services/        #   角色/世界观/一致性业务逻辑
+│       └── templates/       #   风格预设 / 节奏模板 / AI味黑名单
 ├── scripts/                 # 实用脚本（批量生成、七猫发布等）
 ├── input/                   # 输入小说文本
-├── presets/                 # 风格预设
+├── presets/                 # 风格预设（YAML）
 ├── workspace/               # 工作目录（自动生成）
 └── output/                  # 输出视频（自动生成）
 ```
@@ -421,11 +471,13 @@ AI_novel/
 | 语言 | Python 3.10+ |
 | CLI | Click |
 | Web UI | Gradio |
+| MCP | FastMCP（streamable-http + stdio） |
+| 任务队列 | FastAPI + SQLite |
 | TTS | edge-tts（微软免费语音合成） |
 | LLM | OpenAI / DeepSeek / Google Gemini / Ollama |
 | 图片生成 | SiliconFlow / 阿里云万相 / Together.ai / Diffusers (本地 SD) |
-| 视频生成 | 可灵 Kling / 即梦 Seedance / MiniMax 海螺 |
-| 智能编排 | LangGraph + 5 Agent 协作 |
+| 视频生成 | 可灵 Kling / 即梦 Seedance / MiniMax 海螺 / OpenAI Sora |
+| 智能编排 | LangGraph — 视频 5 Agent + 小说 9 Agent |
 | 视频合成 | FFmpeg（H.265 编码、Ken Burns 特效、字幕烧录） |
 | 日志 | Rich |
 | 配置 | PyYAML |
@@ -509,6 +561,9 @@ elif backend == "xxx":
 - [x] AI 长篇小说自动创作 — 9 Agent 协作，支持 10 万字级别小说生成 + 读者反馈重写
 - [x] 动态视频拼接 — AI 视频片段（可灵/即梦/MiniMax/Sora）替代静态贴图
 - [x] Web UI 全面升级 — 三合一创作平台（短视频 + AI 小说 + 设置），统一 Key 管理
+- [x] AI 导演模式 — 灵感一键出片，AI 自动编剧 + 制片
+- [x] MCP Server — FastMCP 协议，供 Claude Code 等 AI 助手调用
+- [x] 任务队列 — 前后端分离，异步任务执行
 - [ ] 七猫自动发布 — Playwright 自动化发布到七猫小说平台（已有脚本，集成中）
 - [ ] 多角色语音 — 不同角色使用不同音色
 - [ ] 批量处理 — 支持文件夹批量转换
