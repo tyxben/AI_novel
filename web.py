@@ -1397,6 +1397,137 @@ def _novel_polish(
         return f"精修失败: {exc}"
 
 
+def _format_polish_report(result: dict) -> str:
+    """Format polish result as a rich Markdown report with before/after comparison."""
+    if not result:
+        return ""
+
+    polished = result.get("polished_chapters", [])
+    skipped = result.get("skipped_chapters", [])
+    errors = result.get("errors", [])
+    novel_id = result.get("novel_id", "")
+
+    lines = ["## 精修报告\n"]
+
+    # Summary
+    total = len(polished) + len(skipped) + len(errors)
+    lines.append(f"**总计**: {total} 章 | "
+                 f"**已修改**: {len(polished)} | "
+                 f"**跳过**: {len(skipped)} | "
+                 f"**出错**: {len(errors)}\n")
+
+    if not polished:
+        lines.append("*所有章节审稿通过，无需修改。*")
+        return "\n".join(lines)
+
+    # Per-chapter details
+    lines.append("---\n")
+
+    for p in polished:
+        ch_num = p["chapter_number"]
+        orig_chars = p["original_chars"]
+        new_chars = p["polished_chars"]
+        critique = p.get("critique_summary", "")
+        delta = new_chars - orig_chars
+        delta_str = f"+{delta}" if delta >= 0 else str(delta)
+        pct = (delta / orig_chars * 100) if orig_chars else 0
+
+        lines.append(f"### 第{ch_num}章  `{orig_chars}` → `{new_chars}` 字 ({delta_str}, {pct:+.0f}%)\n")
+        if critique:
+            lines.append(f"**审稿意见**: {critique}\n")
+        lines.append("")
+
+    # Load before/after text if file_manager available
+    if novel_id:
+        try:
+            from src.novel.storage.file_manager import FileManager
+            fm = FileManager("workspace")
+            for p in polished:
+                ch_num = p["chapter_number"]
+                revisions = fm.list_chapter_revisions(novel_id, ch_num)
+                if not revisions:
+                    continue
+                # Latest revision = the pre-polish backup
+                latest_rev = max(revisions)
+                original_text = fm.load_chapter_revision(novel_id, ch_num, latest_rev)
+                polished_text = fm.load_chapter_text(novel_id, ch_num)
+                if original_text and polished_text:
+                    lines.append(f"---\n### 第{ch_num}章 对比\n")
+                    lines.append("<details><summary>点击展开 修改前 → 修改后</summary>\n")
+                    # Show first 500 chars of each for brevity
+                    orig_preview = original_text[:500] + ("..." if len(original_text) > 500 else "")
+                    new_preview = polished_text[:500] + ("..." if len(polished_text) > 500 else "")
+                    lines.append(f"**修改前** ({len(original_text)}字):\n")
+                    lines.append(f"> {orig_preview}\n")
+                    lines.append(f"\n**修改后** ({len(polished_text)}字):\n")
+                    lines.append(f"> {new_preview}\n")
+                    lines.append("</details>\n")
+        except Exception:
+            pass
+
+    if skipped:
+        lines.append(f"\n**跳过章节**: {', '.join(f'第{s}章' for s in skipped)}")
+
+    if errors:
+        lines.append("\n**出错章节**:")
+        for e in errors:
+            lines.append(f"- 第{e['chapter']}章: {e['error']}")
+
+    return "\n".join(lines)
+
+
+def _novel_load_polish_diff(project: str, chapter_num: int) -> str:
+    """Load before/after text for a specific polished chapter."""
+    if not project:
+        return "请先选择项目"
+    try:
+        project_path = _novel_extract_project_path(project)
+        novel_id = Path(project_path).name
+
+        from src.novel.storage.file_manager import FileManager
+        fm = FileManager("workspace")
+
+        ch_num = int(chapter_num)
+        revisions = fm.list_chapter_revisions(novel_id, ch_num)
+        if not revisions:
+            return f"第{ch_num}章没有修订历史（未被精修过）"
+
+        latest_rev = max(revisions)
+        original = fm.load_chapter_revision(novel_id, ch_num, latest_rev) or ""
+        polished = fm.load_chapter_text(novel_id, ch_num) or ""
+
+        if not original and not polished:
+            return f"第{ch_num}章文本为空"
+
+        lines = [f"## 第{ch_num}章 精修对比\n"]
+        lines.append(f"**版本**: rev{latest_rev} → 当前 | "
+                     f"**字数**: {len(original)} → {len(polished)}\n")
+        lines.append("---\n")
+        lines.append(f"### 修改前 ({len(original)}字)\n")
+        lines.append(original[:2000] + ("\n\n*...（截断显示前2000字）*" if len(original) > 2000 else ""))
+        lines.append(f"\n\n---\n### 修改后 ({len(polished)}字)\n")
+        lines.append(polished[:2000] + ("\n\n*...（截断显示前2000字）*" if len(polished) > 2000 else ""))
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"加载对比失败: {e}"
+
+
+def _extract_novel_polish_result(task: dict) -> str:
+    """Extract polish result from completed task and format report."""
+    if not task or task.get("status") != "completed":
+        return ""
+    result_str = task.get("result", "")
+    if not result_str:
+        return ""
+    try:
+        result = json.loads(result_str) if isinstance(result_str, str) else result_str
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    return _format_polish_report(result)
+
+
 # ---------------------------------------------------------------------------
 # AI 短视频导演 -- 后端函数
 # ---------------------------------------------------------------------------
@@ -2894,6 +3025,25 @@ def create_ui() -> gr.Blocks:
                                 novel_info_display = gr.JSON(
                                     label="项目详情",
                                 )
+                            with gr.Tab("精修报告"):
+                                novel_polish_report = gr.Markdown(
+                                    value="*精修完成后显示修改报告...*",
+                                )
+                                gr.HTML('<div class="section-title">章节对比查看</div>')
+                                with gr.Row():
+                                    novel_diff_ch_num = gr.Number(
+                                        label="章节号",
+                                        value=1,
+                                        minimum=1,
+                                        precision=0,
+                                        scale=2,
+                                    )
+                                    novel_diff_btn = gr.Button(
+                                        "查看对比", size="sm", scale=1,
+                                    )
+                                novel_diff_display = gr.Markdown(
+                                    value="*选择章节号后点击查看修改前后对比*",
+                                )
 
                         with gr.Row():
                             novel_refresh_btn = gr.Button(
@@ -3307,6 +3457,13 @@ def create_ui() -> gr.Blocks:
             ],
         )
 
+        # Polish diff viewer
+        novel_diff_btn.click(
+            fn=_novel_load_polish_diff,
+            inputs=[novel_project_select, novel_diff_ch_num],
+            outputs=[novel_diff_display],
+        )
+
         # ====== Director event wiring (submit to task queue) ======
         def _on_director_submit(
             insp, dur, budget, llm_svc, img_svc,
@@ -3438,6 +3595,12 @@ def create_ui() -> gr.Blocks:
                 dr_idea = gr.update()
                 dr_seg_md = gr.update()
 
+            # Extract polish report when task completes
+            if np_done and np_status == "completed":
+                polish_report = _extract_novel_polish_result(np_)
+            else:
+                polish_report = gr.update()
+
             return (
                 # Status boxes
                 novel_status if novel_status else gr.update(),
@@ -3463,6 +3626,8 @@ def create_ui() -> gr.Blocks:
                 dr_script,
                 dr_idea,
                 dr_seg_md,
+                # Polish report
+                polish_report,
             )
 
         poll_timer.tick(
@@ -3482,6 +3647,8 @@ def create_ui() -> gr.Blocks:
                 director_video, director_file,
                 director_script_display, director_idea_display,
                 director_segments_display,
+                # Polish report (populated on completion)
+                novel_polish_report,
             ],
         )
 
