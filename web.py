@@ -1475,6 +1475,8 @@ def _director_generate(
         segments_md = _format_director_segments(result.get("segments", []))
 
         video_path = result.get("video_path", "")
+        if video_path:
+            video_path = str(Path(video_path).resolve())
         status_text = "\n".join(status_updates[-5:]) if status_updates else "完成"
 
         return (
@@ -1545,17 +1547,11 @@ def _director_list_projects() -> list[str]:
     return projects
 
 
-def _director_load_project(project_label: str):
-    """Load a previously generated director project.
+def _load_director_run_dir(run_dir: Path):
+    """Load director results from a run directory.
 
     Returns (status, video, file, script_json, idea_json, segments_md).
     """
-    if not project_label:
-        return ("请选择一个项目", None, None, None, None, "")
-
-    run_id = project_label.split("|")[0].strip()
-    run_dir = Path("workspace/videos") / run_id
-
     if not run_dir.exists():
         return (f"项目目录不存在: {run_dir}", None, None, None, None, "")
 
@@ -1568,9 +1564,9 @@ def _director_load_project(project_label: str):
     except Exception as e:
         return (f"读取脚本失败: {e}", None, None, None, None, "")
 
-    # Find video file
+    # Find video file — use absolute path for Gradio compatibility
     mp4_files = list(run_dir.glob("*.mp4"))
-    video_path = str(mp4_files[0]) if mp4_files else None
+    video_path = str(mp4_files[0].resolve()) if mp4_files else None
 
     # Format segments
     segments_md = _format_director_segments(data.get("segments", []))
@@ -1583,7 +1579,7 @@ def _director_load_project(project_label: str):
     seg_count = len(data.get("segments", []))
     status = f"已加载: {title}\n时长: {duration:.0f}s | {seg_count}段"
     if video_path:
-        status += f"\n视频: {video_path}"
+        status += f"\n视频: {Path(video_path).name}"
 
     return (
         status,
@@ -1591,6 +1587,58 @@ def _director_load_project(project_label: str):
         video_path if video_path and Path(video_path).exists() else None,
         data,
         idea,
+        segments_md,
+    )
+
+
+def _director_load_project(project_label: str):
+    """Load a previously generated director project.
+
+    Returns (status, video, file, script_json, idea_json, segments_md).
+    """
+    if not project_label:
+        return ("请选择一个项目", None, None, None, None, "")
+
+    run_id = project_label.split("|")[0].strip()
+    run_dir = Path("workspace/videos") / run_id
+    return _load_director_run_dir(run_dir)
+
+
+def _extract_director_result_from_task(task: dict):
+    """Extract director results from a completed task queue response.
+
+    Returns (video, file, script_json, idea_json, segments_md) or all None.
+    """
+    _none = (None, None, None, None, "")
+    if not task or task.get("status") != "completed":
+        return _none
+
+    result_str = task.get("result", "")
+    if not result_str:
+        return _none
+
+    try:
+        result = json.loads(result_str) if isinstance(result_str, str) else result_str
+    except (json.JSONDecodeError, TypeError):
+        return _none
+
+    # Try to load from run_dir (most reliable — reads script.json)
+    run_dir = result.get("run_dir", "")
+    if run_dir and Path(run_dir).exists():
+        parts = _load_director_run_dir(Path(run_dir))
+        # Skip status (index 0), return rest
+        return parts[1:]
+
+    # Fallback: extract from task result dict directly
+    video_path = result.get("video_path", "")
+    if video_path:
+        video_path = str(Path(video_path).resolve())
+    segments_md = _format_director_segments(result.get("segments", []))
+    return (
+        video_path if video_path and Path(video_path).exists() else None,
+        video_path if video_path and Path(video_path).exists() else None,
+        result.get("script"),
+        result.get("idea"),
         segments_md,
     )
 
@@ -3378,6 +3426,18 @@ def create_ui() -> gr.Blocks:
             dir_status_text = _format_task_progress(dr) if dir_tid and dr else gr.update()
             vid_status_text = _format_task_progress(vd) if vid_tid and vd else gr.update()
 
+            # Extract director results when task completes
+            if dr_done and dr_status == "completed":
+                dr_video, dr_file, dr_script, dr_idea, dr_seg_md = (
+                    _extract_director_result_from_task(dr)
+                )
+            else:
+                dr_video = gr.update()
+                dr_file = gr.update()
+                dr_script = gr.update()
+                dr_idea = gr.update()
+                dr_seg_md = gr.update()
+
             return (
                 # Status boxes
                 novel_status if novel_status else gr.update(),
@@ -3397,6 +3457,12 @@ def create_ui() -> gr.Blocks:
                 "" if np_done else gr.update(),
                 "" if dr_done else gr.update(),
                 "" if vd_done else gr.update(),
+                # Director result outputs
+                dr_video,
+                dr_file,
+                dr_script,
+                dr_idea,
+                dr_seg_md,
             )
 
         poll_timer.tick(
@@ -3412,6 +3478,10 @@ def create_ui() -> gr.Blocks:
                 poll_timer,
                 novel_create_task_id, novel_gen_task_id, novel_polish_task_id,
                 director_task_id, video_task_id,
+                # Director result outputs (populated on completion)
+                director_video, director_file,
+                director_script_display, director_idea_display,
+                director_segments_display,
             ],
         )
 
