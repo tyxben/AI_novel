@@ -164,7 +164,15 @@ class TaskDB:
         if status == TaskStatus.running:
             sets.append("started_at = ?")
             vals.append(self._dt_to_str(now))
-        if status in (TaskStatus.completed, TaskStatus.failed, TaskStatus.cancelled):
+        if status == TaskStatus.completed:
+            sets.append("finished_at = ?")
+            vals.append(self._dt_to_str(now))
+            # Ensure progress is 100% on completion (avoid race with update_progress)
+            sets.append("progress = ?")
+            vals.append(1.0)
+            sets.append("progress_msg = ?")
+            vals.append("完成")
+        elif status in (TaskStatus.failed, TaskStatus.cancelled):
             sets.append("finished_at = ?")
             vals.append(self._dt_to_str(now))
         if result is not None:
