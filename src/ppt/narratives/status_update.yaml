@@ -1,0 +1,41 @@
+narrative_id: status_update
+name: 项目进展
+description: 适用于定期项目进展汇报，快速同步状态、风险和下一步计划
+target_pages_min: 8
+target_pages_max: 14
+structure:
+  - role: cover
+    title_template: "{{project_name}} 项目进展"
+    required: true
+  - role: executive_summary
+    title_template: "本期概要"
+    key_points_count: "3-4"
+    required: true
+  - role: background
+    title_template: "项目背景与目标"
+    key_points_count: "2-3"
+    required: false
+  - role: progress
+    title_template: "本期进展"
+    key_points_count: "4-6"
+    required: true
+  - role: data_evidence
+    title_template: "关键指标"
+    key_points_count: "3-5"
+    required: true
+  - role: risk_problem
+    title_template: "风险与阻塞项"
+    key_points_count: "2-4"
+    required: true
+  - role: next_steps
+    title_template: "下期计划"
+    key_points_count: "3-5"
+    required: true
+  - role: closing
+    title_template: "讨论与对齐"
+    required: true
+narrative_tips:
+  - "简洁高效：status_update 追求信息密度，每页控制在 3-5 个要点"
+  - "红绿灯机制：progress 页用颜色标注各模块状态（正常/关注/告警）"
+  - "风险前置：risk_problem 页明确影响范围和需要的支持"
+  - "可执行计划：next_steps 页每条计划必须有责任人和截止日期"

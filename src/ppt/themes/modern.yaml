@@ -1,0 +1,44 @@
+name: modern
+display_name: 简约现代
+description: 大量留白、几何元素、渐变色，适合科技和创新主题
+
+colors:
+  primary: "#2D3436"
+  secondary: "#636E72"
+  accent: "#0984E3"
+  background: "#FFFFFF"
+  text_primary: "#2D3436"
+  text_secondary: "#636E72"
+  highlight: "#00B894"
+
+fonts:
+  title:
+    name: "Arial"
+    size: 36
+    bold: true
+  subtitle:
+    name: "Arial"
+    size: 20
+    bold: false
+  body:
+    name: "Arial"
+    size: 16
+    bold: false
+  caption:
+    name: "Arial"
+    size: 12
+    bold: false
+
+spacing:
+  margin_top: 1.0
+  margin_bottom: 0.8
+  margin_left: 1.0
+  margin_right: 1.0
+  line_spacing: 1.5
+  paragraph_spacing: 0.3
+
+decorations:
+  use_gradients: true
+  use_shapes: true
+  use_dividers: true
+  corner_radius: 0.1

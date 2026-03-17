@@ -1,0 +1,44 @@
+name: tech
+display_name: 科技暗黑
+description: 暗色背景搭配霓虹色调，适合技术分享和产品发布
+
+colors:
+  primary: "#0D1117"
+  secondary: "#161B22"
+  accent: "#00D4FF"
+  background: "#0D1117"
+  text_primary: "#E6EDF3"
+  text_secondary: "#8B949E"
+  highlight: "#7C3AED"
+
+fonts:
+  title:
+    name: "Consolas"
+    size: 36
+    bold: true
+  subtitle:
+    name: "Consolas"
+    size: 20
+    bold: false
+  body:
+    name: "Arial"
+    size: 16
+    bold: false
+  caption:
+    name: "Arial"
+    size: 12
+    bold: false
+
+spacing:
+  margin_top: 1.0
+  margin_bottom: 0.8
+  margin_left: 1.0
+  margin_right: 1.0
+  line_spacing: 1.6
+  paragraph_spacing: 0.35
+
+decorations:
+  use_gradients: true
+  use_shapes: true
+  use_dividers: true
+  corner_radius: 0.05

@@ -1,0 +1,44 @@
+name: education
+display_name: 教育清新
+description: 浅色清新风格，易读性优先，适合教学课件和学术演讲
+
+colors:
+  primary: "#4A90E2"
+  secondary: "#5DADE2"
+  accent: "#7ED321"
+  background: "#FFFFFF"
+  text_primary: "#2C3E50"
+  text_secondary: "#7F8C8D"
+  highlight: "#F39C12"
+
+fonts:
+  title:
+    name: "Arial"
+    size: 34
+    bold: true
+  subtitle:
+    name: "Arial"
+    size: 20
+    bold: false
+  body:
+    name: "Arial"
+    size: 18
+    bold: false
+  caption:
+    name: "Arial"
+    size: 13
+    bold: false
+
+spacing:
+  margin_top: 1.0
+  margin_bottom: 1.0
+  margin_left: 1.0
+  margin_right: 1.0
+  line_spacing: 1.8
+  paragraph_spacing: 0.4
+
+decorations:
+  use_gradients: false
+  use_shapes: true
+  use_dividers: true
+  corner_radius: 0.15

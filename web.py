@@ -1398,16 +1398,15 @@ def _novel_polish(
 
 
 def _format_polish_report(result: dict) -> str:
-    """Format polish result as a rich Markdown report with before/after comparison."""
+    """Format polish result as a rich Markdown report with before/after metrics."""
     if not result:
         return ""
 
     polished = result.get("polished_chapters", [])
     skipped = result.get("skipped_chapters", [])
     errors = result.get("errors", [])
-    novel_id = result.get("novel_id", "")
 
-    lines = ["## 精修报告\n"]
+    lines = ["## 📋 精修报告\n"]
 
     # Summary
     total = len(polished) + len(skipped) + len(errors)
@@ -1420,50 +1419,167 @@ def _format_polish_report(result: dict) -> str:
         lines.append("*所有章节审稿通过，无需修改。*")
         return "\n".join(lines)
 
+    # Aggregate issue stats
+    all_issues: dict[str, int] = {}
+    for p in polished:
+        for issue in p.get("issues", []):
+            t = issue.get("type", "其他")
+            all_issues[t] = all_issues.get(t, 0) + 1
+
+    if all_issues:
+        issue_icons = {
+            "重复": "🔁", "对话": "💬", "逻辑": "🧩", "节奏": "⏱️",
+            "细节": "🔍", "AI味": "🤖", "转折": "↪️", "角色": "👤",
+            "风格": "🎨", "其他": "📝",
+        }
+        lines.append("### 问题分布\n")
+        for t, cnt in sorted(all_issues.items(), key=lambda x: -x[1]):
+            icon = issue_icons.get(t, "📝")
+            lines.append(f"- {icon} **{t}**: {cnt} 处")
+        lines.append("")
+
+    # For old-format results, try to compute metrics from saved revisions
+    novel_id = result.get("novel_id", "")
+    _fm = None
+    _style_tool = None
+    _quality_tool = None
+    if novel_id:
+        try:
+            from src.novel.storage.file_manager import FileManager
+            _fm = FileManager("workspace")
+        except Exception:
+            pass
+
+    def _ensure_metrics(p: dict) -> None:
+        """Backfill before_style/after_style/before_rules/after_rules from files if missing."""
+        if p.get("before_style") and p.get("after_style"):
+            return  # already has new-format data
+        if not _fm or not novel_id:
+            return
+        nonlocal _style_tool, _quality_tool
+        try:
+            ch_num = p["chapter_number"]
+            revisions = _fm.list_chapter_revisions(novel_id, ch_num)
+            if not revisions:
+                return
+            original = _fm.load_chapter_revision(novel_id, ch_num, max(revisions)) or ""
+            polished_text = _fm.load_chapter_text(novel_id, ch_num) or ""
+            if not original or not polished_text:
+                return
+            if _style_tool is None:
+                from src.novel.tools.style_analysis_tool import StyleAnalysisTool
+                from src.novel.tools.quality_check_tool import QualityCheckTool
+                _style_tool = StyleAnalysisTool()
+                _quality_tool = QualityCheckTool()
+            p["before_style"] = _style_tool.analyze(original).model_dump()
+            p["after_style"] = _style_tool.analyze(polished_text).model_dump()
+            p["before_rules"] = _quality_tool.rule_check(original).model_dump()
+            p["after_rules"] = _quality_tool.rule_check(polished_text).model_dump()
+        except Exception:
+            pass
+
     # Per-chapter details
     lines.append("---\n")
 
     for p in polished:
+        _ensure_metrics(p)
+
         ch_num = p["chapter_number"]
         orig_chars = p["original_chars"]
         new_chars = p["polished_chars"]
-        critique = p.get("critique_summary", "")
         delta = new_chars - orig_chars
         delta_str = f"+{delta}" if delta >= 0 else str(delta)
         pct = (delta / orig_chars * 100) if orig_chars else 0
 
         lines.append(f"### 第{ch_num}章  `{orig_chars}` → `{new_chars}` 字 ({delta_str}, {pct:+.0f}%)\n")
-        if critique:
-            lines.append(f"**审稿意见**: {critique}\n")
-        lines.append("")
 
-    # Load before/after text if file_manager available
-    if novel_id:
-        try:
-            from src.novel.storage.file_manager import FileManager
-            fm = FileManager("workspace")
-            for p in polished:
-                ch_num = p["chapter_number"]
-                revisions = fm.list_chapter_revisions(novel_id, ch_num)
-                if not revisions:
-                    continue
-                # Latest revision = the pre-polish backup
-                latest_rev = max(revisions)
-                original_text = fm.load_chapter_revision(novel_id, ch_num, latest_rev)
-                polished_text = fm.load_chapter_text(novel_id, ch_num)
-                if original_text and polished_text:
-                    lines.append(f"---\n### 第{ch_num}章 对比\n")
-                    lines.append("<details><summary>点击展开 修改前 → 修改后</summary>\n")
-                    # Show first 500 chars of each for brevity
-                    orig_preview = original_text[:500] + ("..." if len(original_text) > 500 else "")
-                    new_preview = polished_text[:500] + ("..." if len(polished_text) > 500 else "")
-                    lines.append(f"**修改前** ({len(original_text)}字):\n")
-                    lines.append(f"> {orig_preview}\n")
-                    lines.append(f"\n**修改后** ({len(polished_text)}字):\n")
-                    lines.append(f"> {new_preview}\n")
-                    lines.append("</details>\n")
-        except Exception:
-            pass
+        # Issue tags
+        issues = p.get("issues", [])
+        if issues:
+            tags = "  ".join(
+                f"`{issue_icons.get(i.get('type', '其他'), '📝')} {i.get('type', '其他')}`"
+                for i in issues
+            )
+            lines.append(f"**发现问题**: {tags}\n")
+
+        # Critique summary (for old format without full critique)
+        critique_summary = p.get("critique_summary", "")
+        if critique_summary and not p.get("critique_full"):
+            lines.append(f"**审稿意见**: {critique_summary}\n")
+
+        # Style metrics comparison table
+        before_style = p.get("before_style")
+        after_style = p.get("after_style")
+        if before_style and after_style:
+            lines.append("<details><summary>风格指标对比</summary>\n")
+            lines.append("| 指标 | 修改前 | 修改后 | 变化 |")
+            lines.append("|------|--------|--------|------|")
+
+            style_labels = {
+                "avg_sentence_length": "平均句长",
+                "dialogue_ratio": "对话占比",
+                "exclamation_ratio": "感叹号占比",
+                "avg_paragraph_length": "平均段落长",
+                "classical_word_ratio": "古典词汇占比",
+                "description_ratio": "描写占比",
+                "first_person_ratio": "第一人称占比",
+            }
+            for key, label in style_labels.items():
+                bv = before_style.get(key, 0)
+                av = after_style.get(key, 0)
+                if bv is None:
+                    bv = 0
+                if av is None:
+                    av = 0
+                # Format as percentage for ratios, integer for lengths
+                if "ratio" in key:
+                    b_str = f"{bv:.1%}"
+                    a_str = f"{av:.1%}"
+                    d = av - bv
+                    d_str = f"{d:+.1%}" if d != 0 else "—"
+                else:
+                    b_str = f"{bv:.1f}"
+                    a_str = f"{av:.1f}"
+                    d = av - bv
+                    d_str = f"{d:+.1f}" if abs(d) > 0.05 else "—"
+                lines.append(f"| {label} | {b_str} | {a_str} | {d_str} |")
+            lines.append("\n</details>\n")
+
+        # Rule check comparison
+        before_rules = p.get("before_rules")
+        after_rules = p.get("after_rules")
+        if before_rules and after_rules:
+            rule_labels = {
+                "repetition_issues": "重复问题",
+                "ai_flavor_issues": "AI味",
+                "paragraph_length_issues": "段落过长",
+                "dialogue_distinction_issues": "对话区分度",
+            }
+            improvements = []
+            for key, label in rule_labels.items():
+                b_cnt = len(before_rules.get(key, []))
+                a_cnt = len(after_rules.get(key, []))
+                if b_cnt > 0 or a_cnt > 0:
+                    if a_cnt < b_cnt:
+                        improvements.append(f"✅ {label}: {b_cnt} → {a_cnt}")
+                    elif a_cnt > b_cnt:
+                        improvements.append(f"⚠️ {label}: {b_cnt} → {a_cnt}")
+                    else:
+                        improvements.append(f"— {label}: {b_cnt} (未变)")
+            if improvements:
+                lines.append("<details><summary>质量检查变化</summary>\n")
+                for imp in improvements:
+                    lines.append(f"- {imp}")
+                lines.append("\n</details>\n")
+
+        # Critique details (collapsible)
+        critique_full = p.get("critique_full", "")
+        if critique_full:
+            lines.append("<details><summary>完整审稿意见</summary>\n")
+            lines.append(critique_full)
+            lines.append("\n</details>\n")
+
+        lines.append("")
 
     if skipped:
         lines.append(f"\n**跳过章节**: {', '.join(f'第{s}章' for s in skipped)}")
@@ -2295,6 +2411,9 @@ _TASK_TYPE_LABELS = {
     "novel_feedback": "反馈重写",
     "director_generate": "AI 导演",
     "video_generate": "视频生成",
+    "ppt_generate": "PPT 生成",
+    "ppt_outline": "PPT 大纲生成",
+    "ppt_continue": "PPT 继续生成",
 }
 
 
@@ -2483,6 +2602,332 @@ def _submit_video_generate(
         return "", f"提交失败: {e}"
 
 
+def _submit_ppt_generate(
+    text, theme, max_pages, gen_images, deck_type_choice,
+    llm_backend_setting,
+    key_gemini, key_deepseek, key_openai,
+    key_siliconflow, key_dashscope,
+):
+    """Submit ppt_generate to task server."""
+    if not text or not text.strip():
+        gr.Warning("请输入文本或上传文档")
+        return "", "请输入文本或上传文档"
+
+    # 文档适配性预检（不阻断，仅提示；不适合的文档会在 pipeline 中自动改写）
+    try:
+        from src.ppt.document_analyzer import check_ppt_suitability
+        suit_result = check_ppt_suitability(text)
+        if not suit_result.suitable:
+            gr.Info("该文档将自动改写为 PPT 友好版本后再生成")
+    except ImportError:
+        pass
+    if not _ensure_task_server():
+        return "", "后端服务未启动"
+
+    llm_provider = LLM_MAP.get(llm_backend_setting, "auto")
+    config = {
+        "llm": {"provider": llm_provider},
+        "imagegen": {"backend": "siliconflow"},
+    }
+
+    # Resolve deck_type: "auto" -> None (let pipeline auto-detect)
+    resolved_deck_type = None if (not deck_type_choice or deck_type_choice == "auto") else deck_type_choice
+
+    try:
+        task_id = _task_client.submit_task("ppt_generate", {
+            "text": text.strip(),
+            "theme": theme or "modern",
+            "max_pages": int(max_pages) if max_pages and int(max_pages) > 0 else None,
+            "generate_images": bool(gen_images),
+            "deck_type": resolved_deck_type,
+            "config": config,
+            "_keys": _collect_keys_dict(
+                key_gemini, key_deepseek, key_openai,
+                key_siliconflow, key_dashscope,
+            ),
+        })
+        return task_id, f"任务已提交 (ID: {task_id})，正在执行..."
+    except Exception as e:
+        gr.Warning(f"提交失败: {e}")
+        return "", f"提交失败: {e}"
+
+
+def _extract_ppt_result(task: dict):
+    """Extract results from a completed PPT task.
+
+    Returns:
+        (output_path, outline_markdown, quality_markdown, info_dict)
+    """
+    if not task:
+        return None, "", "", {}
+    result_str = task.get("result", "")
+    if not result_str:
+        return None, "", "", {}
+    try:
+        result = json.loads(result_str)
+        output_path = result.get("output_path", "")
+
+        # Format outline as Markdown
+        outline_md = _format_ppt_outline_md(result.get("outline", []))
+
+        # Format quality report as Markdown
+        quality_md = _format_ppt_quality_md(result.get("quality_report", {}))
+
+        # Info dict (exclude large fields already shown elsewhere)
+        planning = result.get("planning") or {}
+        deck_type_labels = {
+            "business_report": "汇报材料",
+            "course_lecture": "课程讲义",
+            "product_intro": "产品介绍",
+        }
+        info = {
+            "project_id": result.get("project_id", ""),
+            "output_path": output_path,
+        }
+        if planning:
+            dt = planning.get("deck_type", "")
+            info["deck_type"] = deck_type_labels.get(dt, dt)
+            info["core_message"] = planning.get("core_message", "")
+            info["presentation_goal"] = planning.get("presentation_goal", "")
+            info["audience"] = planning.get("audience", "")
+
+        return output_path, outline_md, quality_md, info
+    except Exception:
+        return None, "", "", {}
+
+
+def _format_ppt_outline_md(outline_data: list) -> str:
+    """Format PPT outline data as readable Markdown."""
+    if not outline_data:
+        return "*大纲数据不可用*"
+
+    lines = [f"## PPT 大纲（共 {len(outline_data)} 页）\n"]
+    for page in outline_data:
+        num = page.get("page_number", "?")
+        title = page.get("title", "未命名")
+        layout = page.get("layout", "unknown")
+        subtitle = page.get("subtitle", "")
+
+        lines.append(f"### 第 {num} 页 — {title}")
+        lines.append(f"**布局**: `{layout}`")
+        if subtitle:
+            lines.append(f"**副标题**: {subtitle}")
+
+        key_points = page.get("key_points", [])
+        if key_points:
+            lines.append("**要点**:")
+            for kp in key_points:
+                lines.append(f"- {kp}")
+
+        if page.get("needs_image"):
+            prompt = page.get("image_prompt", "")
+            lines.append(f"**配图**: {prompt[:80]}{'...' if len(prompt or '') > 80 else ''}")
+
+        lines.append("")  # blank line between pages
+
+    return "\n".join(lines)
+
+
+def _format_ppt_quality_md(quality_data: dict) -> str:
+    """Format PPT quality report as readable Markdown."""
+    if not quality_data:
+        return "*质量报告不可用*"
+
+    score = quality_data.get("score", 0)
+    summary = quality_data.get("summary", "")
+    total_pages = quality_data.get("total_pages", 0)
+    issues = quality_data.get("issues", [])
+
+    # Score emoji based on value
+    if score >= 9:
+        grade = "优秀"
+    elif score >= 7:
+        grade = "良好"
+    elif score >= 5:
+        grade = "一般"
+    else:
+        grade = "需改进"
+
+    lines = [
+        f"## 质量检查报告\n",
+        f"**总评分**: {score}/10 （{grade}）",
+        f"**总页数**: {total_pages}",
+        f"**概要**: {summary}\n",
+    ]
+
+    if issues:
+        lines.append("### 问题列表\n")
+        lines.append("| 页码 | 类型 | 严重度 | 描述 | 可自动修复 |")
+        lines.append("|------|------|--------|------|------------|")
+        for issue in issues:
+            page = issue.get("page_number", "?")
+            itype = issue.get("issue_type", "")
+            severity = issue.get("severity", "")
+            desc = issue.get("description", "")
+            fixable = "是" if issue.get("auto_fixable") else "否"
+            lines.append(f"| {page} | {itype} | {severity} | {desc} | {fixable} |")
+        lines.append("")
+    else:
+        lines.append("*未发现问题*")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# PPT V2 helpers: outline ↔ DataFrame conversion
+# ---------------------------------------------------------------------------
+
+def _editable_outline_to_df(outline):
+    """EditableOutline -> DataFrame rows for gr.DataFrame display."""
+    rows = []
+    for slide in outline.slides:
+        rows.append([
+            slide.page_number,
+            slide.role,
+            slide.title,
+            " | ".join(slide.key_points) if slide.key_points else "",
+            slide.layout,
+            slide.image_strategy,
+        ])
+    return rows
+
+
+def _df_to_editable_outline(df_data, project_id):
+    """DataFrame rows -> EditableOutline for pipeline consumption."""
+    from src.ppt.models import EditableOutline, EditableSlide
+
+    slides = []
+    for row in df_data:
+        if not row or len(row) < 6:
+            continue
+        page_num = int(row[0]) if row[0] else len(slides) + 1
+        key_points = [kp.strip() for kp in str(row[3]).split("|") if kp.strip()]
+        slides.append(EditableSlide(
+            page_number=page_num,
+            role=str(row[1]),
+            title=str(row[2]),
+            key_points=key_points,
+            layout=str(row[4]),
+            image_strategy=str(row[5]),
+        ))
+
+    return EditableOutline(
+        project_id=project_id,
+        total_pages=len(slides),
+        slides=slides,
+    )
+
+
+def _submit_ppt_outline_generate(
+    mode, topic, audience, scenario, doc_text, theme, target_pages,
+    llm_backend_setting,
+    key_gemini, key_deepseek, key_openai,
+    key_siliconflow, key_dashscope,
+):
+    """Submit PPT outline generation to task queue (async).
+
+    Returns (task_id, status_text).
+    """
+    if not _ensure_task_server():
+        return "", "后端服务未启动"
+
+    # Validate inputs early
+    if mode == "从主题生成":
+        if not topic or not topic.strip():
+            gr.Warning("请输入主题")
+            return "", "请输入主题"
+    else:
+        if not doc_text or not doc_text.strip():
+            gr.Warning("请输入文档内容或上传文档")
+            return "", "请输入文档内容或上传文档"
+
+    llm_provider = LLM_MAP.get(llm_backend_setting, "auto")
+    config = {
+        "llm": {"provider": llm_provider},
+        "imagegen": {"backend": "siliconflow"},
+    }
+
+    target_pg = int(target_pages) if target_pages and int(target_pages) > 0 else None
+
+    task_params = {
+        "topic": topic.strip() if topic else None,
+        "document_text": doc_text.strip() if doc_text else None,
+        "audience": audience or "business",
+        "scenario": scenario or "quarterly_review",
+        "theme": theme or "modern",
+        "target_pages": target_pg,
+        "config": config,
+        "_keys": _collect_keys_dict(
+            key_gemini, key_deepseek, key_openai,
+            key_siliconflow, key_dashscope,
+        ),
+    }
+
+    try:
+        task_id = _task_client.submit_task("ppt_outline", task_params)
+        return task_id, f"大纲生成中... (任务: {task_id})"
+    except Exception as e:
+        gr.Warning(f"提交失败: {e}")
+        return "", f"提交失败: {e}"
+
+
+def _submit_ppt_continue(
+    project_id, df_data, gen_images, deck_type,
+    llm_backend_setting,
+    key_gemini, key_deepseek, key_openai,
+    key_siliconflow, key_dashscope,
+):
+    """Submit PPT continue-from-outline task to background worker."""
+    if not project_id:
+        gr.Warning("没有可用的大纲项目，请先生成大纲")
+        return "", "请先生成大纲"
+    if not _ensure_task_server():
+        return "", "后端服务未启动"
+
+    # Convert DataFrame to list of lists (Gradio may return various formats)
+    if hasattr(df_data, "values"):
+        # pandas DataFrame
+        df_data = df_data.values.tolist()
+    elif isinstance(df_data, dict):
+        # dict of columns
+        import pandas as pd
+        df_data = pd.DataFrame(df_data).values.tolist()
+
+    if not df_data or len(df_data) == 0:
+        gr.Warning("大纲为空，请先生成大纲")
+        return "", "大纲为空"
+
+    try:
+        outline = _df_to_editable_outline(df_data, project_id)
+    except Exception as e:
+        gr.Warning(f"大纲数据解析失败: {e}")
+        return "", f"大纲数据解析失败: {e}"
+
+    llm_provider = LLM_MAP.get(llm_backend_setting, "auto")
+    config = {
+        "llm": {"provider": llm_provider},
+        "imagegen": {"backend": "siliconflow"},
+    }
+    resolved_deck_type = None if (not deck_type or deck_type == "auto") else deck_type
+
+    try:
+        task_id = _task_client.submit_task("ppt_continue", {
+            "project_id": project_id,
+            "edited_outline": outline.model_dump(),
+            "generate_images": bool(gen_images),
+            "deck_type": resolved_deck_type,
+            "config": config,
+            "_keys": _collect_keys_dict(
+                key_gemini, key_deepseek, key_openai,
+                key_siliconflow, key_dashscope,
+            ),
+        })
+        return task_id, f"PPT 生成任务已提交 (ID: {task_id})，正在执行..."
+    except Exception as e:
+        gr.Warning(f"提交失败: {e}")
+        return "", f"提交失败: {e}"
+
+
 def _poll_task(task_id: str) -> dict:
     """Poll a task's status. Returns raw task dict or empty dict."""
     if not task_id:
@@ -2611,12 +3056,17 @@ def create_ui() -> gr.Blocks:
                                 scale=1,
                             )
 
-                        director_generate_btn = gr.Button(
-                            "一键生成视频",
-                            variant="primary",
-                            size="lg",
-                            elem_classes="generate-btn",
-                        )
+                        with gr.Row():
+                            director_generate_btn = gr.Button(
+                                "一键生成视频",
+                                variant="primary",
+                                size="lg",
+                                elem_classes="generate-btn",
+                                scale=4,
+                            )
+                            director_new_btn = gr.Button(
+                                "新建", variant="secondary", size="lg", scale=1, min_width=80,
+                            )
 
                         # 历史记录
                         gr.HTML('<div class="section-title">历史记录</div>')
@@ -2811,12 +3261,17 @@ def create_ui() -> gr.Blocks:
                                 show_progress="hidden",
                             )
 
-                        generate_btn = gr.Button(
-                            "生成视频",
-                            variant="primary",
-                            size="lg",
-                            elem_classes="generate-btn",
-                        )
+                        with gr.Row():
+                            generate_btn = gr.Button(
+                                "生成视频",
+                                variant="primary",
+                                size="lg",
+                                elem_classes="generate-btn",
+                                scale=4,
+                            )
+                            video_new_btn = gr.Button(
+                                "新建", variant="secondary", size="lg", scale=1, min_width=80,
+                            )
 
                     # ============== Right column: Output ==============
                     with gr.Column(scale=4, elem_classes="output-card"):
@@ -2919,12 +3374,17 @@ def create_ui() -> gr.Blocks:
                                 lines=4,
                                 info="选择「自定义」模板时，在这里描述你想要的故事结构",
                             )
-                        novel_create_btn = gr.Button(
-                            "创建项目",
-                            variant="secondary",
-                            size="lg",
-                            elem_classes="story-btn",
-                        )
+                        with gr.Row():
+                            novel_create_btn = gr.Button(
+                                "创建项目",
+                                variant="secondary",
+                                size="lg",
+                                elem_classes="story-btn",
+                                scale=4,
+                            )
+                            novel_new_btn = gr.Button(
+                                "新建", variant="secondary", size="lg", scale=1, min_width=80,
+                            )
 
                         # --- Section 2: 章节生成 ---
                         gr.HTML('<div class="section-title">章节生成</div>')
@@ -3060,7 +3520,194 @@ def create_ui() -> gr.Blocks:
                             )
 
             # ============================================================
-            # Tab 3: 全局设置
+            # Tab 3: PPT 生成 (V2: 双模式 + 大纲编辑)
+            # ============================================================
+            with gr.Tab("PPT生成", id="tab_ppt"):
+
+                with gr.Row(equal_height=False):
+                    # ============== Left: Input ==============
+                    with gr.Column(scale=5, elem_classes="input-card"):
+                        gr.HTML('<div class="section-title">AI 智能 PPT 生成</div>')
+                        gr.Markdown(
+                            "从主题直接生成，或上传文档转换为 PPT。"
+                            "生成大纲后可编辑，确认后再生成完整 PPT。",
+                            elem_classes="hint-text",
+                        )
+
+                        # --- Mode selector ---
+                        ppt_mode = gr.Radio(
+                            label="生成模式",
+                            choices=["从主题生成", "从文档转换"],
+                            value="从主题生成",
+                        )
+
+                        # --- Topic mode form ---
+                        with gr.Group(visible=True) as ppt_topic_group:
+                            ppt_topic_input = gr.Textbox(
+                                label="PPT 主题",
+                                placeholder="例如：2024年Q3季度业绩汇报、Python异步编程入门...",
+                                lines=2,
+                            )
+                            with gr.Row():
+                                ppt_audience = gr.Dropdown(
+                                    label="受众类型",
+                                    choices=[
+                                        ("商务人士", "business"),
+                                        ("技术人员", "technical"),
+                                        ("教育场景", "educational"),
+                                        ("创意人群", "creative"),
+                                        ("通用", "general"),
+                                    ],
+                                    value="business",
+                                    scale=1,
+                                )
+                                ppt_scenario = gr.Dropdown(
+                                    label="使用场景",
+                                    choices=[
+                                        ("季度汇报", "quarterly_review"),
+                                        ("产品发布", "product_launch"),
+                                        ("技术分享", "tech_share"),
+                                        ("课程讲义", "course_lecture"),
+                                        ("融资路演", "pitch_deck"),
+                                        ("工作坊", "workshop"),
+                                        ("进度更新", "status_update"),
+                                    ],
+                                    value="quarterly_review",
+                                    scale=1,
+                                )
+                            ppt_materials_file = gr.File(
+                                label="零散材料（可选，.txt/.md）",
+                                file_types=[".txt", ".md"],
+                                type="filepath",
+                            )
+
+                        # --- Document mode form ---
+                        with gr.Group(visible=False) as ppt_doc_group:
+                            ppt_text_input = gr.Textbox(
+                                label="文档内容",
+                                placeholder="粘贴您的文档内容，或上传文件后自动填充...",
+                                lines=10,
+                                max_lines=30,
+                            )
+                            ppt_file_input = gr.File(
+                                label="上传文档 (.txt / .md)",
+                                file_types=[".txt", ".md"],
+                                type="filepath",
+                            )
+
+                        # --- Common settings ---
+                        with gr.Row():
+                            ppt_theme = gr.Dropdown(
+                                label="主题风格",
+                                choices=[
+                                    ("简约现代", "modern"),
+                                    ("商务正式", "business"),
+                                    ("创意活泼", "creative"),
+                                    ("科技极客", "tech"),
+                                    ("教育清新", "education"),
+                                ],
+                                value="modern",
+                                scale=1,
+                            )
+                            ppt_max_pages = gr.Slider(
+                                label="目标页数",
+                                minimum=0, maximum=30, step=1, value=15,
+                                info="0 = 自动确定",
+                                scale=1,
+                            )
+                        ppt_gen_images = gr.Checkbox(
+                            label="生成 AI 配图（关闭可加快速度）",
+                            value=True,
+                        )
+
+                        # --- Generate outline button ---
+                        with gr.Row():
+                            ppt_outline_btn = gr.Button(
+                                "生成大纲",
+                                variant="primary",
+                                size="lg",
+                                elem_classes="story-btn",
+                                scale=4,
+                            )
+                            ppt_new_btn = gr.Button(
+                                "新建", variant="secondary", size="lg", scale=1, min_width=80,
+                            )
+
+                        # --- Outline editor (initially hidden) ---
+                        with gr.Group(visible=False) as ppt_outline_editor:
+                            gr.Markdown(
+                                "### 大纲编辑\n"
+                                "可直接编辑表格中的内容。"
+                                "要点用 `|` 分隔多条。"
+                                "编辑完成后点击「确认并生成 PPT」。"
+                            )
+                            ppt_outline_df = gr.DataFrame(
+                                headers=["页码", "角色", "标题", "要点", "布局", "配图策略"],
+                                datatype=["number", "str", "str", "str", "str", "str"],
+                                interactive=True,
+                                col_count=(6, "fixed"),
+                                wrap=True,
+                            )
+                            with gr.Row():
+                                ppt_delete_row_btn = gr.Button(
+                                    "删除末页", variant="secondary", size="sm",
+                                )
+                                ppt_add_row_btn = gr.Button(
+                                    "新增一页", variant="secondary", size="sm",
+                                )
+                            with gr.Row():
+                                ppt_confirm_btn = gr.Button(
+                                    "确认并生成 PPT",
+                                    variant="primary",
+                                    size="lg",
+                                    elem_classes="story-btn",
+                                )
+                                ppt_deck_type = gr.Radio(
+                                    label="PPT 类型",
+                                    choices=[
+                                        ("自动检测", "auto"),
+                                        ("汇报材料", "business_report"),
+                                        ("课程讲义", "course_lecture"),
+                                        ("产品介绍", "product_intro"),
+                                    ],
+                                    value="auto",
+                                )
+
+                        # --- Legacy one-click button (hidden, for poll timer compat) ---
+                        ppt_generate_btn = gr.Button(
+                            "生成 PPT", visible=False,
+                        )
+
+                    # ============== Right: Output ==============
+                    with gr.Column(scale=4, elem_classes="output-card"):
+                        ppt_status_box = gr.Textbox(
+                            label="状态",
+                            interactive=False,
+                            lines=4,
+                            elem_classes="status-area",
+                        )
+
+                        with gr.Tabs():
+                            with gr.Tab("生成结果"):
+                                ppt_output_file = gr.File(
+                                    label="下载 PPT",
+                                    interactive=False,
+                                )
+                            with gr.Tab("大纲预览"):
+                                ppt_outline_display = gr.Markdown(
+                                    value="*生成大纲后将显示...*",
+                                )
+                            with gr.Tab("质量报告"):
+                                ppt_quality_display = gr.Markdown(
+                                    value="*生成后将显示质量检查报告...*",
+                                )
+                            with gr.Tab("项目信息"):
+                                ppt_info_display = gr.JSON(
+                                    label="项目详情",
+                                )
+
+            # ============================================================
+            # Tab 4: 全局设置
             # ============================================================
             with gr.Tab("设置", id="tab_settings"):
 
@@ -3159,7 +3806,7 @@ def create_ui() -> gr.Blocks:
                 with gr.Row():
                     with gr.Column(scale=8):
                         task_queue_display = gr.Markdown(
-                            value="点击「刷新」查看任务列表",
+                            value="加载中...",
                             label="任务列表",
                         )
                     with gr.Column(scale=2):
@@ -3182,9 +3829,130 @@ def create_ui() -> gr.Blocks:
         novel_polish_task_id = gr.State("")
         director_task_id = gr.State("")
         video_task_id = gr.State("")
+        ppt_task_id = gr.State("")
+        ppt_project_id = gr.State("")
+        ppt_editable_outline = gr.State(None)
 
         # Timer for polling (active when any task is running)
         poll_timer = gr.Timer(value=2, active=False)
+
+        # ====== "新建" Reset handlers ======
+
+        def _reset_director():
+            """Reset AI导演 tab to initial state."""
+            return (
+                "",              # director_inspiration
+                45,              # director_duration
+                "低(少量动态)",   # director_budget
+                gr.update(interactive=True, value="一键生成视频"),  # director_generate_btn
+                "",              # director_status
+                None,            # director_video
+                None,            # director_file
+                None,            # director_script_display
+                None,            # director_idea_display
+                "生成后显示各段详情...",  # director_segments_display
+                "",              # director_task_id
+            )
+
+        director_new_btn.click(
+            fn=_reset_director,
+            outputs=[
+                director_inspiration, director_duration, director_budget,
+                director_generate_btn,
+                director_status, director_video, director_file,
+                director_script_display, director_idea_display,
+                director_segments_display,
+                director_task_id,
+            ],
+        )
+
+        def _reset_video():
+            """Reset 短视频制作 tab to initial state."""
+            return (
+                "",              # topic_input
+                gr.update(interactive=True, value="生成视频"),  # generate_btn
+                "",              # status_box
+                None,            # video_output
+                None,            # file_output
+                "",              # video_task_id
+            )
+
+        video_new_btn.click(
+            fn=_reset_video,
+            outputs=[
+                topic_input,
+                generate_btn,
+                status_box, video_output, file_output,
+                video_task_id,
+            ],
+        )
+
+        def _reset_novel():
+            """Reset AI小说 tab to initial state."""
+            return (
+                "",              # novel_theme_input
+                "",              # novel_custom_ideas
+                gr.update(interactive=True, value="创建项目"),   # novel_create_btn
+                gr.update(interactive=True, value="继续写作"),   # novel_generate_btn
+                gr.update(interactive=True, value="开始精修"),   # novel_polish_btn
+                "",              # novel_status_box
+                "创建项目后将显示大纲...",    # novel_outline_display
+                "创建项目后将显示角色...",    # novel_chars_display
+                "创建项目后将显示世界观...",  # novel_world_display
+                "",              # novel_chapter_display
+                None,            # novel_info_display
+                "*精修完成后显示修改报告...*",  # novel_polish_report
+                "",              # novel_create_task_id
+                "",              # novel_gen_task_id
+                "",              # novel_polish_task_id
+            )
+
+        novel_new_btn.click(
+            fn=_reset_novel,
+            outputs=[
+                novel_theme_input, novel_custom_ideas,
+                novel_create_btn, novel_generate_btn, novel_polish_btn,
+                novel_status_box,
+                novel_outline_display, novel_chars_display, novel_world_display,
+                novel_chapter_display, novel_info_display, novel_polish_report,
+                novel_create_task_id, novel_gen_task_id, novel_polish_task_id,
+            ],
+        )
+
+        def _reset_ppt():
+            """Reset PPT生成 tab to initial state."""
+            return (
+                "从主题生成",    # ppt_mode
+                "",              # ppt_topic_input
+                "",              # ppt_text_input
+                gr.update(interactive=True, value="生成大纲"),  # ppt_outline_btn
+                gr.update(interactive=True, value="确认并生成 PPT"),  # ppt_confirm_btn
+                gr.update(visible=False),  # ppt_outline_editor
+                "",              # ppt_status_box
+                None,            # ppt_output_file
+                "",              # ppt_outline_display
+                "",              # ppt_quality_display
+                None,            # ppt_info_display
+                "",              # ppt_task_id
+                "",              # ppt_project_id
+                None,            # ppt_editable_outline
+                gr.update(visible=True),   # ppt_topic_group
+                gr.update(visible=False),  # ppt_doc_group
+            )
+
+        ppt_new_btn.click(
+            fn=_reset_ppt,
+            outputs=[
+                ppt_mode, ppt_topic_input, ppt_text_input,
+                ppt_outline_btn, ppt_confirm_btn,
+                ppt_outline_editor,
+                ppt_status_box,
+                ppt_output_file, ppt_outline_display,
+                ppt_quality_display, ppt_info_display,
+                ppt_task_id, ppt_project_id, ppt_editable_outline,
+                ppt_topic_group, ppt_doc_group,
+            ],
+        )
 
         # ====== Event wiring ======
         # Auto-save keys (advanced panel)
@@ -3518,9 +4286,146 @@ def create_ui() -> gr.Blocks:
             show_progress="hidden",
         )
 
+        # ====== PPT tab events ======
+
+        # Mode switcher: show/hide topic vs document form
+        def _on_ppt_mode_change(mode):
+            if mode == "从主题生成":
+                return gr.update(visible=True), gr.update(visible=False)
+            else:
+                return gr.update(visible=False), gr.update(visible=True)
+
+        ppt_mode.change(
+            fn=_on_ppt_mode_change,
+            inputs=[ppt_mode],
+            outputs=[ppt_topic_group, ppt_doc_group],
+        )
+
+        # File upload -> auto-fill text (document mode)
+        def _ppt_on_file_upload(file_path):
+            if file_path:
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        return f.read()
+                except Exception as e:
+                    return f"文件读取失败: {e}"
+            return ""
+
+        ppt_file_input.change(
+            fn=_ppt_on_file_upload,
+            inputs=[ppt_file_input],
+            outputs=[ppt_text_input],
+        )
+
+        # Generate outline button — submits to task queue
+        def _on_ppt_outline_generate(
+            mode, topic, audience, scenario, doc_text,
+            theme, max_pages,
+            llm_be, k_gem, k_ds, k_oai, k_sf, k_dash,
+        ):
+            task_id, status_text = _submit_ppt_outline_generate(
+                mode, topic, audience, scenario, doc_text,
+                theme, max_pages,
+                llm_be, k_gem, k_ds, k_oai, k_sf, k_dash,
+            )
+            if task_id:
+                btn_update = gr.update(interactive=False, value="大纲生成中...")
+            else:
+                btn_update = gr.update()  # don't change button on failure
+            return (
+                task_id,               # ppt_task_id state
+                status_text,           # ppt_status_box
+                btn_update,            # ppt_outline_btn
+                gr.Timer(active=bool(task_id)),  # poll_timer
+            )
+
+        ppt_outline_btn.click(
+            fn=_on_ppt_outline_generate,
+            inputs=[
+                ppt_mode, ppt_topic_input, ppt_audience, ppt_scenario,
+                ppt_text_input,
+                ppt_theme, ppt_max_pages,
+                llm_backend, key_gemini, key_deepseek, key_openai,
+                key_siliconflow, key_dashscope,
+            ],
+            outputs=[
+                ppt_task_id,
+                ppt_status_box,
+                ppt_outline_btn,
+                poll_timer,
+            ],
+        )
+
+        # Add row to outline table
+        def _ppt_add_row(df_data):
+            if df_data is None or len(df_data) == 0:
+                new_row = [1, "knowledge_point", "新页面", "要点1 | 要点2", "bullet_with_icons", "none"]
+            else:
+                next_num = len(df_data) + 1
+                new_row = [next_num, "knowledge_point", "新页面", "要点1 | 要点2", "bullet_with_icons", "none"]
+            rows = list(df_data) if df_data is not None else []
+            rows.append(new_row)
+            return rows
+
+        ppt_add_row_btn.click(
+            fn=_ppt_add_row,
+            inputs=[ppt_outline_df],
+            outputs=[ppt_outline_df],
+        )
+
+        # Delete last row from outline table
+        def _ppt_delete_row(df_data):
+            if df_data is None or len(df_data) == 0:
+                return df_data
+            rows = list(df_data)
+            rows.pop()
+            # Renumber pages
+            for i, row in enumerate(rows):
+                row[0] = i + 1
+            return rows
+
+        ppt_delete_row_btn.click(
+            fn=_ppt_delete_row,
+            inputs=[ppt_outline_df],
+            outputs=[ppt_outline_df],
+        )
+
+        # Confirm outline and submit PPT generation task
+        def _on_ppt_confirm_submit(
+            proj_id, df_data, gen_images, deck_type_val,
+            llm_be, k_gem, k_ds, k_oai, k_sf, k_dash,
+        ):
+            task_id, status = _submit_ppt_continue(
+                proj_id, df_data, gen_images, deck_type_val,
+                llm_be, k_gem, k_ds, k_oai, k_sf, k_dash,
+            )
+            if task_id:
+                btn_update = gr.update(interactive=False, value="PPT 生成中...")
+            else:
+                btn_update = gr.update()  # don't change button on failure
+            return (
+                task_id,
+                status,
+                btn_update,
+                gr.Timer(active=bool(task_id)),
+            )
+
+        ppt_confirm_btn.click(
+            fn=_on_ppt_confirm_submit,
+            inputs=[
+                ppt_project_id, ppt_outline_df, ppt_gen_images, ppt_deck_type,
+                llm_backend, key_gemini, key_deepseek, key_openai,
+                key_siliconflow, key_dashscope,
+            ],
+            outputs=[
+                ppt_task_id, ppt_status_box,
+                ppt_confirm_btn, poll_timer,
+            ],
+        )
+
         # ====== Poll timer handler ======
         def _poll_all_tasks(
-            nc_tid, ng_tid, np_tid, dir_tid, vid_tid,
+            nc_tid, ng_tid, np_tid, dir_tid, vid_tid, ppt_tid,
         ):
             """Poll all active tasks. Returns updated status boxes + button states + timer."""
             results = {
@@ -3528,6 +4433,7 @@ def create_ui() -> gr.Blocks:
                 "novel_generate": _poll_task(ng_tid) if ng_tid else {},
                 "novel_polish": _poll_task(np_tid) if np_tid else {},
                 "director": _poll_task(dir_tid) if dir_tid else {},
+                "ppt": _poll_task(ppt_tid) if ppt_tid else {},
                 "video": _poll_task(vid_tid) if vid_tid else {},
             }
 
@@ -3570,6 +4476,13 @@ def create_ui() -> gr.Blocks:
             if vid_tid and not vd_done:
                 any_active = True
 
+            # PPT status
+            pt = results["ppt"]
+            pt_status = pt.get("status", "") if pt else ""
+            pt_done = pt_status in ("completed", "failed", "cancelled")
+            if ppt_tid and not pt_done:
+                any_active = True
+
             # Build status text for the most recently active task
             # (update the appropriate status box)
             novel_status = ""
@@ -3582,6 +4495,58 @@ def create_ui() -> gr.Blocks:
 
             dir_status_text = _format_task_progress(dr) if dir_tid and dr else gr.update()
             vid_status_text = _format_task_progress(vd) if vid_tid and vd else gr.update()
+            ppt_status_text = _format_task_progress(pt) if ppt_tid and pt else gr.update()
+
+            # Extract PPT results when task completes
+            pt_task_type = pt.get("task_type", "") if pt else ""
+            if pt_done and pt_status == "completed" and pt_task_type == "ppt_outline":
+                # Outline generation completed — populate DataFrame + show editor
+                try:
+                    result_str = pt.get("result", "{}")
+                    import json as _json
+                    pt_result = _json.loads(result_str) if isinstance(result_str, str) else result_str
+                    from src.ppt.models import EditableOutline as _EO
+                    outline_obj = _EO(**pt_result["outline"])
+                    df_rows = _editable_outline_to_df(outline_obj)
+                    # Build preview markdown
+                    preview_parts = []
+                    for s in outline_obj.slides:
+                        kp_text = "\n".join(f"- {kp}" for kp in s.key_points) if s.key_points else ""
+                        preview_parts.append(
+                            f"### 第 {s.page_number} 页 — {s.title}\n"
+                            f"**角色**: `{s.role}` | **布局**: `{s.layout}`\n{kp_text}"
+                        )
+                    outline_md = f"## 大纲预览（共 {len(outline_obj.slides)} 页）\n\n" + "\n\n".join(preview_parts)
+                    ppt_proj_id_out = pt_result.get("project_id", "")
+                    ppt_outline_obj_out = outline_obj
+                    ppt_df_out = df_rows
+                    ppt_editor_vis = gr.update(visible=True)
+                    ppt_outline_md = outline_md
+                except Exception:
+                    ppt_proj_id_out = gr.update()
+                    ppt_outline_obj_out = gr.update()
+                    ppt_df_out = gr.update()
+                    ppt_editor_vis = gr.update()
+                    ppt_outline_md = gr.update()
+                ppt_file = gr.update()
+                ppt_quality = gr.update()
+                ppt_info = gr.update()
+            elif pt_done and pt_status == "completed":
+                # PPT continue/generate completed — show result file
+                ppt_file, ppt_outline_md, ppt_quality, ppt_info = _extract_ppt_result(pt)
+                ppt_proj_id_out = gr.update()
+                ppt_outline_obj_out = gr.update()
+                ppt_df_out = gr.update()
+                ppt_editor_vis = gr.update()
+            else:
+                ppt_file = gr.update()
+                ppt_outline_md = gr.update()
+                ppt_quality = gr.update()
+                ppt_info = gr.update()
+                ppt_proj_id_out = gr.update()
+                ppt_outline_obj_out = gr.update()
+                ppt_df_out = gr.update()
+                ppt_editor_vis = gr.update()
 
             # Extract director results when task completes
             if dr_done and dr_status == "completed":
@@ -3595,23 +4560,108 @@ def create_ui() -> gr.Blocks:
                 dr_idea = gr.update()
                 dr_seg_md = gr.update()
 
+            # Extract video results when task completes
+            if vd_done and vd_status == "completed":
+                try:
+                    import json as _json
+                    vd_result = _json.loads(vd.get("result", "{}"))
+                    vd_path = vd_result.get("output", vd_result.get("output_path", ""))
+                    if vd_path and Path(vd_path).exists():
+                        vid_video_out = str(vd_path)
+                        vid_file_out = str(vd_path)
+                    else:
+                        vid_video_out = gr.update()
+                        vid_file_out = gr.update()
+                except Exception:
+                    vid_video_out = gr.update()
+                    vid_file_out = gr.update()
+            else:
+                vid_video_out = gr.update()
+                vid_file_out = gr.update()
+
+            # Extract novel create results when task completes
+            if nc_done and nc_status == "completed":
+                try:
+                    import json as _json
+                    nc_result = _json.loads(nc.get("result", "{}"))
+                    nc_novel_id = nc_result.get("novel_id", "")
+                    nc_project_path = f"workspace/novels/{nc_novel_id}"
+                    # Refresh project data
+                    nc_refresh = _novel_refresh_status(
+                        f"{nc_result.get('title', nc_novel_id)} ({nc_novel_id})"
+                        if nc_result.get("title")
+                        else nc_novel_id
+                    )
+                    novel_create_status = nc_refresh[0]
+                    novel_create_ch = nc_refresh[1]
+                    novel_create_ch_list = nc_refresh[2]
+                    novel_create_outline = nc_refresh[3]
+                    novel_create_chars = nc_refresh[4]
+                    novel_create_world = nc_refresh[5]
+                    novel_create_info = nc_refresh[6]
+                    # Auto-select new project in dropdown
+                    novel_project_update = gr.update(
+                        choices=_novel_list_projects(), value=nc_project_path,
+                    )
+                except Exception:
+                    novel_create_status = gr.update()
+                    novel_create_ch = gr.update()
+                    novel_create_ch_list = gr.update()
+                    novel_create_outline = gr.update()
+                    novel_create_chars = gr.update()
+                    novel_create_world = gr.update()
+                    novel_create_info = gr.update()
+                    novel_project_update = gr.update(choices=_novel_list_projects())
+            else:
+                novel_create_status = gr.update()
+                novel_create_ch = gr.update()
+                novel_create_ch_list = gr.update()
+                novel_create_outline = gr.update()
+                novel_create_chars = gr.update()
+                novel_create_world = gr.update()
+                novel_create_info = gr.update()
+                # Refresh project list when novel generate completes too
+                if ng_done and ng_status == "completed":
+                    novel_project_update = gr.update(choices=_novel_list_projects())
+                else:
+                    novel_project_update = gr.update()
+
             # Extract polish report when task completes
             if np_done and np_status == "completed":
                 polish_report = _extract_novel_polish_result(np_)
             else:
                 polish_report = gr.update()
 
+            # Auto-refresh task queue table when any task is active
+            queue_table = _format_task_queue_table() if any_active else gr.update()
+
+            # Determine correct button text for PPT outline button on completion
+            if pt_done and pt_task_type == "ppt_outline":
+                ppt_outline_btn_update = gr.update(interactive=True, value="重新生成大纲")
+                ppt_confirm_btn_update = gr.update()  # don't touch confirm btn
+            elif pt_done:
+                ppt_outline_btn_update = gr.update(interactive=True, value="生成大纲")
+                ppt_confirm_btn_update = gr.update(interactive=True, value="确认并生成 PPT")
+            else:
+                ppt_outline_btn_update = gr.update()
+                ppt_confirm_btn_update = gr.update()
+
             return (
                 # Status boxes
                 novel_status if novel_status else gr.update(),
                 dir_status_text,
                 vid_status_text,
+                ppt_status_text,
                 # Button re-enable when done
                 gr.update(interactive=True, value="创建项目") if nc_done else gr.update(),
                 gr.update(interactive=True, value="继续写作") if ng_done else gr.update(),
                 gr.update(interactive=True, value="开始精修") if np_done else gr.update(),
                 gr.update(interactive=True, value="一键生成视频") if dr_done else gr.update(),
                 gr.update(interactive=True, value="生成视频") if vd_done else gr.update(),
+                gr.update(interactive=True, value="生成 PPT") if pt_done else gr.update(),
+                # PPT V2 buttons re-enable
+                ppt_confirm_btn_update,
+                ppt_outline_btn_update,
                 # Timer
                 gr.Timer(active=any_active),
                 # Clear task_ids when done
@@ -3620,35 +4670,64 @@ def create_ui() -> gr.Blocks:
                 "" if np_done else gr.update(),
                 "" if dr_done else gr.update(),
                 "" if vd_done else gr.update(),
+                "" if pt_done else gr.update(),
                 # Director result outputs
-                dr_video,
-                dr_file,
-                dr_script,
-                dr_idea,
-                dr_seg_md,
+                dr_video, dr_file,
+                dr_script, dr_idea, dr_seg_md,
+                # Video result outputs
+                vid_video_out, vid_file_out,
+                # Novel create result outputs
+                novel_create_outline, novel_create_chars,
+                novel_create_world, novel_create_info,
+                novel_create_ch, novel_create_ch_list,
+                novel_project_update,
                 # Polish report
                 polish_report,
+                # PPT result outputs
+                ppt_file, ppt_outline_md,
+                ppt_quality, ppt_info,
+                # PPT outline editor outputs (populated on outline completion)
+                ppt_proj_id_out, ppt_outline_obj_out,
+                ppt_df_out, ppt_editor_vis,
+                # Task queue table (auto-refresh)
+                queue_table,
             )
 
         poll_timer.tick(
             fn=_poll_all_tasks,
             inputs=[
                 novel_create_task_id, novel_gen_task_id, novel_polish_task_id,
-                director_task_id, video_task_id,
+                director_task_id, video_task_id, ppt_task_id,
             ],
             outputs=[
-                novel_status_box, director_status, status_box,
+                novel_status_box, director_status, status_box, ppt_status_box,
                 novel_create_btn, novel_generate_btn, novel_polish_btn,
-                director_generate_btn, generate_btn,
+                director_generate_btn, generate_btn, ppt_generate_btn,
+                ppt_confirm_btn, ppt_outline_btn,
                 poll_timer,
                 novel_create_task_id, novel_gen_task_id, novel_polish_task_id,
-                director_task_id, video_task_id,
+                director_task_id, video_task_id, ppt_task_id,
                 # Director result outputs (populated on completion)
                 director_video, director_file,
                 director_script_display, director_idea_display,
                 director_segments_display,
+                # Video result outputs (populated on completion)
+                video_output, file_output,
+                # Novel create result outputs (populated on completion)
+                novel_outline_display, novel_chars_display,
+                novel_world_display, novel_info_display,
+                novel_chapter_display, novel_chapter_list,
+                novel_project_select,
                 # Polish report (populated on completion)
                 novel_polish_report,
+                # PPT result outputs (populated on completion)
+                ppt_output_file, ppt_outline_display,
+                ppt_quality_display, ppt_info_display,
+                # PPT outline editor outputs (populated on outline completion)
+                ppt_project_id, ppt_editable_outline,
+                ppt_outline_df, ppt_outline_editor,
+                # Task queue table (auto-refresh)
+                task_queue_display,
             ],
         )
 
@@ -3688,10 +4767,10 @@ def create_ui() -> gr.Blocks:
             outputs=[task_action_status],
         )
 
-        # Refresh novel project list on tab select
-        def _on_novel_tab_select():
-            return gr.update(choices=_novel_list_projects())
-        top_tabs.select(fn=_on_novel_tab_select, outputs=[novel_project_select], show_progress="hidden")
+        # Refresh novel project list + task queue on tab select
+        def _on_tab_select():
+            return gr.update(choices=_novel_list_projects()), _format_task_queue_table()
+        top_tabs.select(fn=_on_tab_select, outputs=[novel_project_select, task_queue_display], show_progress="hidden")
 
         # --- Load saved keys on page open (workaround for Gradio password fields) ---
         _key_components = [
@@ -3708,6 +4787,7 @@ def create_ui() -> gr.Blocks:
             return [s.get(n, "") for n in _key_names]
 
         app.load(fn=_load_all_keys, outputs=_key_components)
+        app.load(fn=_format_task_queue_table, outputs=[task_queue_display])
 
     return app
 

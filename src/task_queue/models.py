@@ -14,6 +14,9 @@ class TaskType(str, enum.Enum):
     novel_feedback = "novel_feedback"
     video_generate = "video_generate"
     director_generate = "director_generate"
+    ppt_generate = "ppt_generate"
+    ppt_outline = "ppt_outline"
+    ppt_continue = "ppt_continue"
 
 
 class TaskStatus(str, enum.Enum):

@@ -340,6 +340,276 @@ def novel_status(project_path: str):
         raise click.Abort()
 
 
+# ---------------------------------------------------------------------------
+# ppt 命令组 - AI PPT 生成
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def ppt():
+    """AI PPT 生成工具"""
+    pass
+
+
+@ppt.command("create")
+@click.argument("topic")
+@click.option("--audience", "-a", default="business",
+              type=click.Choice(["business", "technical", "educational", "creative", "general"]),
+              help="目标受众")
+@click.option("--scenario", "-s", default="quarterly_review",
+              type=click.Choice([
+                  "quarterly_review", "product_launch", "tech_share",
+                  "course_lecture", "pitch_deck", "workshop", "status_update",
+              ]),
+              help="使用场景")
+@click.option("--theme", "-t", default="modern", help="视觉主题")
+@click.option("--target-pages", "-p", default=None, type=int, help="目标页数")
+@click.option("--config", "config_path", default="config.yaml", help="配置文件路径")
+def ppt_create(topic, audience, scenario, theme, target_pages, config_path):
+    """从主题创建 PPT（V2：先生成大纲，审核后继续）。
+
+    示例：python main.py ppt create "2024年度产品规划" --scenario quarterly_review
+    """
+    from src.config_manager import load_config
+    from src.ppt.pipeline import PPTPipeline
+
+    config = load_config(config_path)
+    pipe = PPTPipeline(workspace="workspace", config=config)
+
+    try:
+        project_id, outline = pipe.generate_outline_only(
+            topic=topic,
+            audience=audience,
+            scenario=scenario,
+            theme=theme,
+            target_pages=target_pages,
+        )
+
+        project_dir = f"workspace/ppt/{project_id}"
+        yaml_path = f"{project_dir}/outline_editable.yaml"
+
+        click.echo(f"\n✅ 大纲生成完成！")
+        click.echo(f"   项目 ID: {project_id}")
+        click.echo(f"   大纲文件: {yaml_path}")
+        click.echo(f"   共 {outline.total_pages} 页 | 预计时长 {outline.estimated_duration}")
+        click.echo(f"\n📝 请编辑大纲文件后运行：")
+        click.echo(f"   python main.py ppt continue {project_dir}")
+
+    except Exception as e:
+        log.error("PPT 大纲生成失败: %s", e)
+        raise click.ClickException(str(e))
+
+
+@ppt.command("continue")
+@click.argument("project_path")
+@click.option("--no-images", is_flag=True, default=False, help="跳过配图生成")
+@click.option("--config", "config_path", default="config.yaml", help="配置文件路径")
+def ppt_continue(project_path, no_images, config_path):
+    """从已审核的大纲继续生成 PPT。
+
+    示例：python main.py ppt continue workspace/ppt/ppt_20240317_abc123
+    """
+    import yaml
+
+    from src.config_manager import load_config
+    from src.ppt.models import EditableOutline
+    from src.ppt.pipeline import PPTPipeline
+
+    config = load_config(config_path)
+    pipe = PPTPipeline(workspace="workspace", config=config)
+
+    # 加载编辑后的大纲
+    project_dir = Path(project_path)
+    yaml_path = project_dir / "outline_editable.yaml"
+
+    if not yaml_path.exists():
+        raise click.ClickException(f"找不到大纲文件: {yaml_path}")
+
+    with open(yaml_path, encoding="utf-8") as f:
+        outline_data = yaml.safe_load(f)
+
+    edited_outline = EditableOutline(**outline_data)
+    project_id = project_dir.name
+
+    try:
+        click.echo(f"🚀 从大纲继续生成 PPT（{edited_outline.total_pages} 页）...")
+
+        pptx_path = pipe.continue_from_outline(
+            project_id=project_id,
+            edited_outline=edited_outline,
+            generate_images=not no_images,
+        )
+
+        click.echo(f"\n✅ PPT 生成完成！")
+        click.echo(f"   输出文件: {pptx_path}")
+
+    except Exception as e:
+        log.error("PPT 生成失败: %s", e)
+        raise click.ClickException(str(e))
+
+
+@ppt.command("generate")
+@click.argument("input_file", type=click.Path(exists=True))
+@click.option("--theme", "-t", default="modern",
+              type=click.Choice(["modern", "business", "creative", "tech", "education"]),
+              help="主题风格")
+@click.option("--max-pages", "-p", type=int, default=None, help="最大页数")
+@click.option("--no-images", is_flag=True, help="跳过配图生成（更快）")
+@click.option("--output", "-o", type=click.Path(), default=None, help="输出文件路径")
+@click.option("--config", "config_path", type=click.Path(exists=True), default=None,
+              help="配置文件路径")
+@click.option("--deck-type",
+              type=click.Choice(["auto", "business_report", "course_lecture", "product_intro"]),
+              default="auto", help="PPT 类型（auto=自动检测）")
+@click.option("--auto-continue/--no-auto-continue", default=True,
+              help="自动继续（不暂停审核大纲）")
+def ppt_generate(input_file: str, theme: str, max_pages: int | None,
+                 no_images: bool, output: str | None, config_path: str | None,
+                 deck_type: str, auto_continue: bool):
+    """从文档生成 PPT"""
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+    try:
+        text = Path(input_file).read_text(encoding="utf-8")
+        if not text.strip():
+            console.print("[red]输入文件为空[/]")
+            raise click.Abort()
+
+        config = {}
+        if config_path:
+            from src.config_manager import load_config
+            config = load_config(Path(config_path))
+
+        from src.ppt.pipeline import PPTPipeline
+
+        pipeline = PPTPipeline(workspace="workspace", config=config)
+
+        resolved_deck_type = None if deck_type == "auto" else deck_type
+
+        console.print(f"\n[bold cyan]PPT 生成[/]")
+        console.print(f"  输入: {input_file}")
+        console.print(f"  主题: {theme}")
+        console.print(f"  PPT 类型: {deck_type}")
+        if max_pages:
+            console.print(f"  最大页数: {max_pages}")
+        console.print(f"  配图: {'是' if not no_images else '否'}")
+        console.print(f"  自动继续: {'是' if auto_continue else '否'}")
+
+        # --no-auto-continue: 仅生成大纲后暂停，让用户编辑
+        if not auto_continue:
+            try:
+                project_id, outline = pipeline.generate_outline_only(
+                    document_text=text,
+                    theme=theme,
+                    target_pages=max_pages,
+                )
+
+                project_dir = f"workspace/ppt/{project_id}"
+                yaml_path = f"{project_dir}/outline_editable.yaml"
+
+                click.echo(f"\n✅ 大纲生成完成！")
+                click.echo(f"   项目 ID: {project_id}")
+                click.echo(f"   大纲文件: {yaml_path}")
+                click.echo(f"   共 {outline.total_pages} 页 | 预计时长 {outline.estimated_duration}")
+                click.echo(f"\n📝 请编辑大纲文件后运行：")
+                click.echo(f"   python main.py ppt continue {project_dir}")
+            except Exception as e:
+                log.error("PPT 大纲生成失败: %s", e)
+                raise click.ClickException(str(e))
+            return
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("初始化...", total=100)
+
+            def on_progress(stage: str, pct: float, msg: str):
+                progress.update(task, completed=int(pct * 100), description=f"[cyan]{msg}")
+
+            result = pipeline.generate(
+                text=text,
+                theme=theme,
+                max_pages=max_pages,
+                generate_images=not no_images,
+                output_path=output,
+                progress_callback=on_progress,
+                deck_type=resolved_deck_type,
+            )
+
+        console.print(f"\n[bold green]PPT 生成完成: {result}[/]")
+    except click.Abort:
+        raise
+    except click.ClickException:
+        raise
+    except Exception as e:
+        log.error("PPT 生成失败: %s", e)
+        raise click.Abort()
+
+
+@ppt.command("resume")
+@click.argument("project_path", type=click.Path(exists=True))
+def ppt_resume(project_path: str):
+    """断点续传 PPT 生成"""
+    try:
+        from src.ppt.pipeline import PPTPipeline
+
+        pipeline = PPTPipeline(workspace="workspace")
+        result = pipeline.resume(project_path=project_path)
+
+        console.print(f"\n[bold green]PPT 续传完成: {result}[/]")
+    except Exception as e:
+        log.error("PPT 续传失败: %s", e)
+        raise click.Abort()
+
+
+@ppt.command("status")
+@click.argument("project_path", type=click.Path(exists=True))
+def ppt_status(project_path: str):
+    """查看 PPT 项目状态"""
+    try:
+        from src.ppt.pipeline import PPTPipeline
+
+        pipeline = PPTPipeline(workspace="workspace")
+        info = pipeline.get_status(project_path=project_path)
+
+        table = Table(title="PPT 项目状态")
+        table.add_column("项目", style="cyan")
+        table.add_column("值", style="green")
+
+        for key, value in info.items():
+            table.add_row(str(key), str(value))
+
+        console.print(table)
+    except Exception as e:
+        log.error("PPT 状态查询失败: %s", e)
+        raise click.Abort()
+
+
+@ppt.command("themes")
+def ppt_themes():
+    """列出可用 PPT 主题"""
+    try:
+        from src.ppt.theme_manager import ThemeManager
+
+        tm = ThemeManager()
+        themes = tm.list_themes()
+
+        table = Table(title="可用 PPT 主题")
+        table.add_column("主题名称", style="cyan")
+
+        for name in themes:
+            table.add_row(name)
+
+        console.print(table)
+    except Exception as e:
+        log.error("主题列表获取失败: %s", e)
+        raise click.Abort()
+
+
 @cli.command("create-video")
 @click.argument("inspiration")
 @click.option("--duration", "-d", default=45, help="目标视频时长(秒)")

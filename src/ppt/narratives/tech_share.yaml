@@ -1,0 +1,53 @@
+narrative_id: tech_share
+name: 技术分享
+description: 适用于团队内部或社区技术分享，介绍新技术、架构方案或最佳实践
+target_pages_min: 15
+target_pages_max: 25
+structure:
+  - role: cover
+    title_template: "{{topic}} 技术分享"
+    required: true
+  - role: background
+    title_template: "背景与动机"
+    key_points_count: "2-4"
+    required: true
+  - role: concept_intro
+    title_template: "核心概念"
+    key_points_count: "3-5"
+    required: true
+  - role: knowledge_point
+    title_template: "原理详解（一）"
+    key_points_count: "3-5"
+    required: true
+  - role: knowledge_point
+    title_template: "原理详解（二）"
+    key_points_count: "3-5"
+    required: false
+  - role: knowledge_point
+    title_template: "原理详解（三）"
+    key_points_count: "3-5"
+    required: false
+  - role: method_steps
+    title_template: "实践步骤"
+    key_points_count: "4-6"
+    required: true
+  - role: example_case
+    title_template: "实战案例"
+    key_points_count: "3-4"
+    required: true
+  - role: common_mistakes
+    title_template: "常见踩坑与避坑"
+    key_points_count: "3-5"
+    required: false
+  - role: summary_review
+    title_template: "总结回顾"
+    key_points_count: "3-5"
+    required: true
+  - role: closing
+    title_template: "Q&A"
+    required: true
+narrative_tips:
+  - "循序渐进：从背景到原理再到实践，不要跳跃式讲解"
+  - "代码适量：如有代码示例，每页不超过 15 行，配合文字解释"
+  - "踩坑真实：common_mistakes 页用真实案例，避免泛泛而谈"
+  - "互动收尾：closing 页留出 Q&A 时间，附上参考资料链接"

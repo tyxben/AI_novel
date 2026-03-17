@@ -1,0 +1,62 @@
+narrative_id: course_lecture
+name: 课程讲义
+description: 适用于教学场景，系统讲解某一主题的知识体系，帮助学员掌握核心概念
+target_pages_min: 18
+target_pages_max: 30
+structure:
+  - role: cover
+    title_template: "{{course_name}}"
+    required: true
+  - role: learning_objectives
+    title_template: "学习目标"
+    key_points_count: "3-5"
+    required: true
+  - role: concept_intro
+    title_template: "概念导入（一）"
+    key_points_count: "3-4"
+    required: true
+  - role: concept_intro
+    title_template: "概念导入（二）"
+    key_points_count: "3-4"
+    required: false
+  - role: concept_intro
+    title_template: "概念导入（三）"
+    key_points_count: "3-4"
+    required: false
+  - role: knowledge_point
+    title_template: "知识点（一）"
+    key_points_count: "3-5"
+    required: true
+  - role: knowledge_point
+    title_template: "知识点（二）"
+    key_points_count: "3-5"
+    required: true
+  - role: knowledge_point
+    title_template: "知识点（三）"
+    key_points_count: "3-5"
+    required: true
+  - role: knowledge_point
+    title_template: "知识点（四）"
+    key_points_count: "3-5"
+    required: false
+  - role: example_case
+    title_template: "案例分析"
+    key_points_count: "3-4"
+    required: true
+  - role: exercise
+    title_template: "课堂练习"
+    key_points_count: "2-4"
+    required: true
+  - role: summary_review
+    title_template: "本节回顾"
+    key_points_count: "4-6"
+    required: true
+  - role: closing
+    title_template: "课后作业与预告"
+    required: true
+narrative_tips:
+  - "目标前置：learning_objectives 页告诉学员本节能学到什么"
+  - "概念渐进：concept_intro 从简单到复杂，每页聚焦一个核心概念"
+  - "练中学：exercise 页设计具体可操作的练习题，而非开放问题"
+  - "回顾强化：summary_review 页用关键词或思维导图帮助记忆"
+  - "衔接预告：closing 页预告下节内容，布置针对性课后作业"

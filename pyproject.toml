@@ -61,11 +61,14 @@ web = [
 mcp = [
     "fastmcp>=2.0",
 ]
+ppt = [
+    "python-pptx>=0.6.21",
+]
 build = [
     "pyinstaller>=6.0",
 ]
 all = [
-    "novel-video[gpu,llm,gemini,ollama,cloud-image,cloud-video,agent,web,mcp]",
+    "novel-video[gpu,llm,gemini,ollama,cloud-image,cloud-video,agent,web,mcp,ppt]",
 ]
 
 [project.scripts]
@@ -73,7 +76,7 @@ novel-video = "main:cli"
 
 [tool.setuptools]
 py-modules = ["main"]
-packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.videogen", "src.tts", "src.video", "src.llm", "src.utils", "src.agents", "src.tools", "src.task_queue", "src.novel", "src.novel.agents", "src.novel.models", "src.novel.storage", "src.novel.templates", "src.novel.tools", "src.novel.services", "src.scriptplan"]
+packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.videogen", "src.tts", "src.video", "src.llm", "src.utils", "src.agents", "src.tools", "src.task_queue", "src.novel", "src.novel.agents", "src.novel.models", "src.novel.storage", "src.novel.templates", "src.novel.tools", "src.novel.services", "src.scriptplan", "src.ppt", "src.ppt.layouts"]
 
 [tool.pytest.ini_options]
 markers = [

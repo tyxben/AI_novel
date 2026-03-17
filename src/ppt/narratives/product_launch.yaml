@@ -1,0 +1,49 @@
+narrative_id: product_launch
+name: 产品发布
+description: 适用于新产品或功能的发布演示，面向客户或内部团队
+target_pages_min: 14
+target_pages_max: 22
+structure:
+  - role: cover
+    title_template: "{{product_name}} 产品发布"
+    required: true
+  - role: pain_point
+    title_template: "用户痛点"
+    key_points_count: "3-4"
+    required: true
+  - role: solution
+    title_template: "我们的解决方案"
+    key_points_count: "2-3"
+    required: true
+  - role: product_overview
+    title_template: "产品全景"
+    key_points_count: "3-5"
+    required: true
+  - role: core_features
+    title_template: "核心功能"
+    key_points_count: "3-5"
+    required: true
+  - role: use_case
+    title_template: "使用场景"
+    key_points_count: "3-4"
+    required: true
+  - role: competitive_advantage
+    title_template: "竞争优势"
+    key_points_count: "3-4"
+    required: false
+  - role: case_data
+    title_template: "客户案例与数据"
+    key_points_count: "2-4"
+    required: true
+  - role: cta
+    title_template: "立即体验"
+    key_points_count: "2-3"
+    required: true
+  - role: closing
+    title_template: "谢谢"
+    required: true
+narrative_tips:
+  - "痛点先行：用真实用户场景引发共鸣，避免空泛描述"
+  - "功能克制：core_features 最多展示 3-5 个亮点，不要罗列全部功能"
+  - "案例说服：case_data 必须包含具体客户或数据佐证"
+  - "行动明确：cta 页必须有清晰的下一步指引（试用链接、联系方式等）"

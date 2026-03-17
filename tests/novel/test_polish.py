@@ -575,6 +575,14 @@ class TestPolishPipeline:
             assert ch["chapter_number"] == 1
             assert "original_chars" in ch
             assert "polished_chars" in ch
+            # New rich fields
+            assert "before_style" in ch
+            assert "after_style" in ch
+            assert "before_rules" in ch
+            assert "after_rules" in ch
+            assert "issues" in ch
+            assert isinstance(ch["issues"], list)
+            assert "critique_full" in ch
 
     def test_polish_chapters_skips_when_pass(self, tmp_path: Path) -> None:
         """审稿通过的章节应被跳过。"""
@@ -724,3 +732,76 @@ class TestPolishPipeline:
         # 最后一次调用应该是 1.0 完成
         last_call = callback.call_args_list[-1]
         assert last_call[0][0] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# TestParseCritiqueIssues
+# ---------------------------------------------------------------------------
+
+
+class TestParseCritiqueIssues:
+    """测试 _parse_critique_issues 解析审稿意见。"""
+
+    def test_empty_critique(self) -> None:
+        from src.novel.pipeline import _parse_critique_issues
+        assert _parse_critique_issues("") == []
+        assert _parse_critique_issues(None) == []
+
+    def test_standard_format(self) -> None:
+        from src.novel.pipeline import _parse_critique_issues
+
+        critique = (
+            "整体评价：还行。\n\n"
+            "【问题1】类型：重复 / 位置：第3段 / 问题：\"修炼\"重复8次 / 建议：替换\n"
+            "【问题2】类型：AI味 / 位置：第5段 / 问题：程式化 / 建议：修改\n"
+        )
+        issues = _parse_critique_issues(critique)
+        assert len(issues) == 2
+        assert issues[0]["type"] == "重复"
+        assert issues[0]["location"] == "第3段"
+        assert "修炼" in issues[0]["problem"]
+        assert issues[1]["type"] == "AI味"
+
+    def test_multiline_format(self) -> None:
+        from src.novel.pipeline import _parse_critique_issues
+
+        critique = (
+            "【问题1】类型：逻辑\n"
+            "位置：第2段\n"
+            "问题：前后矛盾\n"
+            "建议：统一时间线\n"
+        )
+        issues = _parse_critique_issues(critique)
+        assert len(issues) == 1
+        assert issues[0]["type"] == "逻辑"
+
+    def test_unknown_type_fallback(self) -> None:
+        from src.novel.pipeline import _parse_critique_issues
+
+        critique = "【问题1】类型：奇怪的分类 / 问题：有问题\n"
+        issues = _parse_critique_issues(critique)
+        assert len(issues) == 1
+        assert issues[0]["type"] == "其他"
+
+    def test_no_structured_fields_fallback(self) -> None:
+        from src.novel.pipeline import _parse_critique_issues
+
+        critique = "【问题1】这段对话不自然，需要改进。\n"
+        issues = _parse_critique_issues(critique)
+        assert len(issues) == 1
+        assert issues[0]["type"] == "其他"
+        assert "对话" in issues[0]["problem"]
+
+    def test_multiple_known_types(self) -> None:
+        from src.novel.pipeline import _parse_critique_issues
+
+        critique = (
+            "【问题1】类型：对话 / 问题：缺乏个性\n"
+            "【问题2】类型：节奏 / 问题：太平\n"
+            "【问题3】类型：角色 / 问题：性格不一致\n"
+            "【问题4】类型：转折 / 问题：太突然\n"
+        )
+        issues = _parse_critique_issues(critique)
+        assert len(issues) == 4
+        types = [i["type"] for i in issues]
+        assert types == ["对话", "节奏", "角色", "转折"]

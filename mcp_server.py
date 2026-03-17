@@ -291,6 +291,237 @@ def novel_export(project_path: str) -> dict[str, Any]:
 
 
 # ===========================================================================
+# PPT pipeline tools
+# ===========================================================================
+
+_ppt_pipeline_instance = None
+
+
+def _get_ppt_pipeline():
+    """Return a lazily-initialized PPTPipeline singleton."""
+    global _ppt_pipeline_instance
+    if _ppt_pipeline_instance is None:
+        from src.ppt.pipeline import PPTPipeline
+
+        _ppt_pipeline_instance = PPTPipeline(workspace=_DEFAULT_WORKSPACE)
+    return _ppt_pipeline_instance
+
+
+@mcp.tool()
+def ppt_generate(
+    text: str,
+    theme: str = "modern",
+    max_pages: int = 0,
+    generate_images: bool = True,
+    auto_continue: bool = True,
+) -> dict[str, Any]:
+    """Generate a PPT presentation from text.
+
+    When auto_continue=True (default), generates the PPT in one step.
+    When auto_continue=False, returns an editable outline first — call
+    ppt_confirm_outline() to finish generation.
+
+    Args:
+        text: Input document text (plain text or Markdown).
+        theme: Theme style — "modern", "business", "creative", "tech",
+            "education" (default "modern").
+        max_pages: Maximum number of pages, 0 means auto (default 0).
+        generate_images: Whether to generate AI images (default True).
+        auto_continue: If True, generate PPT in one step; if False, return
+            an editable outline for review first (default True).
+
+    Returns:
+        Dict with output file path and generation info, or an editable
+        outline when auto_continue=False.
+    """
+    try:
+        if not text or not text.strip():
+            return {"error": "输入文本不能为空"}
+
+        # Two-step mode: generate outline only, then confirm later
+        if not auto_continue:
+            from src.config_manager import load_config
+            from src.ppt.pipeline import PPTPipeline
+
+            config = load_config("config.yaml")
+            pipe = PPTPipeline(workspace=_DEFAULT_WORKSPACE, config=config)
+
+            project_id, editable_outline = pipe.generate_outline_only(
+                document_text=text,
+                theme=theme,
+                target_pages=max_pages if max_pages > 0 else None,
+            )
+
+            return {
+                "project_id": project_id,
+                "status": "outline_ready",
+                "outline": editable_outline.model_dump(),
+                "next_step": "Call ppt_confirm_outline() to generate the PPT",
+            }
+
+        # One-step mode (default): generate PPT directly
+        pipe = _get_ppt_pipeline()
+        max_p = max_pages if max_pages > 0 else None
+        output_path = pipe.generate(
+            text=text,
+            theme=theme,
+            max_pages=max_p,
+            generate_images=generate_images,
+        )
+        return {"output_path": str(output_path), "status": "success"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def ppt_get_status(project_path: str) -> dict[str, Any]:
+    """Get the status of a PPT generation project.
+
+    Args:
+        project_path: Path to the PPT project directory.
+
+    Returns:
+        Project status information.
+    """
+    try:
+        pipe = _get_ppt_pipeline()
+        return pipe.get_status(project_path=project_path)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def ppt_list_themes() -> dict[str, Any]:
+    """List available PPT themes.
+
+    Returns:
+        Dict with list of available theme names.
+    """
+    try:
+        from src.ppt.theme_manager import ThemeManager
+
+        tm = ThemeManager()
+        themes = tm.list_themes()
+        return {"themes": themes}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def ppt_create_from_topic(
+    topic: str,
+    audience: str = "business",
+    scenario: str = "quarterly_review",
+    theme: str = "modern",
+    target_pages: int = 15,
+) -> dict[str, Any]:
+    """Create PPT outline from topic (step 1 of 2-step generation).
+
+    Generates a PPT outline based on topic, audience, and scenario.
+    Returns an editable outline that can be modified before generating the final PPT.
+    Use ppt_confirm_outline() to continue after reviewing/editing the outline.
+
+    Available scenarios: quarterly_review, product_launch, tech_share,
+    course_lecture, pitch_deck, workshop, status_update
+
+    Args:
+        topic: PPT topic/title (e.g. "2024 Q1 Product Review").
+        audience: Target audience — business/technical/educational/creative/general
+            (default "business").
+        scenario: Use case scenario (default "quarterly_review").
+        theme: Visual theme — modern/business/creative/tech/education
+            (default "modern").
+        target_pages: Target number of pages, 5-50 (default 15).
+
+    Returns:
+        Dict with project_id, editable outline, and next-step instructions.
+    """
+    try:
+        from src.config_manager import load_config
+        from src.ppt.pipeline import PPTPipeline
+
+        config = load_config("config.yaml")
+        pipe = PPTPipeline(workspace=_DEFAULT_WORKSPACE, config=config)
+
+        project_id, editable_outline = pipe.generate_outline_only(
+            topic=topic,
+            audience=audience,
+            scenario=scenario,
+            theme=theme,
+            target_pages=target_pages,
+        )
+
+        return {
+            "project_id": project_id,
+            "status": "outline_ready",
+            "total_pages": editable_outline.total_pages,
+            "estimated_duration": editable_outline.estimated_duration,
+            "outline": editable_outline.model_dump(),
+            "next_step": "Review the outline and call ppt_confirm_outline() to generate the PPT",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def ppt_confirm_outline(
+    project_id: str,
+    edited_outline: dict | None = None,
+    generate_images: bool = True,
+) -> dict[str, Any]:
+    """Confirm outline and generate PPT (step 2 of 2-step generation).
+
+    After reviewing the outline from ppt_create_from_topic() or
+    ppt_generate(auto_continue=False), call this to generate the final PPT.
+    You can pass a modified outline or use the original.
+
+    Args:
+        project_id: Project ID from ppt_create_from_topic() or ppt_generate().
+        edited_outline: Modified outline dict (optional, uses original if None).
+        generate_images: Whether to generate AI images for slides (default True).
+
+    Returns:
+        Dict with project_id, output file path, and status.
+    """
+    try:
+        from src.config_manager import load_config
+        from src.ppt.models import EditableOutline
+        from src.ppt.pipeline import PPTPipeline
+
+        config = load_config("config.yaml")
+        pipe = PPTPipeline(workspace=_DEFAULT_WORKSPACE, config=config)
+
+        # Load outline
+        if edited_outline is not None:
+            outline = EditableOutline(**edited_outline)
+        else:
+            # Load original outline from checkpoint
+            import yaml
+
+            yaml_path = Path(_DEFAULT_WORKSPACE) / "ppt" / project_id / "outline_editable.yaml"
+            if not yaml_path.exists():
+                return {"error": f"找不到大纲文件: {yaml_path}", "status": "failed"}
+            with open(yaml_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            outline = EditableOutline(**data)
+
+        pptx_path = pipe.continue_from_outline(
+            project_id=project_id,
+            edited_outline=outline,
+            generate_images=generate_images,
+        )
+
+        return {
+            "project_id": project_id,
+            "status": "completed",
+            "output_path": str(pptx_path),
+            "message": f"PPT generated: {pptx_path}",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ===========================================================================
 # Video pipeline tools
 # ===========================================================================
 

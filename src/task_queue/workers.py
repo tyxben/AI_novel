@@ -59,6 +59,12 @@ def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:
         return _run_director_generate(params, progress_cb)
     elif task_type == TaskType.video_generate:
         return _run_video_generate(params, progress_cb)
+    elif task_type == TaskType.ppt_generate:
+        return _run_ppt_generate(params, progress_cb)
+    elif task_type == TaskType.ppt_outline:
+        return _run_ppt_outline(params, progress_cb)
+    elif task_type == TaskType.ppt_continue:
+        return _run_ppt_continue(params, progress_cb)
     else:
         raise ValueError(f"Unknown task type: {task_type}")
 
@@ -185,3 +191,117 @@ def _run_video_generate(params: dict, progress_cb) -> dict:
     if isinstance(output, dict):
         return output
     return {"output": str(output)} if output else {}
+
+
+def _run_ppt_generate(params: dict, progress_cb) -> dict:
+    from src.ppt.pipeline import PPTPipeline
+
+    pipeline = PPTPipeline(
+        workspace=params.get("workspace", "workspace"),
+        config=params.get("config", {}),
+    )
+
+    def ppt_progress(stage, progress, message):
+        progress_cb(progress, message)
+
+    deck_type = params.get("deck_type")
+    output_path = pipeline.generate(
+        text=params["text"],
+        theme=params.get("theme", "modern"),
+        max_pages=params.get("max_pages"),
+        generate_images=params.get("generate_images", True),
+        progress_callback=ppt_progress,
+        deck_type=deck_type,
+    )
+
+    # Read outline, extraction, and quality report from checkpoint
+    result = {"output_path": output_path}
+    try:
+        project_id = getattr(pipeline, "last_project_id", None)
+        if project_id:
+            ckpt = pipeline.file_manager.load_checkpoint(project_id)
+            if ckpt:
+                data = ckpt.get("data", ckpt)
+                stages = data.get("stages", {})
+                outline_data = stages.get("outline", {}).get("data", [])
+                extraction_data = stages.get("extraction", {}).get("data")
+                planning_data = stages.get("planning", {}).get("data")
+                quality_data = data.get("quality_report", {})
+                result["outline"] = outline_data
+                result["extraction"] = extraction_data
+                result["planning"] = planning_data
+                result["quality_report"] = quality_data
+                result["project_id"] = project_id
+    except Exception:
+        pass  # Non-critical: outline/extraction/quality are nice-to-have
+
+    return result
+
+
+def _run_ppt_outline(params: dict, progress_cb) -> dict:
+    """Generate PPT outline only (V2 stage 1)."""
+    from src.ppt.pipeline import PPTPipeline
+
+    pipeline = PPTPipeline(
+        workspace=params.get("workspace", "workspace"),
+        config=params.get("config", {}),
+    )
+
+    def ppt_progress(stage, progress, message):
+        progress_cb(progress, message)
+
+    project_id, outline = pipeline.generate_outline_only(
+        topic=params.get("topic"),
+        document_text=params.get("document_text"),
+        audience=params.get("audience", "business"),
+        scenario=params.get("scenario", "quarterly_review"),
+        theme=params.get("theme", "modern"),
+        target_pages=params.get("target_pages"),
+        progress_callback=ppt_progress,
+    )
+
+    return {
+        "project_id": project_id,
+        "outline": outline.model_dump(),
+    }
+
+
+def _run_ppt_continue(params: dict, progress_cb) -> dict:
+    """Continue PPT generation from a user-edited outline."""
+    from src.ppt.pipeline import PPTPipeline
+    from src.ppt.models import EditableOutline
+
+    pipeline = PPTPipeline(
+        workspace=params.get("workspace", "workspace"),
+        config=params.get("config", {}),
+    )
+
+    def ppt_progress(stage, progress, message):
+        progress_cb(progress, message)
+
+    edited_outline = EditableOutline(**params["edited_outline"])
+
+    output_path = pipeline.continue_from_outline(
+        project_id=params["project_id"],
+        edited_outline=edited_outline,
+        generate_images=params.get("generate_images", True),
+        progress_callback=ppt_progress,
+    )
+
+    # Read outline, extraction, and quality report from checkpoint
+    result = {"output_path": output_path, "project_id": params["project_id"]}
+    try:
+        ckpt = pipeline.file_manager.load_checkpoint(params["project_id"])
+        if ckpt:
+            data = ckpt.get("data", ckpt)
+            stages = data.get("stages", {})
+            outline_data = stages.get("outline", {}).get("data", [])
+            planning_data = stages.get("planning", {}).get("data")
+            quality_data = data.get("quality_report", {})
+            result["outline"] = outline_data
+            result["planning"] = planning_data
+            result["quality_report"] = quality_data
+    except Exception:
+        pass  # Non-critical
+
+    return result

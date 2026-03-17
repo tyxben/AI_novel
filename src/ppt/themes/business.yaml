@@ -1,0 +1,44 @@
+name: business
+display_name: 商务经典
+description: 深蓝色调搭配金色点缀，沉稳大气，适合商务报告与提案
+
+colors:
+  primary: "#1B2838"
+  secondary: "#34495E"
+  accent: "#C0A062"
+  background: "#F8F9FA"
+  text_primary: "#1B2838"
+  text_secondary: "#5D6D7E"
+  highlight: "#C0A062"
+
+fonts:
+  title:
+    name: "Georgia"
+    size: 36
+    bold: true
+  subtitle:
+    name: "Georgia"
+    size: 20
+    bold: false
+  body:
+    name: "Arial"
+    size: 16
+    bold: false
+  caption:
+    name: "Arial"
+    size: 12
+    bold: false
+
+spacing:
+  margin_top: 1.0
+  margin_bottom: 0.8
+  margin_left: 1.2
+  margin_right: 1.2
+  line_spacing: 1.6
+  paragraph_spacing: 0.35
+
+decorations:
+  use_gradients: false
+  use_shapes: true
+  use_dividers: true
+  corner_radius: 0.0

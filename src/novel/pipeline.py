@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -25,6 +26,69 @@ log = logging.getLogger("novel")
 # ---------------------------------------------------------------------------
 
 _DEFAULT_WORKSPACE = "workspace"
+
+# 审稿意见类型图标
+_ISSUE_ICONS: dict[str, str] = {
+    "重复": "🔁",
+    "对话": "💬",
+    "逻辑": "🧩",
+    "节奏": "⏱️",
+    "细节": "🔍",
+    "AI味": "🤖",
+    "转折": "↪️",
+    "角色": "👤",
+    "风格": "🎨",
+    "其他": "📝",
+}
+
+
+def _parse_critique_issues(critique: str) -> list[dict]:
+    """Parse Writer.self_critique() plain-text output into structured issues.
+
+    Expected format per issue:
+        【问题N】类型：X / 位置：Y / 问题：Z / 建议：W
+    Also handles multi-line variants and partial matches.
+    """
+    if not critique:
+        return []
+
+    issues: list[dict] = []
+
+    # Split by 【问题...】 markers
+    blocks = re.split(r"【问题\d*】", critique)
+    for block in blocks[1:]:  # skip preamble before first marker
+        block = block.strip()
+        if not block:
+            continue
+
+        issue: dict[str, str] = {}
+
+        # Extract structured fields: 类型：X / 位置：Y / ...
+        for field, key in [("类型", "type"), ("位置", "location"),
+                           ("问题", "problem"), ("建议", "suggestion")]:
+            m = re.search(rf"{field}[：:]\s*(.+?)(?:\s*/\s*|\n|$)", block)
+            if m:
+                issue[key] = m.group(1).strip()
+
+        # Fallback: if no structured fields, use the whole block as problem
+        if not issue:
+            issue["problem"] = block[:200]
+            issue["type"] = "其他"
+
+        # Normalize type to known categories
+        raw_type = issue.get("type", "其他")
+        matched = False
+        for known in _ISSUE_ICONS:
+            if known in raw_type:
+                issue["type"] = known
+                matched = True
+                break
+        if not matched:
+            issue["type"] = "其他"
+
+        issues.append(issue)
+
+    return issues
 
 
 # ---------------------------------------------------------------------------
@@ -557,9 +621,13 @@ class NovelPipeline:
         from src.novel.models.character import CharacterProfile
         from src.novel.models.novel import ChapterOutline
         from src.novel.models.world import WorldSetting
+        from src.novel.tools.style_analysis_tool import StyleAnalysisTool
+        from src.novel.tools.quality_check_tool import QualityCheckTool
 
         novel_id = Path(project_path).name
         fm = self._get_file_manager()
+        style_tool = StyleAnalysisTool()
+        quality_tool = QualityCheckTool()
 
         # Load checkpoint
         state = self._load_checkpoint(novel_id)
@@ -697,6 +765,10 @@ class NovelPipeline:
             log.info("=== 精修第 %d/%d 章 ===", ch_num, total_chapters)
 
             try:
+                # Step 0: 改前指标（零成本，纯规则）
+                before_style = style_tool.analyze(chapter_text)
+                before_rules = quality_tool.rule_check(chapter_text)
+
                 # Step 1: 自审
                 log.info("第%d章：自审中...", ch_num)
                 all_summaries = build_chapter_summaries(ch_num)
@@ -726,6 +798,13 @@ class NovelPipeline:
                     style_name=style_name,
                 )
 
+                # Step 3: 改后指标（零成本，纯规则）
+                after_style = style_tool.analyze(polished_text)
+                after_rules = quality_tool.rule_check(polished_text)
+
+                # 解析审稿意见分类
+                issues = _parse_critique_issues(critique)
+
                 # 备份原文，保存精修版
                 fm.save_chapter_revision(novel_id, ch_num, chapter_text)
                 fm.save_chapter_text(novel_id, ch_num, polished_text)
@@ -738,6 +817,12 @@ class NovelPipeline:
                     "original_chars": len(chapter_text),
                     "polished_chars": len(polished_text),
                     "critique_summary": critique[:200],
+                    "critique_full": critique,
+                    "issues": issues,
+                    "before_style": before_style.model_dump(),
+                    "after_style": after_style.model_dump(),
+                    "before_rules": before_rules.model_dump(),
+                    "after_rules": after_rules.model_dump(),
                 })
 
                 log.info(

@@ -492,7 +492,7 @@ class TestMCPServerMeta:
         assert "video_list_projects" in tool_names
 
     def test_total_tool_count(self):
-        """Should have 11 tools total (7 novel + 4 video)."""
+        """Should have 14 tools total (7 novel + 4 video + 3 ppt)."""
         import asyncio
         import mcp_server
 
@@ -500,4 +500,4 @@ class TestMCPServerMeta:
             return await mcp_server.mcp.list_tools()
 
         tools = asyncio.run(_list())
-        assert len(tools) == 11
+        assert len(tools) == 16

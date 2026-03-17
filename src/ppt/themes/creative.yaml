@@ -1,0 +1,44 @@
+name: creative
+display_name: 创意活泼
+description: 鲜艳配色、趣味图形、动感排版，适合创意方案和营销推广
+
+colors:
+  primary: "#FF6B6B"
+  secondary: "#FFA502"
+  accent: "#4ECDC4"
+  background: "#FFFFFF"
+  text_primary: "#2D3436"
+  text_secondary: "#636E72"
+  highlight: "#A29BFE"
+
+fonts:
+  title:
+    name: "Helvetica"
+    size: 38
+    bold: true
+  subtitle:
+    name: "Helvetica"
+    size: 22
+    bold: false
+  body:
+    name: "Helvetica"
+    size: 16
+    bold: false
+  caption:
+    name: "Helvetica"
+    size: 12
+    bold: false
+
+spacing:
+  margin_top: 0.8
+  margin_bottom: 0.8
+  margin_left: 0.8
+  margin_right: 0.8
+  line_spacing: 1.5
+  paragraph_spacing: 0.3
+
+decorations:
+  use_gradients: true
+  use_shapes: true
+  use_dividers: false
+  corner_radius: 0.2

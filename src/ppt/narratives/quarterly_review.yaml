@@ -1,0 +1,40 @@
+narrative_id: quarterly_review
+name: 季度汇报
+description: 适用于向上级或团队汇报季度工作进展
+target_pages_min: 12
+target_pages_max: 18
+structure:
+  - role: cover
+    title_template: "{{period}} 工作汇报"
+    required: true
+  - role: executive_summary
+    title_template: "核心亮点"
+    key_points_count: "3-5"
+    required: true
+  - role: background
+    title_template: "背景与目标"
+    key_points_count: "3-4"
+    required: false
+  - role: progress
+    title_template: "关键进展"
+    key_points_count: "4-6"
+    required: true
+  - role: data_evidence
+    title_template: "数据表现"
+    key_points_count: "3-5"
+    required: true
+  - role: risk_problem
+    title_template: "挑战与风险"
+    key_points_count: "3-4"
+    required: false
+  - role: next_steps
+    title_template: "下阶段计划"
+    key_points_count: "4-6"
+    required: true
+  - role: closing
+    title_template: "谢谢"
+    required: true
+narrative_tips:
+  - "结论先行：executive_summary 必须在前 3 页内"
+  - "数据为王：data_evidence 页必须有具体数字"
+  - "风险透明：risk_problem 页不要回避问题"
