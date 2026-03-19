@@ -546,6 +546,7 @@ def generate_story(
 def refine_story(
     current_text: str,
     feedback: str,
+    file_path: str | None,
     system_prompt: str,
     llm_backend: str,
     key_gemini: str,
@@ -553,6 +554,13 @@ def refine_story(
     key_openai: str,
 ):
     """基于用户反馈优化已有故事。"""
+    # If a file is uploaded, read full text from file instead of preview
+    if file_path:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                current_text = f.read()
+        except Exception:
+            pass  # fall back to current_text
     if not current_text or not current_text.strip():
         gr.Warning("没有可优化的故事，请先生成或粘贴故事文本")
         return current_text or ""
@@ -3524,6 +3532,15 @@ def create_ui() -> gr.Blocks:
             # ============================================================
             with gr.Tab("PPT生成", id="tab_ppt"):
 
+                gr.HTML(
+                    '<div style="background: linear-gradient(135deg, #e74c3c, #c0392b); '
+                    'border: 1px solid #a93226; border-radius: 8px; padding: 14px 20px; '
+                    'margin-bottom: 12px; text-align: center; font-size: 17px; '
+                    'font-weight: bold; color: #ffffff; letter-spacing: 2px;">'
+                    '🚧 该功能正在开发中，敬请期待 🚧'
+                    '</div>'
+                )
+
                 with gr.Row(equal_height=False):
                     # ============== Left: Input ==============
                     with gr.Column(scale=5, elem_classes="input-card"):
@@ -3623,14 +3640,16 @@ def create_ui() -> gr.Blocks:
                         # --- Generate outline button ---
                         with gr.Row():
                             ppt_outline_btn = gr.Button(
-                                "生成大纲",
+                                "生成大纲（开发中）",
                                 variant="primary",
                                 size="lg",
                                 elem_classes="story-btn",
                                 scale=4,
+                                interactive=False,
                             )
                             ppt_new_btn = gr.Button(
                                 "新建", variant="secondary", size="lg", scale=1, min_width=80,
+                                interactive=False,
                             )
 
                         # --- Outline editor (initially hidden) ---
@@ -3657,9 +3676,10 @@ def create_ui() -> gr.Blocks:
                                 )
                             with gr.Row():
                                 ppt_confirm_btn = gr.Button(
-                                    "确认并生成 PPT",
+                                    "确认并生成 PPT（开发中）",
                                     variant="primary",
                                     size="lg",
+                                    interactive=False,
                                     elem_classes="story-btn",
                                 )
                                 ppt_deck_type = gr.Radio(
@@ -3925,8 +3945,8 @@ def create_ui() -> gr.Blocks:
                 "从主题生成",    # ppt_mode
                 "",              # ppt_topic_input
                 "",              # ppt_text_input
-                gr.update(interactive=True, value="生成大纲"),  # ppt_outline_btn
-                gr.update(interactive=True, value="确认并生成 PPT"),  # ppt_confirm_btn
+                gr.update(interactive=False, value="生成大纲（开发中）"),  # ppt_outline_btn
+                gr.update(interactive=False, value="确认并生成 PPT（开发中）"),  # ppt_confirm_btn
                 gr.update(visible=False),  # ppt_outline_editor
                 "",              # ppt_status_box
                 None,            # ppt_output_file
@@ -4026,11 +4046,34 @@ def create_ui() -> gr.Blocks:
             outputs=[txt_input],
         )
 
+        # Auto-fill txt_input with a preview when user uploads a TXT file
+        def _on_story_file_upload(file_path):
+            if not file_path:
+                return ""
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    full_text = f.read()
+            except Exception as e:
+                gr.Warning(f"读取文件失败: {e}")
+                return ""
+            total = len(full_text)
+            preview_len = 300
+            if total <= preview_len:
+                return full_text
+            return f"{full_text[:preview_len]}...\n\n【已上传文件，共 {total} 字，此处仅显示预览】"
+
+        file_input.change(
+            fn=_on_story_file_upload,
+            inputs=[file_input],
+            outputs=[txt_input],
+        )
+
         # Story refinement (iterate on existing text)
         refine_btn.click(
             fn=refine_story,
             inputs=[
-                txt_input, refine_input, system_prompt_input,
+                txt_input, refine_input, file_input,
+                system_prompt_input,
                 llm_backend, key_gemini, key_deepseek, key_openai,
             ],
             outputs=[txt_input],
@@ -4635,16 +4678,9 @@ def create_ui() -> gr.Blocks:
             # Auto-refresh task queue table when any task is active
             queue_table = _format_task_queue_table() if any_active else gr.update()
 
-            # Determine correct button text for PPT outline button on completion
-            if pt_done and pt_task_type == "ppt_outline":
-                ppt_outline_btn_update = gr.update(interactive=True, value="重新生成大纲")
-                ppt_confirm_btn_update = gr.update()  # don't touch confirm btn
-            elif pt_done:
-                ppt_outline_btn_update = gr.update(interactive=True, value="生成大纲")
-                ppt_confirm_btn_update = gr.update(interactive=True, value="确认并生成 PPT")
-            else:
-                ppt_outline_btn_update = gr.update()
-                ppt_confirm_btn_update = gr.update()
+            # PPT is disabled (under development) — keep buttons disabled
+            ppt_outline_btn_update = gr.update()
+            ppt_confirm_btn_update = gr.update()
 
             return (
                 # Status boxes

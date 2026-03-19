@@ -3,12 +3,16 @@
 import io
 import logging
 import os
+import time
 
 from PIL import Image
 
 from src.imagegen.image_generator import ImageGenerator
 
 log = logging.getLogger("novel")
+
+_MAX_RETRIES = 5
+_RETRY_BASE_DELAY = 3  # seconds
 
 
 class SiliconFlowBackend(ImageGenerator):
@@ -48,25 +52,33 @@ class SiliconFlowBackend(ImageGenerator):
         self.close()
 
     def generate(self, prompt: str) -> Image.Image:
-        """调用 SiliconFlow API 生成图片并下载。"""
+        """调用 SiliconFlow API 生成图片并下载，遇到 429 自动重试。"""
         client = self._get_client()
 
-        # 生成图片
-        resp = client.post(
-            self.API_URL,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self._model,
-                "prompt": prompt,
-                "image_size": self._image_size,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        for attempt in range(_MAX_RETRIES):
+            resp = client.post(
+                self.API_URL,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self._model,
+                    "prompt": prompt,
+                    "image_size": self._image_size,
+                },
+            )
+            if resp.status_code == 429:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                log.warning("SiliconFlow 429 限流，%ds 后重试 (%d/%d)", delay, attempt + 1, _MAX_RETRIES)
+                time.sleep(delay)
+                continue
+            resp.raise_for_status()
+            break
+        else:
+            resp.raise_for_status()  # raise the last 429
 
+        data = resp.json()
         image_url = data["images"][0]["url"]
 
         # 下载图片（URL 1小时有效）

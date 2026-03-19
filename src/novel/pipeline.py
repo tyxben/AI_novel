@@ -467,6 +467,9 @@ class NovelPipeline:
                 fm.save_chapter(novel_id, ch_num, ch_data)
                 fm.save_chapter_text(novel_id, ch_num, chapter_text)
 
+                # Backfill outline for placeholder chapters
+                self._backfill_outline_entry(state, ch_num, chapter_text)
+
                 # Append to chapters list in state
                 chapters = state.get("chapters", [])
                 chapters.append(ch_data)
@@ -1130,3 +1133,37 @@ class NovelPipeline:
             if ch.get("chapter_number") == chapter_number:
                 return ch
         return None
+
+    @staticmethod
+    def _backfill_outline_entry(state: dict, ch_num: int, chapter_text: str) -> None:
+        """Update placeholder outline entries with data from generated chapter.
+
+        When the LLM returns fewer chapters than requested during outline
+        generation, missing slots are filled with placeholder data (title=
+        "第N章", goal="待规划"). After a chapter is actually written, this
+        method patches the outline entry so it reflects real content.
+        """
+        outline = state.get("outline")
+        if not outline or not isinstance(outline, dict):
+            return
+        chapters = outline.get("chapters", [])
+        for ch in chapters:
+            if ch.get("chapter_number") != ch_num:
+                continue
+            # Only patch if it's still a placeholder
+            if ch.get("goal") != "待规划":
+                return
+            # Extract a title from the first non-empty line of text
+            lines = [ln.strip() for ln in chapter_text.split("\n") if ln.strip()]
+            # Use current_chapter_outline title if the writer generated a better one
+            cur_outline = state.get("current_chapter_outline", {})
+            title = cur_outline.get("title", "")
+            if not title or title == f"第{ch_num}章":
+                title = lines[0][:20] if lines else f"第{ch_num}章"
+            ch["title"] = title
+            # Build a brief summary from the first ~100 chars
+            preview = chapter_text.replace("\n", " ").strip()[:100]
+            ch["goal"] = preview + ("..." if len(chapter_text) > 100 else "")
+            ch["chapter_summary"] = preview + ("..." if len(chapter_text) > 100 else "")
+            ch["key_events"] = []
+            return

@@ -185,8 +185,12 @@ def _run_video_generate(params: dict, progress_cb) -> dict:
     else:
         from src.pipeline import Pipeline
 
+        def progress_cb_classic(stage, total, desc):
+            pct = stage / total if total else 0
+            progress_cb(pct, f"[{stage}/{total}] {desc}")
+
         pipe = Pipeline(input_file=input_file, config=config, resume=False)
-        output = pipe.run(progress_callback=progress_cb)
+        output = pipe.run(progress_callback=progress_cb_classic)
 
     if isinstance(output, dict):
         return output
