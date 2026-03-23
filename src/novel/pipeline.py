@@ -397,6 +397,17 @@ class NovelPipeline:
         if end_chapter is None:
             end_chapter = total_chapters
 
+        # 超长篇支持：当请求的章节范围超出当前大纲时，自动扩展大纲
+        if end_chapter > total_chapters:
+            log.info(
+                "章节 %d-%d 超出当前大纲范围 (max=%d)，自动扩展大纲...",
+                start_chapter, end_chapter, total_chapters,
+            )
+            self._extend_outline(novel_id, state, end_chapter, progress_callback)
+            # 重新获取 total_chapters
+            outline = state.get("outline", {})
+            total_chapters = len(outline.get("chapters", []))
+
         # Determine effective silent mode
         effective_silent = silent or state.get("silent_mode", False)
         review_interval = state.get("review_interval", self.config.human_in_loop.review_interval)
@@ -1124,6 +1135,399 @@ class NovelPipeline:
         return result
 
     # ------------------------------------------------------------------
+    # Chapter editing & AI proofreading
+    # ------------------------------------------------------------------
+
+    def proofread_chapter(
+        self,
+        project_path: str,
+        chapter_number: int,
+        text: str | None = None,
+    ) -> list[dict]:
+        """AI 校对章节，返回问题列表（不修改文本）。
+
+        Args:
+            project_path: 项目路径
+            chapter_number: 章节号
+            text: 如果提供则校对此文本，否则从文件加载
+
+        Returns:
+            问题列表（dict 格式，Gradio 友好）
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.novel.services.proofreader import Proofreader
+
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+
+        if text is None:
+            text = fm.load_chapter_text(novel_id, chapter_number)
+            if not text:
+                return []
+
+        # 从 checkpoint 获取 LLM 配置，fallback 到 auto
+        state = self._load_checkpoint(novel_id)
+        llm_config = (
+            state.get("config", {}).get("llm", {}) if state else {}
+        )
+        llm = create_llm_client(llm_config)
+
+        proofreader = Proofreader(llm)
+        issues = proofreader.proofread(text)
+
+        # 转为 dict 格式（Gradio 友好）
+        return [
+            {
+                "index": i,
+                "issue_type": issue.issue_type.value,
+                "original": issue.original,
+                "correction": issue.correction,
+                "explanation": issue.explanation,
+            }
+            for i, issue in enumerate(issues)
+        ]
+
+    def apply_proofreading_fixes(
+        self,
+        project_path: str,
+        chapter_number: int,
+        text: str,
+        issues: list[dict],
+        selected_indices: list[int],
+    ) -> tuple[str, list[str]]:
+        """应用校对修正。
+
+        Args:
+            project_path: 项目路径
+            chapter_number: 章节号
+            text: 当前文本
+            issues: 问题列表（dict 格式）
+            selected_indices: 用户选中的问题索引
+
+        Returns:
+            (修正后的文本, 失败的修正描述列表)
+        """
+        from src.novel.models.refinement import (
+            ProofreadingIssue,
+            ProofreadingIssueType,
+        )
+        from src.novel.services.proofreader import Proofreader
+
+        parsed_issues: list[ProofreadingIssue] = []
+        for item in issues:
+            parsed_issues.append(
+                ProofreadingIssue(
+                    issue_type=ProofreadingIssueType(item["issue_type"]),
+                    original=item["original"],
+                    correction=item["correction"],
+                    explanation=item.get("explanation", ""),
+                )
+            )
+
+        return Proofreader.apply_fixes(text, parsed_issues, selected_indices)
+
+    def save_edited_chapter(
+        self,
+        project_path: str,
+        chapter_number: int,
+        text: str,
+    ) -> dict:
+        """保存人工编辑的章节文本（自动备份旧版本）。
+
+        Args:
+            project_path: 项目路径
+            chapter_number: 章节号
+            text: 新的章节文本
+
+        Returns:
+            保存结果信息
+        """
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+
+        # 备份当前版本
+        old_text = fm.load_chapter_text(novel_id, chapter_number)
+        if old_text:
+            fm.save_chapter_revision(
+                novel_id,
+                chapter_number,
+                old_text,
+                metadata={"source": "before_human_edit"},
+            )
+
+        # 保存新文本
+        fm.save_chapter_text(novel_id, chapter_number, text)
+
+        return {
+            "saved": True,
+            "chapter_number": chapter_number,
+            "char_count": len(text),
+            "old_char_count": len(old_text) if old_text else 0,
+        }
+
+    # ------------------------------------------------------------------
+    # Setting revision (影响分析 / 保存 / 重写)
+    # ------------------------------------------------------------------
+
+    def analyze_setting_impact(
+        self,
+        project_path: str,
+        modified_field: str,
+        new_value_json: str,
+    ) -> dict:
+        """分析设定修改对已写章节的影响。
+
+        Args:
+            project_path: 项目路径
+            modified_field: "world_setting" | "characters" | "outline"
+            new_value_json: 新值的 JSON 字符串
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.novel.services.setting_impact_analyzer import (
+            SettingImpactAnalyzer,
+        )
+
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+        novel_data = fm.load_novel(novel_id)
+        if novel_data is None:
+            return {"error": f"找不到项目: {project_path}"}
+
+        # 获取旧值
+        if modified_field == "world_setting":
+            old_value = json.dumps(
+                novel_data.get("world_setting", {}),
+                ensure_ascii=False,
+                indent=2,
+            )
+        elif modified_field == "characters":
+            old_value = json.dumps(
+                novel_data.get("characters", []),
+                ensure_ascii=False,
+                indent=2,
+            )
+        elif modified_field == "outline":
+            old_value = json.dumps(
+                novel_data.get("outline", {}),
+                ensure_ascii=False,
+                indent=2,
+            )
+        else:
+            return {"error": f"未知的设定字段: {modified_field}"}
+
+        # 从 checkpoint 获取 LLM 配置，fallback 到 auto
+        state = self._load_checkpoint(novel_id)
+        llm_config = (
+            state.get("config", {}).get("llm", {}) if state else {}
+        )
+        llm = create_llm_client(llm_config)
+
+        analyzer = SettingImpactAnalyzer(llm, fm)
+        return analyzer.analyze_impact(
+            novel_id, novel_data, modified_field, old_value, new_value_json
+        )
+
+    def save_setting(
+        self,
+        project_path: str,
+        modified_field: str,
+        new_value_json: str,
+    ) -> dict:
+        """保存设定修改（自动备份旧版本）。
+
+        Args:
+            project_path: 项目路径
+            modified_field: "world_setting" | "characters" | "outline"
+            new_value_json: 新值的 JSON 字符串
+        """
+        import shutil
+        from datetime import datetime
+
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+        novel_data = fm.load_novel(novel_id)
+        if novel_data is None:
+            return {"error": f"找不到项目: {project_path}"}
+
+        # 备份当前 novel.json
+        novel_json_path = fm._novel_dir(novel_id) / "novel.json"
+        backup_path_str: str | None = None
+        if novel_json_path.exists():
+            backup_dir = fm._novel_dir(novel_id) / "revisions"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = backup_dir / f"novel_backup_{timestamp}.json"
+            shutil.copy2(novel_json_path, backup_path)
+            backup_path_str = str(backup_path)
+
+        # 应用修改
+        new_data = json.loads(new_value_json)
+
+        if modified_field == "world_setting":
+            novel_data["world_setting"] = new_data
+        elif modified_field == "characters":
+            novel_data["characters"] = new_data
+        elif modified_field == "outline":
+            novel_data["outline"] = new_data
+        else:
+            return {"error": f"未知的设定字段: {modified_field}"}
+
+        # 更新时间戳
+        novel_data["updated_at"] = datetime.now().isoformat()
+
+        # 保存
+        fm.save_novel(novel_id, novel_data)
+
+        return {
+            "saved": True,
+            "modified_field": modified_field,
+            "backup_path": backup_path_str,
+        }
+
+    def rewrite_affected_chapters(
+        self,
+        project_path: str,
+        impact: dict,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> dict:
+        """根据影响评估结果，重写受影响的章节。"""
+        from src.llm.llm_client import create_llm_client
+        from src.novel.agents.writer import Writer
+        from src.novel.models.character import CharacterProfile
+        from src.novel.models.novel import ChapterOutline
+        from src.novel.models.world import WorldSetting
+
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+        novel_data = fm.load_novel(novel_id)
+        if novel_data is None:
+            return {"rewritten": [], "errors": [f"找不到项目: {project_path}"]}
+
+        affected = impact.get("affected_chapters", [])
+        if not affected:
+            return {"rewritten": [], "errors": []}
+
+        # 从 checkpoint 获取 LLM 配置
+        state = self._load_checkpoint(novel_id)
+        llm_config = (
+            state.get("config", {}).get("llm", {}) if state else {}
+        )
+        llm = create_llm_client(llm_config)
+        writer = Writer(llm)
+
+        # 构建冲突信息 map
+        conflict_map: dict[int, list[dict]] = {}
+        for c in impact.get("conflicts", []):
+            ch = c.get("chapter_number")
+            if ch:
+                conflict_map.setdefault(ch, []).append(c)
+
+        # 大纲 chapter map
+        outline = novel_data.get("outline", {})
+        outline_chapters = {
+            co["chapter_number"]: co
+            for co in outline.get("chapters", [])
+            if isinstance(co, dict) and "chapter_number" in co
+        }
+
+        # 角色 / 世界观
+        char_profiles: list[CharacterProfile] = []
+        for c in novel_data.get("characters", []):
+            try:
+                char_profiles.append(
+                    CharacterProfile(**c) if isinstance(c, dict) else c
+                )
+            except Exception:
+                pass
+
+        world_data = novel_data.get("world_setting")
+        if world_data and isinstance(world_data, dict):
+            try:
+                world_setting = WorldSetting(**world_data)
+            except Exception:
+                world_setting = WorldSetting(era="未知", location="未知")
+        else:
+            world_setting = WorldSetting(era="未知", location="未知")
+
+        style_name = novel_data.get(
+            "style_subcategory", "webnovel.shuangwen"
+        )
+
+        rewritten: list[dict] = []
+        errors: list[str] = []
+
+        for i, ch_num in enumerate(affected):
+            if progress_callback:
+                progress_callback(i / len(affected), f"重写第{ch_num}章...")
+
+            try:
+                old_text = fm.load_chapter_text(novel_id, ch_num)
+                if not old_text:
+                    errors.append(f"第{ch_num}章: 文本不存在")
+                    continue
+
+                # 备份
+                fm.save_chapter_revision(
+                    novel_id,
+                    ch_num,
+                    old_text,
+                    metadata={"source": "before_setting_rewrite"},
+                )
+
+                # 构建重写指令
+                conflicts = conflict_map.get(ch_num, [])
+                instruction = f"设定已修改（{impact.get('summary', '')}）。"
+                if conflicts:
+                    for c in conflicts:
+                        instruction += (
+                            f"\n- 矛盾: {c['reason']}。"
+                            f"建议: {c.get('suggested_fix', '按新设定调整')}"
+                        )
+
+                co_data = outline_chapters.get(ch_num)
+                if not co_data:
+                    errors.append(f"第{ch_num}章: 大纲不存在")
+                    continue
+
+                try:
+                    co = ChapterOutline(**co_data)
+                except Exception:
+                    errors.append(f"第{ch_num}章: 大纲解析失败")
+                    continue
+
+                # 获取上下文
+                context = ""
+                if ch_num > 1:
+                    prev_text = fm.load_chapter_text(novel_id, ch_num - 1)
+                    if prev_text:
+                        context = prev_text[-2000:]
+
+                new_text = writer.rewrite_chapter(
+                    original_text=old_text,
+                    rewrite_instruction=instruction,
+                    chapter_outline=co,
+                    characters=char_profiles,
+                    world_setting=world_setting,
+                    context=context,
+                    style_name=style_name,
+                    is_propagation=True,
+                )
+
+                fm.save_chapter_text(novel_id, ch_num, new_text)
+                rewritten.append(
+                    {
+                        "chapter_number": ch_num,
+                        "old_chars": len(old_text),
+                        "new_chars": len(new_text),
+                    }
+                )
+            except Exception as e:
+                log.error("重写第%d章失败: %s", ch_num, e)
+                errors.append(f"第{ch_num}章: {e}")
+
+        return {"rewritten": rewritten, "errors": errors}
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -1133,6 +1537,123 @@ class NovelPipeline:
             if ch.get("chapter_number") == chapter_number:
                 return ch
         return None
+
+    # ------------------------------------------------------------------
+    # Outline extension (volume-based generation for long novels)
+    # ------------------------------------------------------------------
+
+    def _extend_outline(
+        self,
+        novel_id: str,
+        state: dict,
+        target_chapter: int,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> None:
+        """Extend the outline to cover up to *target_chapter*.
+
+        For long novels whose initial outline only covers the first volume,
+        this method dynamically generates chapter outlines for subsequent
+        volumes using ``NovelDirector.generate_volume_outline``.
+
+        The *state* dict is mutated in-place (outline.chapters extended) and
+        the checkpoint + novel.json are saved after each volume expansion.
+        """
+        from src.novel.agents.novel_director import NovelDirector, _CHAPTERS_PER_VOLUME
+        from src.llm.llm_client import create_llm_client
+
+        llm_config = state.get("config", {}).get("llm", {})
+        llm = create_llm_client(llm_config)
+        director = NovelDirector(llm)
+        fm = self._get_file_manager()
+
+        outline = state.get("outline", {})
+        chapters = outline.get("chapters", [])
+        outline_max = max(
+            (ch.get("chapter_number", 0) for ch in chapters), default=0
+        )
+        chapters_per_volume = _CHAPTERS_PER_VOLUME
+
+        while outline_max < target_chapter:
+            # Determine which volume to generate next.
+            # outline_max is the highest chapter number we already have.
+            # E.g. outline_max=30 with 30 chapters/vol means volume 1 is
+            # complete, so the next volume is 2.
+            current_volume = ((outline_max - 1) // chapters_per_volume) + 1 if outline_max > 0 else 0
+            next_volume = current_volume + 1
+
+            if progress_callback:
+                progress_callback(
+                    0.0,
+                    f"正在生成第{next_volume}卷大纲 (第{outline_max + 1}章起)...",
+                )
+
+            # Build a summary of previously written content
+            previous_summary = self._build_previous_summary(
+                novel_id, fm, outline_max
+            )
+
+            # Load full novel data so the director can see world/character info
+            novel_data = fm.load_novel(novel_id) or {}
+            # Ensure the latest outline is in novel_data (state may be more recent)
+            novel_data["outline"] = outline
+
+            # Generate new volume outline
+            new_chapters = director.generate_volume_outline(
+                novel_data=novel_data,
+                volume_number=next_volume,
+                previous_summary=previous_summary,
+            )
+
+            # Append to outline chapters
+            existing_nums = {ch.get("chapter_number", 0) for ch in chapters}
+            for ch_data in new_chapters:
+                ch_num = ch_data.get("chapter_number", 0)
+                if ch_num not in existing_nums:
+                    chapters.append(ch_data)
+                    existing_nums.add(ch_num)
+
+            # Re-sort
+            chapters.sort(key=lambda c: c.get("chapter_number", 0))
+            outline["chapters"] = chapters
+            state["outline"] = outline
+
+            outline_max = max(
+                (ch.get("chapter_number", 0) for ch in chapters), default=0
+            )
+
+            # Persist
+            self._save_checkpoint(novel_id, state)
+            novel_data["outline"] = outline
+            fm.save_novel(novel_id, novel_data)
+
+            log.info("大纲已扩展至第 %d 章 (卷%d)", outline_max, next_volume)
+
+    def _build_previous_summary(
+        self, novel_id: str, fm: "FileManager", up_to_chapter: int
+    ) -> str:
+        """Build a concise summary of previously written chapters.
+
+        Reads chapter texts (up to *up_to_chapter*) and condenses each into
+        a short excerpt to stay within reasonable token limits.
+        """
+        summaries: list[str] = []
+        written_chapters = fm.list_chapters(novel_id)
+        for ch_num in sorted(written_chapters):
+            if ch_num > up_to_chapter:
+                break
+            text = fm.load_chapter_text(novel_id, ch_num)
+            if text:
+                # Take the first ~200 chars as a summary
+                preview = text.replace("\n", " ").strip()[:200]
+                summaries.append(f"第{ch_num}章: {preview}")
+            if len(summaries) >= 30:
+                # Cap to avoid token explosion
+                summaries.append("...（更早章节省略）")
+                break
+
+        if not summaries:
+            return "（尚未生成任何章节）"
+        return "\n".join(summaries)
 
     @staticmethod
     def _backfill_outline_entry(state: dict, ch_num: int, chapter_text: str) -> None:

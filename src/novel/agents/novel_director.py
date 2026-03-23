@@ -200,7 +200,13 @@ class NovelDirector:
         volume_count = max(1, total_chapters // _CHAPTERS_PER_VOLUME)
         chapters_per_volume = max(1, total_chapters // volume_count)
 
-        # ---- Step 1: 用 LLM 生成完整大纲 JSON ----
+        # 超长篇模式：当总章节超过 _CHAPTERS_PER_VOLUME 时，只生成第1卷的
+        # 详细章节大纲 + 所有卷的概要框架，后续卷通过 generate_volume_outline
+        # 按需生成。
+        is_long_novel = total_chapters > _CHAPTERS_PER_VOLUME
+        prompt_chapters = chapters_per_volume if is_long_novel else total_chapters
+
+        # ---- Step 1: 用 LLM 生成大纲 JSON ----
         prompt = self._build_outline_prompt(
             genre=genre,
             theme=theme,
@@ -211,6 +217,7 @@ class NovelDirector:
             chapters_per_volume=chapters_per_volume,
             total_chapters=total_chapters,
             custom_ideas=custom_ideas,
+            first_volume_only=is_long_novel,
         )
 
         outline_data: dict | None = None
@@ -243,7 +250,8 @@ class NovelDirector:
             )
 
         # ---- Step 2: 解析 LLM 返回，构建 Outline ----
-        return self._parse_outline(outline_data, template_name, total_chapters)
+        # 超长篇模式下只填充第1卷的章节（prompt_chapters），而非全部
+        return self._parse_outline(outline_data, template_name, prompt_chapters)
 
     # ------------------------------------------------------------------
     # 3. 规划下一章
@@ -299,6 +307,242 @@ class NovelDirector:
         }
 
     # ------------------------------------------------------------------
+    # 4. 分卷大纲生成（超长篇支持）
+    # ------------------------------------------------------------------
+
+    def generate_volume_outline(
+        self,
+        novel_data: dict,
+        volume_number: int,
+        previous_summary: str = "",
+    ) -> list[dict]:
+        """为指定卷生成章节大纲（基于已有内容和整体框架）。
+
+        当目标字数超过 75000 字（约30章）时，创建项目只生成第1卷的详细
+        章节大纲。后续卷的章节大纲在需要时通过此方法动态生成，避免一次性
+        生成过多章节导致 token 爆炸。
+
+        Args:
+            novel_data: Novel dict（包含 outline.acts, outline.volumes 等整体框架）
+            volume_number: 要生成大纲的卷号（从1开始）
+            previous_summary: 前面各卷的内容摘要
+
+        Returns:
+            list[dict]: 章节大纲列表（ChapterOutline 格式的 dict）
+        """
+        outline = novel_data.get("outline", {})
+        volumes = outline.get("volumes", [])
+        main_storyline = outline.get("main_storyline", {})
+
+        # 找到目标卷的信息
+        target_volume = None
+        for vol in volumes:
+            if vol.get("volume_number") == volume_number:
+                target_volume = vol
+                break
+
+        if target_volume is None:
+            log.warning("卷 %d 在整体框架中不存在，使用默认信息", volume_number)
+            target_volume = {
+                "volume_number": volume_number,
+                "title": f"第{volume_number}卷",
+                "core_conflict": "待规划",
+                "resolution": "待规划",
+                "chapters": [],
+            }
+
+        # 计算本卷的章节范围
+        vol_chapters = target_volume.get("chapters", [])
+        if vol_chapters:
+            start_ch = min(vol_chapters)
+            end_ch = max(vol_chapters)
+            chapters_count = len(vol_chapters)
+        else:
+            # 根据 volumes 列表推断章节范围
+            chapters_count = _CHAPTERS_PER_VOLUME
+            existing_max = 0
+            for ch in outline.get("chapters", []):
+                ch_num = ch.get("chapter_number", 0) if isinstance(ch, dict) else 0
+                if ch_num > existing_max:
+                    existing_max = ch_num
+            start_ch = existing_max + 1
+            end_ch = start_ch + chapters_count - 1
+
+        # 提取世界观和角色信息
+        world_setting = novel_data.get("world_setting", {})
+        characters = novel_data.get("characters", [])
+        genre = novel_data.get("genre", "玄幻")
+        theme = novel_data.get("theme", "")
+
+        world_info = ""
+        if world_setting:
+            era = world_setting.get("era", "")
+            location = world_setting.get("location", "")
+            if era or location:
+                world_info = f"世界观：{era}，{location}"
+
+        char_info = ""
+        if characters:
+            char_names = []
+            for c in characters[:5]:  # 最多取5个主要角色
+                if isinstance(c, dict):
+                    name = c.get("name", "")
+                    role = c.get("role", "")
+                    if name:
+                        char_names.append(f"{name}({role})" if role else name)
+            if char_names:
+                char_info = f"主要角色：{'、'.join(char_names)}"
+
+        # 构建整体框架摘要
+        acts_info = ""
+        for act in outline.get("acts", []):
+            if isinstance(act, dict):
+                acts_info += f"  - {act.get('name', '')}: {act.get('description', '')} (第{act.get('start_chapter', '?')}-{act.get('end_chapter', '?')}章)\n"
+
+        volumes_info = ""
+        for vol in volumes:
+            if isinstance(vol, dict):
+                vol_num = vol.get("volume_number", "?")
+                vol_title = vol.get("title", "")
+                vol_conflict = vol.get("core_conflict", "")
+                vol_resolution = vol.get("resolution", "")
+                marker = " [当前卷]" if vol_num == volume_number else ""
+                volumes_info += f"  - 第{vol_num}卷「{vol_title}」: 核心矛盾={vol_conflict}, 解决方向={vol_resolution}{marker}\n"
+
+        # 主线信息
+        storyline_info = ""
+        if main_storyline:
+            storyline_info = f"""
+主线信息：
+  - 主角：{main_storyline.get('protagonist', '未知')}
+  - 目标：{main_storyline.get('protagonist_goal', '未知')}
+  - 核心冲突：{main_storyline.get('core_conflict', '未知')}
+  - 角色弧线：{main_storyline.get('character_arc', '未知')}
+  - 赌注：{main_storyline.get('stakes', '未知')}
+"""
+
+        prompt = f"""请为小说的第{volume_number}卷生成详细的章节大纲。
+
+题材：{genre}
+主题：{theme}
+{world_info}
+{char_info}
+{storyline_info}
+
+【整体故事框架】
+幕结构：
+{acts_info}
+卷结构：
+{volumes_info}
+
+【当前卷信息】
+卷号：第{volume_number}卷「{target_volume.get('title', '')}」
+核心矛盾：{target_volume.get('core_conflict', '')}
+解决方向：{target_volume.get('resolution', '')}
+章节范围：第{start_ch}章 - 第{end_ch}章（共{chapters_count}章）
+
+【前情摘要】
+{previous_summary if previous_summary else '（这是第一卷，无前情）'}
+
+请严格按以下 JSON 格式返回：
+{{
+  "chapters": [
+    {{
+      "chapter_number": {start_ch},
+      "title": "章节标题",
+      "goal": "本章目标",
+      "key_events": ["事件1", "事件2"],
+      "involved_characters": [],
+      "plot_threads": [],
+      "estimated_words": 2500,
+      "mood": "蓄力",
+      "storyline_progress": "本章如何推进主线",
+      "chapter_summary": "本章内容2-3句话摘要",
+      "chapter_brief": {{
+        "main_conflict": "本章主冲突",
+        "payoff": "本章爽点/情绪回报",
+        "character_arc_step": "主角变化",
+        "foreshadowing_plant": ["要埋的伏笔"],
+        "foreshadowing_collect": ["要回收的伏笔"],
+        "end_hook_type": "悬疑|危机|反转|情感|发现|无"
+      }}
+    }}
+  ]
+}}
+
+要求：
+1. 章节号从 {start_ch} 开始，到 {end_ch} 结束，共 {chapters_count} 章
+2. 承接前情，自然过渡
+3. 围绕本卷核心矛盾展开
+4. 每章必须推进主线
+5. 情节有起伏，节奏合理
+6. mood 可选：蓄力、小爽、大爽、过渡、虐心、反转、日常
+"""
+
+        # 调用 LLM
+        result_data: dict | None = None
+        last_error = ""
+
+        for attempt in range(self.MAX_OUTLINE_RETRIES):
+            try:
+                response = self.llm.chat(
+                    messages=[
+                        {"role": "system", "content": "你是一位资深网络小说策划编辑。请严格按照 JSON 格式返回章节大纲。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.8,
+                    json_mode=True,
+                    max_tokens=8192,
+                )
+                result_data = _extract_json_obj(response.content)
+                if result_data is not None:
+                    break
+                last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"
+            except Exception as exc:
+                last_error = f"LLM 调用失败: {exc}"
+                log.warning("卷%d大纲生成第 %d 次尝试失败: %s", volume_number, attempt + 1, last_error)
+                if attempt < self.MAX_OUTLINE_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+
+        if result_data is None:
+            raise RuntimeError(
+                f"卷{volume_number}大纲生成失败，已重试 {self.MAX_OUTLINE_RETRIES} 次。最后错误: {last_error}"
+            )
+
+        # 解析章节
+        chapters_data = result_data.get("chapters", [])
+        parsed_chapters: list[dict] = []
+
+        for ch_data in chapters_data:
+            try:
+                if "chapter_brief" not in ch_data or not isinstance(ch_data.get("chapter_brief"), dict):
+                    ch_data["chapter_brief"] = {}
+                # Validate by constructing a ChapterOutline
+                co = ChapterOutline(**ch_data)
+                parsed_chapters.append(co.model_dump())
+            except Exception:
+                log.warning("跳过无效卷大纲 chapter 数据: %s", ch_data)
+
+        # 兜底：填充缺失的章节
+        existing_nums = {ch["chapter_number"] for ch in parsed_chapters}
+        for i in range(start_ch, end_ch + 1):
+            if i not in existing_nums:
+                parsed_chapters.append(
+                    ChapterOutline(
+                        chapter_number=i,
+                        title=f"第{i}章",
+                        goal="待规划",
+                        key_events=["待规划"],
+                        estimated_words=2500,
+                        mood="蓄力",
+                    ).model_dump()
+                )
+
+        parsed_chapters.sort(key=lambda c: c["chapter_number"])
+        log.info("卷%d大纲生成完成: %d章 (第%d-%d章)", volume_number, len(parsed_chapters), start_ch, end_ch)
+        return parsed_chapters
+
+    # ------------------------------------------------------------------
     # 内部方法
     # ------------------------------------------------------------------
 
@@ -313,9 +557,31 @@ class NovelDirector:
         chapters_per_volume: int,
         total_chapters: int,
         custom_ideas: str | None = None,
+        first_volume_only: bool = False,
     ) -> str:
-        """构建大纲生成的 LLM prompt（中文）。"""
+        """构建大纲生成的 LLM prompt（中文）。
+
+        Args:
+            first_volume_only: 超长篇模式 -- 生成所有卷的概要框架，
+                但只输出第1卷的详细章节大纲（chapters_per_volume 章），
+                后续卷的章节大纲按需通过 generate_volume_outline 生成。
+        """
         custom_part = f"\n用户额外要求：{custom_ideas}" if custom_ideas else ""
+
+        if first_volume_only:
+            chapter_instruction = (
+                f"\n【超长篇模式】这是一部超长篇小说（共{total_chapters}章/{volume_count}卷），"
+                f"chapters 数组只需要生成第1卷的详细章节大纲（第1-{chapters_per_volume}章，"
+                f"共{chapters_per_volume}章）。但 acts 和 volumes 必须覆盖全书所有卷的概要框架。\n"
+            )
+            chapter_count_instruction = (
+                f"1. chapters 数组：章节号从 1 开始连续递增，总共 {chapters_per_volume} 章（仅第1卷）"
+            )
+        else:
+            chapter_instruction = ""
+            chapter_count_instruction = (
+                f"1. 章节号从 1 开始连续递增，总共 {total_chapters} 章"
+            )
 
         return f"""请为以下小说生成完整三层大纲：
 
@@ -327,7 +593,7 @@ class NovelDirector:
 卷数量：{volume_count}
 每卷章节数：{chapters_per_volume}
 总章节数：{total_chapters}{custom_part}
-
+{chapter_instruction}
 【专业写作原则 — 必须严格遵守】
 1. 主线为王：整部小说必须有一条清晰的主线（主角目标→障碍→成长→达成/失败）
 2. 开场即冲突：第1章必须用冲突或悬念抓住读者，禁止慢热开场
@@ -389,7 +655,7 @@ class NovelDirector:
 
 mood 可选值：蓄力、小爽、大爽、过渡、虐心、反转、日常。
 请确保：
-1. 章节号从 1 开始连续递增，总共 {total_chapters} 章
+{chapter_count_instruction}
 2. 每卷的 chapters 列表对应正确的章节号
 3. 每幕的 start_chapter 和 end_chapter 不重叠
 4. 情节有起伏，节奏合理

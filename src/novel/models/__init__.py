@@ -34,6 +34,12 @@ from src.novel.models.quality import (
     RuleCheckResult,
     StyleMetrics,
 )
+from src.novel.models.refinement import (
+    ProofreadingIssue,
+    ProofreadingIssueType,
+    SettingConflict,
+    SettingImpact,
+)
 from src.novel.models.world import PowerLevel, PowerSystem, WorldSetting
 
 # 解析 Novel 和 Volume 中的前向引用（Chapter, CharacterProfile, WorldSetting, VolumeSnapshot）
@@ -83,4 +89,9 @@ __all__ = [
     "FeedbackType",
     "FeedbackEntry",
     "FeedbackAnalysis",
+    # refinement.py
+    "ProofreadingIssue",
+    "ProofreadingIssueType",
+    "SettingConflict",
+    "SettingImpact",
 ]
