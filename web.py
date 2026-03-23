@@ -3,6 +3,7 @@
 import json
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -182,12 +183,15 @@ AGENT_STAGES = {1: "导演分析", 2: "内容解析", 3: "图片生成", 4: "配
 NOVEL_GENRE_CHOICES = ["都市", "玄幻", "武侠", "科幻", "言情", "悬疑", "轻小说", "历史"]
 NOVEL_GENRE_MAP = {g: g for g in NOVEL_GENRE_CHOICES}
 
-NOVEL_WORDS_CHOICES = ["5万字", "10万字", "20万字", "50万字"]  # kept for reference
+NOVEL_WORDS_CHOICES = ["5万字", "10万字", "20万字", "50万字", "100万字", "200万字", "500万字"]
 NOVEL_WORDS_MAP = {
     "5万字": 50000,
     "10万字": 100000,
     "20万字": 200000,
     "50万字": 500000,
+    "100万字": 1000000,
+    "200万字": 2000000,
+    "500万字": 5000000,
 }
 
 NOVEL_STYLE_CHOICES = ["网文爽文", "武侠古典", "轻小说"]
@@ -1086,16 +1090,22 @@ def _novel_generate(
         gr.Warning("项目检查点不存在，请先创建项目")
         return ("项目检查点不存在，请先创建项目", gr.update())
     outline = ckpt.get("outline", {})
-    total_chapters = len(outline.get("chapters", []))
+    outlined_chapters = len(outline.get("chapters", []))
 
-    if start_ch > total_chapters:
+    # For long novels, the target total may exceed current outlined chapters.
+    # Compute the full target from target_words (each chapter ~ 2500 words).
+    novel_data = fm.load_novel(novel_id) or {}
+    target_words = novel_data.get("target_words", 0)
+    target_total_chapters = max(outlined_chapters, target_words // 2500) if target_words else outlined_chapters
+
+    if start_ch > target_total_chapters:
         gr.Info("所有章节已生成完成!")
-        return f"所有章节已生成完成 ({total_chapters}/{total_chapters} 章)", ""
+        return f"所有章节已生成完成 ({target_total_chapters}/{target_total_chapters} 章)", ""
 
     batch = int(batch_size) if batch_size else 20
-    end_ch = min(start_ch + batch - 1, total_chapters)
+    end_ch = min(start_ch + batch - 1, target_total_chapters)
 
-    progress(0, desc=f"正在生成第 {start_ch}-{end_ch} 章 (共 {total_chapters} 章)...")
+    progress(0, desc=f"正在生成第 {start_ch}-{end_ch} 章 (共 {target_total_chapters} 章)...")
 
     def _progress_cb(pct, msg):
         progress(pct, desc=msg)
@@ -1636,6 +1646,785 @@ def _novel_load_polish_diff(project: str, chapter_num: int) -> str:
 
     except Exception as e:
         return f"加载对比失败: {e}"
+
+
+# ---------------------------------------------------------------------------
+# 章节编辑 + AI 校对  /  设定编辑 -- 后端函数
+# ---------------------------------------------------------------------------
+
+_PROOFREAD_TYPE_ICONS = {
+    "punctuation": "📌 标点",
+    "grammar": "📝 语法",
+    "typo": "✏️ 错别字",
+    "word_choice": "💬 用词",
+    "redundancy": "🔁 冗余",
+}
+
+
+def _novel_proofread_issue_label(issue: dict) -> str:
+    """Build a checkbox label for a single proofread issue."""
+    idx = issue["index"]
+    icon = _PROOFREAD_TYPE_ICONS.get(issue["issue_type"], "📋 其他")
+    orig = issue["original"][:30]
+    corr = issue["correction"][:30]
+    expl = issue.get("explanation", "")[:40]
+    return f"[{idx}] {icon}: 「{orig}」→「{corr}」{' — ' + expl if expl else ''}"
+
+
+def _novel_edit_load_chapter(project: str, chapter_num: int):
+    """加载章节文本到编辑区。Returns (text, status)."""
+    if not project:
+        return "", "请先选择项目"
+    if not chapter_num or chapter_num < 1:
+        return "", "请输入有效章节号"
+    project_path = _novel_extract_project_path(project)
+
+    # 加载原始文本（不带标题头）
+    ch_json = Path(project_path) / "chapters" / f"chapter_{int(chapter_num):03d}.json"
+    if ch_json.exists():
+        data = json.loads(ch_json.read_text(encoding="utf-8"))
+        text = data.get("full_text", "")
+        if text:
+            return text, f"已加载第{int(chapter_num)}章（{len(text)}字）"
+
+    ch_file = Path(project_path) / "chapters" / f"chapter_{int(chapter_num):03d}.txt"
+    if ch_file.exists():
+        text = ch_file.read_text(encoding="utf-8")
+        return text, f"已加载第{int(chapter_num)}章（{len(text)}字）"
+
+    return "", f"第{int(chapter_num)}章尚未生成"
+
+
+def _novel_edit_proofread(project: str, chapter_num: int, text: str):
+    """AI 校对。Returns (checkbox_choices, checkbox_value, issues_state, status)."""
+    if not text or not text.strip():
+        return [], [], [], "没有可校对的文本"
+
+    from src.novel.pipeline import NovelPipeline
+    pipe = NovelPipeline()
+
+    try:
+        project_path = _novel_extract_project_path(project)
+        issues = pipe.proofread_chapter(project_path, int(chapter_num), text=text)
+    except Exception as e:
+        return [], [], [], f"校对失败: {e}"
+
+    if not issues:
+        return [], [], [], "AI 校对完成，未发现问题"
+
+    choices = [_novel_proofread_issue_label(issue) for issue in issues]
+
+    # Store issues + choices together so "select all" can reuse choices
+    state = {"issues": issues, "choices": choices}
+    return choices, choices, state, f"发现 {len(issues)} 个问题"
+
+
+def _novel_edit_select_all(issues_state):
+    """Select all proofread issues."""
+    if not issues_state or not isinstance(issues_state, dict):
+        return []
+    return issues_state.get("choices", [])
+
+
+def _novel_edit_apply_fixes(project: str, chapter_num: int, text: str,
+                            issues_state, selected: list):
+    """应用选中的校对修正。Returns (fixed_text, status)."""
+    if not selected:
+        return text, "未选择任何修正"
+    if not issues_state:
+        return text, "无校对数据"
+
+    issues = issues_state.get("issues", []) if isinstance(issues_state, dict) else issues_state
+
+    # 从 label 提取索引
+    selected_indices = []
+    for label in selected:
+        m = re.match(r'\[(\d+)\]', label)
+        if m:
+            selected_indices.append(int(m.group(1)))
+
+    from src.novel.pipeline import NovelPipeline
+    pipe = NovelPipeline()
+
+    try:
+        project_path = _novel_extract_project_path(project)
+        fixed_text, failures = pipe.apply_proofreading_fixes(
+            project_path, int(chapter_num), text, issues, selected_indices,
+        )
+    except Exception as e:
+        return text, f"修正失败: {e}"
+
+    applied = len(selected_indices) - len(failures)
+    status = f"已应用 {applied}/{len(selected_indices)} 条修正"
+    if failures:
+        status += f"\n失败: {'; '.join(failures[:3])}"
+
+    return fixed_text, status
+
+
+def _novel_edit_save(project: str, chapter_num: int, text: str):
+    """保存编辑后的章节。Returns status."""
+    if not project:
+        return "请先选择项目"
+    if not chapter_num or chapter_num < 1:
+        return "请输入有效章节号"
+    if not text or not text.strip():
+        return "文本为空，未保存"
+
+    from src.novel.pipeline import NovelPipeline
+    pipe = NovelPipeline()
+
+    try:
+        project_path = _novel_extract_project_path(project)
+        result = pipe.save_edited_chapter(project_path, int(chapter_num), text)
+    except Exception as e:
+        return f"保存失败: {e}"
+
+    return f"已保存第{int(chapter_num)}章（{result['char_count']}字），原{result['old_char_count']}字"
+
+
+# ---- 设定编辑（表单化） ----
+
+
+def _extract_char_fields(char: dict) -> tuple:
+    """从角色dict提取表单字段值。"""
+    if not char:
+        return ("", "男", 18, "", "active", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "")
+
+    app = char.get("appearance", {})
+    pers = char.get("personality", {})
+    arc = char.get("character_arc") or {}
+
+    return (
+        char.get("name", ""),
+        char.get("gender", "男"),
+        char.get("age", 18),
+        char.get("occupation", ""),
+        char.get("status", "active"),
+        ", ".join(char.get("alias", [])),
+        # 外貌
+        app.get("height", ""),
+        app.get("build", ""),
+        app.get("hair", ""),
+        app.get("eyes", ""),
+        app.get("clothing_style", ""),
+        ", ".join(app.get("distinctive_features", [])),
+        # 性格
+        ", ".join(pers.get("traits", [])),
+        pers.get("speech_style", ""),
+        pers.get("core_belief", ""),
+        pers.get("motivation", ""),
+        pers.get("flaw", ""),
+        ", ".join(pers.get("catchphrases", [])),
+        # 弧线
+        arc.get("initial_state", ""),
+        arc.get("final_state", ""),
+    )
+
+
+def _extract_chapter_fields(ch: dict) -> tuple:
+    """从章节大纲dict提取表单字段值。"""
+    if not ch:
+        return ("", "", "", "", "")
+    return (
+        ch.get("title", ""),
+        ch.get("mood", "蓄力"),
+        ch.get("goal", ""),
+        "\n".join(ch.get("key_events", [])),
+        ch.get("chapter_summary", ""),
+    )
+
+
+def _novel_setting_load_all(project: str):
+    """加载全部设定到表单。"""
+    if not project:
+        gr.Warning("请先选择项目")
+        empty = gr.update()
+        # 6 world + 1 char_select + 20 char + 4 main + 5 chapter + 1 status = 37
+        return tuple([empty] * 36) + ("请先选择项目",)
+
+    project_path = _novel_extract_project_path(project)
+    novel_json_path = Path(project_path) / "novel.json"
+
+    if not novel_json_path.exists():
+        empty = gr.update()
+        return tuple([empty] * 36) + ("项目文件不存在",)
+
+    data = json.loads(novel_json_path.read_text(encoding="utf-8"))
+
+    # 世界观
+    ws = data.get("world_setting", {})
+    era = ws.get("era", "")
+    location = ws.get("location", "")
+    ps = ws.get("power_system") or {}
+    power_name = ps.get("name", "")
+    levels = ps.get("levels", [])
+    power_df = [[l.get("name", ""), l.get("description", ""), ", ".join(l.get("typical_abilities", []))] for l in levels]
+    if not power_df:
+        power_df = [["", "", ""]]
+    rules = "\n".join(ws.get("rules", []))
+    terms = ws.get("terms", {})
+    terms_df = [[k, v] for k, v in terms.items()]
+    if not terms_df:
+        terms_df = [["", ""]]
+
+    # 角色列表
+    chars = data.get("characters", [])
+    char_choices = [f"{c.get('name', '?')} ({c.get('gender', '?')}, {c.get('occupation', '?')})" for c in chars]
+
+    # 第一个角色的数据（如果有）
+    char_fields = _extract_char_fields(chars[0] if chars else {})
+
+    # 主线设定
+    outline = data.get("outline", {})
+    ms = outline.get("main_storyline", {})
+    main_goal = ms.get("protagonist_goal", "")
+    main_conflict = ms.get("core_conflict", "")
+    main_stakes = ms.get("stakes", "")
+    main_arc = ms.get("character_arc", "")
+
+    # 章节大纲第1章
+    chapters = outline.get("chapters", [])
+    ch_fields = _extract_chapter_fields(chapters[0] if chapters else {})
+
+    return (
+        # 世界观字段 (6)
+        era, location, power_name, power_df, rules, terms_df,
+        # 角色字段 (1 + 20)
+        gr.update(choices=char_choices, value=char_choices[0] if char_choices else None),
+        *char_fields,
+        # 主线设定 (4)
+        main_goal, main_conflict, main_stakes, main_arc,
+        # 章节大纲字段 (5)
+        *ch_fields,
+        # 状态 (1)
+        f"已加载设定（{len(chars)}个角色，{len(chapters)}章大纲）",
+    )
+
+
+def _novel_setting_load_char(project: str, char_select: str):
+    """切换角色时加载该角色数据。"""
+    if not project or not char_select:
+        return _extract_char_fields({})
+
+    project_path = _novel_extract_project_path(project)
+    novel_json_path = Path(project_path) / "novel.json"
+    if not novel_json_path.exists():
+        return _extract_char_fields({})
+
+    data = json.loads(novel_json_path.read_text(encoding="utf-8"))
+    chars = data.get("characters", [])
+
+    # 从 dropdown label 匹配角色
+    for c in chars:
+        label = f"{c.get('name', '?')} ({c.get('gender', '?')}, {c.get('occupation', '?')})"
+        if label == char_select:
+            return _extract_char_fields(c)
+
+    return _extract_char_fields({})
+
+
+def _novel_setting_load_chapter(project: str, ch_num: int):
+    """加载指定章节的大纲。"""
+    if not project or not ch_num:
+        return _extract_chapter_fields({})
+
+    project_path = _novel_extract_project_path(project)
+    novel_json_path = Path(project_path) / "novel.json"
+    if not novel_json_path.exists():
+        return _extract_chapter_fields({})
+
+    data = json.loads(novel_json_path.read_text(encoding="utf-8"))
+    chapters = data.get("outline", {}).get("chapters", [])
+
+    for ch in chapters:
+        if ch.get("chapter_number") == int(ch_num):
+            return _extract_chapter_fields(ch)
+
+    return _extract_chapter_fields({})
+
+
+def _novel_setting_add_char(project: str):
+    """添加新角色。Returns (char_select_update, *char_fields, status)."""
+    if not project:
+        return (gr.update(),) + _extract_char_fields({}) + ("请先选择项目",)
+
+    project_path = _novel_extract_project_path(project)
+    novel_json_path = Path(project_path) / "novel.json"
+    data = json.loads(novel_json_path.read_text(encoding="utf-8"))
+    chars = data.get("characters", [])
+
+    from uuid import uuid4
+    new_char = {
+        "character_id": str(uuid4()),
+        "name": f"新角色{len(chars) + 1}",
+        "alias": [],
+        "gender": "男",
+        "age": 20,
+        "occupation": "待设定",
+        "status": "active",
+        "appearance": {
+            "height": "170cm", "build": "匀称", "hair": "黑色短发",
+            "eyes": "黑色", "clothing_style": "普通", "distinctive_features": [],
+        },
+        "personality": {
+            "traits": ["待设定"], "core_belief": "待设定",
+            "motivation": "待设定", "flaw": "待设定",
+            "speech_style": "普通", "catchphrases": [],
+        },
+        "character_arc": {"initial_state": "待设定", "final_state": "待设定", "turning_points": []},
+        "relationships": [],
+    }
+    chars.append(new_char)
+    data["characters"] = chars
+    novel_json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    char_choices = [f"{c.get('name', '?')} ({c.get('gender', '?')}, {c.get('occupation', '?')})" for c in chars]
+    new_label = char_choices[-1]
+
+    return (
+        gr.update(choices=char_choices, value=new_label),
+        *_extract_char_fields(new_char),
+        f"已添加新角色「{new_char['name']}」，请修改信息后保存",
+    )
+
+
+def _novel_setting_del_char(project: str, char_select: str):
+    """删除选中角色。Returns (char_select_update, *char_fields, status)."""
+    if not project:
+        return (gr.update(),) + _extract_char_fields({}) + ("请先选择项目",)
+    if not char_select:
+        return (gr.update(),) + _extract_char_fields({}) + ("请先选择角色",)
+
+    project_path = _novel_extract_project_path(project)
+    novel_json_path = Path(project_path) / "novel.json"
+    data = json.loads(novel_json_path.read_text(encoding="utf-8"))
+    chars = data.get("characters", [])
+
+    deleted_name = ""
+    new_chars = []
+    for c in chars:
+        label = f"{c.get('name', '?')} ({c.get('gender', '?')}, {c.get('occupation', '?')})"
+        if label == char_select:
+            deleted_name = c.get("name", "?")
+        else:
+            new_chars.append(c)
+
+    if not deleted_name:
+        return (gr.update(),) + _extract_char_fields({}) + ("未找到该角色",)
+
+    data["characters"] = new_chars
+    novel_json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    char_choices = [f"{c.get('name', '?')} ({c.get('gender', '?')}, {c.get('occupation', '?')})" for c in new_chars]
+    first_char = _extract_char_fields(new_chars[0] if new_chars else {})
+
+    return (
+        gr.update(choices=char_choices, value=char_choices[0] if char_choices else None),
+        *first_char,
+        f"已删除角色「{deleted_name}」",
+    )
+
+
+def _novel_setting_save_form(
+    project,
+    # 世界观
+    era, location, power_name, power_levels_df, rules_text, terms_df,
+    # 角色（当前选中的）
+    char_select, char_name, char_gender, char_age, char_occupation, char_status, char_alias,
+    char_height, char_build, char_hair, char_eyes, char_clothing, char_features,
+    char_traits, char_speech, char_belief, char_motivation, char_flaw, char_catchphrases,
+    char_arc_init, char_arc_final,
+    # 主线设定
+    main_goal, main_conflict, main_stakes, main_arc,
+    # 章节大纲（当前选中的）
+    ch_num, ch_title, ch_mood, ch_goal, ch_events_text, ch_summary,
+):
+    """从表单收集数据并保存。"""
+    if not project:
+        return "请先选择项目"
+
+    import shutil
+    from datetime import datetime
+
+    project_path = _novel_extract_project_path(project)
+    novel_json_path = Path(project_path) / "novel.json"
+
+    if not novel_json_path.exists():
+        return "项目文件不存在"
+
+    data = json.loads(novel_json_path.read_text(encoding="utf-8"))
+
+    # 备份
+    backup_dir = Path(project_path) / "revisions"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    shutil.copy2(novel_json_path, backup_dir / f"novel_backup_{timestamp}.json")
+
+    # ---- 保存世界观 ----
+    ws = data.get("world_setting", {})
+    ws["era"] = era or ws.get("era", "")
+    ws["location"] = location or ws.get("location", "")
+
+    # 力量等级
+    if power_name:
+        levels = []
+        if power_levels_df is not None:
+            rows = power_levels_df.values.tolist() if hasattr(power_levels_df, 'values') else power_levels_df
+            for i, row in enumerate(rows):
+                if len(row) >= 3 and row[0]:  # 有名称才算有效行
+                    levels.append({
+                        "rank": i + 1,
+                        "name": str(row[0]),
+                        "description": str(row[1]) if row[1] else str(row[0]),
+                        "typical_abilities": [a.strip() for a in str(row[2]).split(",") if a.strip()] if row[2] else [],
+                    })
+        ws["power_system"] = {"name": power_name, "levels": levels} if levels else {"name": power_name, "levels": [{"rank": 1, "name": power_name, "description": power_name}]}
+
+    # 规则
+    if rules_text is not None:
+        ws["rules"] = [r.strip() for r in rules_text.split("\n") if r.strip()]
+
+    # 专有名词
+    if terms_df is not None:
+        terms = {}
+        rows = terms_df.values.tolist() if hasattr(terms_df, 'values') else terms_df
+        for row in rows:
+            if len(row) >= 2 and row[0] and str(row[0]).strip():
+                terms[str(row[0]).strip()] = str(row[1]).strip() if row[1] else ""
+        ws["terms"] = terms
+
+    data["world_setting"] = ws
+
+    # ---- 保存角色（仅当前选中的）----
+    if char_select and char_name:
+        chars = data.get("characters", [])
+        # 找到当前角色
+        target_idx = None
+        for i, c in enumerate(chars):
+            label = f"{c.get('name', '?')} ({c.get('gender', '?')}, {c.get('occupation', '?')})"
+            if label == char_select:
+                target_idx = i
+                break
+
+        if target_idx is not None:
+            c = chars[target_idx]
+            c["name"] = char_name
+            c["gender"] = char_gender or "男"
+            c["age"] = int(char_age) if char_age else 18
+            c["occupation"] = char_occupation or c.get("occupation", "")
+            c["status"] = char_status or "active"
+            c["alias"] = [a.strip() for a in (char_alias or "").split(",") if a.strip()]
+
+            app = c.get("appearance", {})
+            app["height"] = char_height or app.get("height", "")
+            app["build"] = char_build or app.get("build", "")
+            app["hair"] = char_hair or app.get("hair", "")
+            app["eyes"] = char_eyes or app.get("eyes", "")
+            app["clothing_style"] = char_clothing or app.get("clothing_style", "")
+            app["distinctive_features"] = [f.strip() for f in (char_features or "").split(",") if f.strip()]
+            c["appearance"] = app
+
+            pers = c.get("personality", {})
+            pers["traits"] = [t.strip() for t in (char_traits or "").split(",") if t.strip()]
+            pers["speech_style"] = char_speech or pers.get("speech_style", "")
+            pers["core_belief"] = char_belief or pers.get("core_belief", "")
+            pers["motivation"] = char_motivation or pers.get("motivation", "")
+            pers["flaw"] = char_flaw or pers.get("flaw", "")
+            pers["catchphrases"] = [p.strip() for p in (char_catchphrases or "").split(",") if p.strip()]
+            c["personality"] = pers
+
+            if char_arc_init or char_arc_final:
+                arc = c.get("character_arc") or {}
+                arc["initial_state"] = char_arc_init or arc.get("initial_state", "")
+                arc["final_state"] = char_arc_final or arc.get("final_state", "")
+                if "turning_points" not in arc:
+                    arc["turning_points"] = []
+                c["character_arc"] = arc
+
+            chars[target_idx] = c
+            data["characters"] = chars
+
+    # ---- 保存主线设定 ----
+    if "outline" in data:
+        ms = data["outline"].get("main_storyline", {})
+        if main_goal:
+            ms["protagonist_goal"] = main_goal
+        if main_conflict:
+            ms["core_conflict"] = main_conflict
+        if main_stakes:
+            ms["stakes"] = main_stakes
+        if main_arc:
+            ms["character_arc"] = main_arc
+        data["outline"]["main_storyline"] = ms
+
+    # ---- 保存章节大纲（仅当前选中的）----
+    if ch_num and ch_title:
+        chapters = data.get("outline", {}).get("chapters", [])
+        ch_num_int = int(ch_num)
+        for ch in chapters:
+            if ch.get("chapter_number") == ch_num_int:
+                ch["title"] = ch_title
+                ch["mood"] = ch_mood or ch.get("mood", "蓄力")
+                ch["goal"] = ch_goal or ch.get("goal", "")
+                ch["key_events"] = [e.strip() for e in (ch_events_text or "").split("\n") if e.strip()]
+                ch["chapter_summary"] = ch_summary or ""
+                break
+        if "outline" in data:
+            data["outline"]["chapters"] = chapters
+
+    # 保存
+    from datetime import datetime as _dt
+    data["updated_at"] = _dt.now().isoformat()
+    novel_json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return "设定已保存（旧版本已备份）"
+
+
+def _novel_setting_analyze_form(
+    project,
+    era, location, power_name, power_levels_df, rules_text, terms_df,
+):
+    """从世界观表单构建 JSON 并评估影响。"""
+    if not project:
+        return "", {}, "请先选择项目"
+
+    # 构建新的世界观 JSON
+    levels = []
+    if power_levels_df is not None:
+        rows = power_levels_df.values.tolist() if hasattr(power_levels_df, 'values') else power_levels_df
+        for i, row in enumerate(rows):
+            if len(row) >= 3 and row[0]:
+                levels.append({
+                    "rank": i + 1,
+                    "name": str(row[0]),
+                    "description": str(row[1]) if row[1] else str(row[0]),
+                    "typical_abilities": [a.strip() for a in str(row[2]).split(",") if a.strip()] if row[2] else [],
+                })
+
+    rules = [r.strip() for r in (rules_text or "").split("\n") if r.strip()]
+    terms = {}
+    if terms_df is not None:
+        rows = terms_df.values.tolist() if hasattr(terms_df, 'values') else terms_df
+        for row in rows:
+            if len(row) >= 2 and row[0] and str(row[0]).strip():
+                terms[str(row[0]).strip()] = str(row[1]).strip() if row[1] else ""
+
+    new_ws = {
+        "era": era or "",
+        "location": location or "",
+        "rules": rules,
+        "terms": terms,
+    }
+    if power_name and levels:
+        new_ws["power_system"] = {"name": power_name, "levels": levels}
+
+    new_value_json = json.dumps(new_ws, ensure_ascii=False, indent=2)
+
+    from src.novel.pipeline import NovelPipeline
+    pipe = NovelPipeline()
+    try:
+        project_path = _novel_extract_project_path(project)
+        impact = pipe.analyze_setting_impact(project_path, "world_setting", new_value_json)
+    except Exception as e:
+        return "", {}, f"分析失败: {e}"
+
+    # 格式化影响报告
+    affected = impact.get("affected_chapters", [])
+    conflicts = impact.get("conflicts", [])
+    severity = impact.get("severity", "low")
+    summary = impact.get("summary", "")
+
+    severity_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(severity, "⚪")
+
+    md = f"### 影响评估报告\n\n"
+    md += f"**严重度**: {severity_icon} {severity}\n\n"
+    md += f"**总结**: {summary}\n\n"
+
+    if affected:
+        md += f"**受影响章节**: {', '.join(f'第{ch}章' for ch in affected)}\n\n"
+    else:
+        md += "**受影响章节**: 无\n\n"
+
+    if conflicts:
+        md += "**具体矛盾**:\n\n"
+        for c in conflicts:
+            md += f"- **第{c['chapter_number']}章**: {c['reason']}\n"
+            if c.get('conflict_text'):
+                md += f"  - 矛盾内容: {c['conflict_text'][:100]}\n"
+            if c.get('suggested_fix'):
+                md += f"  - 建议修改: {c['suggested_fix'][:100]}\n"
+            md += "\n"
+
+    return md, impact, f"分析完成：{len(affected)} 章受影响"
+
+
+def _novel_setting_rewrite(project: str, impact_state: dict):
+    """回溯修改受影响章节。Returns status."""
+    if not project:
+        return "请先选择项目"
+
+    affected = impact_state.get("affected_chapters", [])
+    if not affected:
+        return "无受影响章节需要修改"
+
+    from src.novel.pipeline import NovelPipeline
+    pipe = NovelPipeline()
+
+    try:
+        project_path = _novel_extract_project_path(project)
+        result = pipe.rewrite_affected_chapters(project_path, impact_state)
+    except Exception as e:
+        return f"回溯修改失败: {e}"
+
+    rewritten = result.get("rewritten", [])
+    errors = result.get("errors", [])
+
+    status = f"已重写 {len(rewritten)} 章"
+    if rewritten:
+        for r in rewritten[:5]:
+            status += f"\n  第{r['chapter_number']}章: {r['old_chars']}→{r['new_chars']}字"
+    if errors:
+        status += f"\n失败 {len(errors)} 章: {'; '.join(errors[:3])}"
+
+    return status
+
+
+_AI_SETTING_SYSTEM = """你是一位小说编辑助手。用户会给你当前小说的设定（JSON），以及一条修改指令。
+你需要理解指令，修改 JSON 中对应的字段，然后返回：
+1. 修改后的完整 JSON（保持原有结构不变，只改需要改的部分）
+2. 修改摘要
+
+返回格式（严格 JSON）：
+{
+  "modified_json": { ... 修改后的完整设定 ... },
+  "changes": [
+    {"field": "修改的字段路径", "old": "原值摘要", "new": "新值摘要"}
+  ]
+}
+
+注意：
+- 只改用户明确要求改的部分，其他保持不变
+- 如果指令涉及世界规则，修改 world_setting.rules
+- 如果指令涉及角色，修改 characters 数组中对应角色
+- 如果指令涉及大纲/章节，修改 outline.chapters 或 outline.main_storyline
+- 如果要添加新角色，在 characters 数组末尾添加完整的角色对象
+- modified_json 必须包含原始 JSON 的所有顶层字段"""
+
+_AI_SETTING_USER = """## 当前设定
+
+```json
+{current_json}
+```
+
+## 修改指令
+
+{instruction}
+
+请按照系统提示的格式返回修改后的 JSON 和变更摘要。"""
+
+
+def _novel_setting_ai_modify(project: str, instruction: str):
+    """AI 智能修改设定。Returns (result_md, load_all_outputs..., status)."""
+    if not project:
+        empty = gr.update()
+        return ("", *([empty] * 36), "请先选择项目")
+    if not instruction or not instruction.strip():
+        empty = gr.update()
+        return ("", *([empty] * 36), "请输入修改指令")
+
+    project_path = _novel_extract_project_path(project)
+    novel_json_path = Path(project_path) / "novel.json"
+
+    if not novel_json_path.exists():
+        empty = gr.update()
+        return ("", *([empty] * 36), "项目文件不存在")
+
+    data = json.loads(novel_json_path.read_text(encoding="utf-8"))
+
+    # 精简 JSON：只发送设定相关字段，不发 chapters 全文等大字段
+    setting_keys = ["world_setting", "characters", "outline", "title", "genre", "theme"]
+    setting_data = {k: data.get(k) for k in setting_keys if k in data}
+    # outline 中章节大纲可能很大，只保留前50章
+    if "outline" in setting_data and "chapters" in setting_data["outline"]:
+        setting_data["outline"]["chapters"] = setting_data["outline"]["chapters"][:50]
+
+    current_json = json.dumps(setting_data, ensure_ascii=False, indent=2)
+
+    # 限制发送长度，避免 token 爆炸
+    if len(current_json) > 15000:
+        current_json = current_json[:15000] + "\n... (已截断)"
+
+    from src.novel.config import load_novel_config
+    from src.llm import create_llm_client
+    config = load_novel_config()
+    llm = create_llm_client(config.llm.to_dict())
+
+    messages = [
+        {"role": "system", "content": _AI_SETTING_SYSTEM},
+        {"role": "user", "content": _AI_SETTING_USER.format(
+            current_json=current_json, instruction=instruction,
+        )},
+    ]
+
+    try:
+        response = llm.chat(messages, temperature=0.3, json_mode=True, max_tokens=8192)
+        raw = response.content
+    except Exception as e:
+        empty = gr.update()
+        return ("", *([empty] * 36), f"AI 调用失败: {e}")
+
+    # 解析返回
+    import re as _re
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        match = _re.search(r'\{.*\}', raw, _re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group())
+            except json.JSONDecodeError:
+                empty = gr.update()
+                return ("", *([empty] * 36), "AI 返回格式错误，请重试")
+        else:
+            empty = gr.update()
+            return ("", *([empty] * 36), "AI 返回格式错误，请重试")
+
+    modified = result.get("modified_json", {})
+    changes = result.get("changes", [])
+
+    if not modified:
+        empty = gr.update()
+        return ("", *([empty] * 36), "AI 未返回修改结果")
+
+    # 备份旧版本
+    import shutil
+    from datetime import datetime as _dt
+    backup_dir = Path(project_path) / "revisions"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+    shutil.copy2(novel_json_path, backup_dir / f"novel_backup_{timestamp}.json")
+
+    # 合并修改到原数据（只覆盖 AI 返回的字段）
+    for key in setting_keys:
+        if key in modified:
+            data[key] = modified[key]
+
+    data["updated_at"] = _dt.now().isoformat()
+    novel_json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 格式化变更摘要
+    md = "### AI 修改完成\n\n"
+    if changes:
+        for c in changes:
+            md += f"- **{c.get('field', '?')}**: {c.get('old', '?')} → {c.get('new', '?')}\n"
+    else:
+        md += "已应用修改（AI 未提供详细变更列表）\n"
+
+    # 重新加载表单
+    load_result = _novel_setting_load_all(project)
+
+    return (md, *load_result[:-1], f"AI 修改完成，已自动保存（旧版本已备份）")
 
 
 def _extract_novel_polish_result(task: dict) -> str:
@@ -3357,7 +4146,7 @@ def create_ui() -> gr.Blocks:
                             novel_words = gr.Slider(
                                 label="目标字数（万字）",
                                 minimum=0.5,
-                                maximum=50,
+                                maximum=500,
                                 step=0.5,
                                 value=10,
                                 scale=1,
@@ -3404,10 +4193,10 @@ def create_ui() -> gr.Blocks:
                         novel_batch_size = gr.Slider(
                             label="本次生成章节数",
                             minimum=1,
-                            maximum=50,
+                            maximum=100,
                             step=1,
                             value=20,
-                            info="从当前进度自动续写，每次写一批",
+                            info="从当前进度自动续写，每次写一批（超长篇可适当增大）",
                         )
                         novel_silent = gr.Checkbox(
                             label="静默模式（跳过审核暂停）",
@@ -3512,6 +4301,164 @@ def create_ui() -> gr.Blocks:
                                 novel_diff_display = gr.Markdown(
                                     value="*选择章节号后点击查看修改前后对比*",
                                 )
+                            with gr.Tab("章节编辑"):
+                                gr.Markdown("*加载章节 → 手动编辑 → AI 校对 → 选择修正 → 保存*")
+                                with gr.Row():
+                                    novel_edit_ch_num = gr.Number(
+                                        label="章节号", value=1, minimum=1, precision=0, scale=1,
+                                    )
+                                    novel_edit_load_btn = gr.Button("加载章节", size="sm", scale=1)
+                                    novel_edit_save_btn = gr.Button("保存修改", size="sm", variant="primary", scale=1)
+                                novel_edit_text = gr.Textbox(
+                                    label="章节文本（可编辑）",
+                                    lines=20,
+                                    max_lines=50,
+                                    interactive=True,
+                                    placeholder="点击「加载章节」开始编辑...",
+                                )
+                                with gr.Row():
+                                    novel_edit_proofread_btn = gr.Button(
+                                        "AI 校对", variant="secondary", size="sm", scale=2,
+                                    )
+                                    novel_edit_select_all_btn = gr.Button("全选", size="sm", scale=1)
+                                    novel_edit_select_none_btn = gr.Button("全不选", size="sm", scale=1)
+                                    novel_edit_apply_btn = gr.Button(
+                                        "应用修正", variant="primary", size="sm", scale=2,
+                                    )
+                                novel_edit_issues = gr.CheckboxGroup(
+                                    label="AI 校对问题",
+                                    choices=[],
+                                    value=[],
+                                    interactive=True,
+                                )
+                                novel_edit_issues_state = gr.State([])  # 存储完整 issues 数据 + choices
+                                novel_edit_status = gr.Textbox(
+                                    label="操作状态", interactive=False, lines=2,
+                                )
+                            with gr.Tab("设定编辑"):
+                                gr.Markdown("*编辑世界观/角色/大纲设定，修改后可评估对已写章节的影响*")
+
+                                with gr.Tabs():
+                                    # ---- 世界观 子Tab ----
+                                    with gr.Tab("世界观"):
+                                        with gr.Row():
+                                            novel_set_world_era = gr.Textbox(label="时代背景", placeholder="古代/现代/未来/架空", scale=1)
+                                            novel_set_world_location = gr.Textbox(label="地域背景", placeholder="如：苍穹大陆", scale=1)
+                                        with gr.Row():
+                                            novel_set_world_power_name = gr.Textbox(label="力量体系名称", placeholder="如：修炼境界", scale=1)
+                                        novel_set_world_power_levels = gr.Dataframe(
+                                            headers=["等级名称", "描述", "代表能力"],
+                                            datatype=["str", "str", "str"],
+                                            col_count=(3, "fixed"),
+                                            row_count=(1, "dynamic"),
+                                            label="力量等级（可增删行）",
+                                            interactive=True,
+                                        )
+                                        novel_set_world_rules = gr.Textbox(
+                                            label="世界规则（每行一条）",
+                                            lines=4,
+                                            placeholder="每行写一条规则，如：\n修炼需要灵石\n突破需要天材地宝\n飞升需渡天劫",
+                                            interactive=True,
+                                        )
+                                        novel_set_world_terms = gr.Dataframe(
+                                            headers=["名词", "定义"],
+                                            datatype=["str", "str"],
+                                            col_count=(2, "fixed"),
+                                            row_count=(1, "dynamic"),
+                                            label="专有名词表（可增删行）",
+                                            interactive=True,
+                                        )
+
+                                    # ---- 角色 子Tab ----
+                                    with gr.Tab("角色"):
+                                        with gr.Row():
+                                            novel_set_char_select = gr.Dropdown(label="选择角色", choices=[], scale=2)
+                                            novel_set_char_load_btn = gr.Button("加载", size="sm", scale=1)
+                                            novel_set_char_add_btn = gr.Button("添加角色", size="sm", variant="secondary", scale=1)
+                                            novel_set_char_del_btn = gr.Button("删除角色", size="sm", variant="stop", scale=1)
+                                        gr.Markdown("**基本信息**")
+                                        with gr.Row():
+                                            novel_set_char_name = gr.Textbox(label="姓名", scale=1)
+                                            novel_set_char_gender = gr.Radio(label="性别", choices=["男", "女", "其他"], scale=1)
+                                            novel_set_char_age = gr.Number(label="年龄", precision=0, scale=1)
+                                        with gr.Row():
+                                            novel_set_char_occupation = gr.Textbox(label="职业", scale=1)
+                                            novel_set_char_status = gr.Dropdown(
+                                                label="状态", choices=["active", "retired", "deceased", "absent"], value="active", scale=1,
+                                            )
+                                            novel_set_char_alias = gr.Textbox(label="别名（逗号分隔）", placeholder="如：少主,天才少年", scale=1)
+                                        gr.Markdown("**外貌**")
+                                        with gr.Row():
+                                            novel_set_char_height = gr.Textbox(label="身高", placeholder="175cm", scale=1)
+                                            novel_set_char_build = gr.Textbox(label="体型", placeholder="瘦削/魁梧/匀称", scale=1)
+                                            novel_set_char_hair = gr.Textbox(label="发型", placeholder="黑色长发", scale=1)
+                                        with gr.Row():
+                                            novel_set_char_eyes = gr.Textbox(label="眼睛", placeholder="黑色", scale=1)
+                                            novel_set_char_clothing = gr.Textbox(label="着装风格", placeholder="白色长袍", scale=1)
+                                            novel_set_char_features = gr.Textbox(label="显著特征（逗号分隔）", placeholder="左脸刀疤,右手戴玉扳指", scale=1)
+                                        gr.Markdown("**性格**")
+                                        with gr.Row():
+                                            novel_set_char_traits = gr.Textbox(label="性格标签（逗号分隔）", placeholder="坚毅,沉稳,重情义", scale=2)
+                                            novel_set_char_speech = gr.Textbox(label="语言风格", placeholder="冷淡简短/豪爽/文绉绉", scale=1)
+                                        with gr.Row():
+                                            novel_set_char_belief = gr.Textbox(label="核心信念", placeholder="实力为尊", scale=1)
+                                            novel_set_char_motivation = gr.Textbox(label="动机", placeholder="为家族复仇", scale=1)
+                                            novel_set_char_flaw = gr.Textbox(label="缺陷", placeholder="过于冲动", scale=1)
+                                        with gr.Row():
+                                            novel_set_char_catchphrases = gr.Textbox(label="口头禅（逗号分隔）", placeholder="如：不服来战", scale=1)
+                                        gr.Markdown("**成长弧线**")
+                                        with gr.Row():
+                                            novel_set_char_arc_init = gr.Textbox(label="初始状态", placeholder="懦弱自卑", scale=1)
+                                            novel_set_char_arc_final = gr.Textbox(label="最终状态", placeholder="自信坚毅", scale=1)
+
+                                    # ---- 主线 & 章节大纲 子Tab ----
+                                    with gr.Tab("主线 & 大纲"):
+                                        gr.Markdown("**主线设定**")
+                                        with gr.Row():
+                                            novel_set_main_goal = gr.Textbox(label="主角目标", placeholder="如：成为天下第一", scale=1)
+                                            novel_set_main_conflict = gr.Textbox(label="核心矛盾", placeholder="如：正邪对立", scale=1)
+                                        with gr.Row():
+                                            novel_set_main_stakes = gr.Textbox(label="赌注", placeholder="如：家族存亡、世界毁灭", scale=1)
+                                            novel_set_main_arc = gr.Textbox(label="主角成长弧线", placeholder="如：从废物到强者", scale=1)
+                                        gr.Markdown("---")
+                                        gr.Markdown("**章节大纲**")
+                                        with gr.Row():
+                                            novel_set_ch_num = gr.Number(label="章节号", value=1, minimum=1, precision=0, scale=1)
+                                            novel_set_ch_load_btn = gr.Button("加载", size="sm", scale=1)
+                                        with gr.Row():
+                                            novel_set_ch_title = gr.Textbox(label="章节标题", scale=2)
+                                            novel_set_ch_mood = gr.Dropdown(
+                                                label="情绪基调",
+                                                choices=["蓄力", "小爽", "大爽", "过渡", "虐心", "反转", "日常"],
+                                                scale=1,
+                                            )
+                                        novel_set_ch_goal = gr.Textbox(label="本章目标", lines=2, placeholder="本章要达成什么...", interactive=True)
+                                        novel_set_ch_events = gr.Textbox(
+                                            label="关键事件（每行一条）", lines=4,
+                                            placeholder="每行写一个事件，如：\n主角遇到神秘老人\n获得上古传承\n突破到筑基期",
+                                            interactive=True,
+                                        )
+                                        novel_set_ch_summary = gr.Textbox(label="章节摘要", lines=3, placeholder="本章内容概述（2-3句话）", interactive=True)
+
+                                # ---- AI 智能修改 ----
+                                gr.Markdown("---")
+                                gr.Markdown("**AI 修改设定** — 用自然语言描述你想改什么，AI 自动修改对应字段")
+                                novel_set_ai_input = gr.Textbox(
+                                    label="修改指令",
+                                    lines=3,
+                                    placeholder="例：\n• 系统每天只能使用3次，使用后消耗精神力\n• 主角年龄改成16岁\n• 第5章的目标改成：主角首次使用系统",
+                                    interactive=True,
+                                )
+                                with gr.Row():
+                                    novel_set_ai_btn = gr.Button("AI 修改", variant="primary", size="sm", scale=2)
+                                    novel_setting_load_btn = gr.Button("加载设定", size="sm", variant="secondary", scale=1)
+                                    novel_setting_save_btn = gr.Button("手动保存", size="sm", variant="secondary", scale=1)
+                                    novel_setting_analyze_btn = gr.Button("评估影响", variant="secondary", size="sm", scale=1)
+                                    novel_setting_rewrite_btn = gr.Button("回溯修改受影响章节", variant="stop", size="sm", scale=1)
+                                novel_set_ai_result = gr.Markdown(value="")
+                                novel_setting_impact = gr.Markdown(value="")
+                                novel_setting_impact_state = gr.State({})
+                                novel_setting_status = gr.Textbox(label="操作状态", interactive=False, lines=2)
 
                         with gr.Row():
                             novel_refresh_btn = gr.Button(
@@ -3531,15 +4478,6 @@ def create_ui() -> gr.Blocks:
             # Tab 3: PPT 生成 (V2: 双模式 + 大纲编辑)
             # ============================================================
             with gr.Tab("PPT生成", id="tab_ppt"):
-
-                gr.HTML(
-                    '<div style="background: linear-gradient(135deg, #e74c3c, #c0392b); '
-                    'border: 1px solid #a93226; border-radius: 8px; padding: 14px 20px; '
-                    'margin-bottom: 12px; text-align: center; font-size: 17px; '
-                    'font-weight: bold; color: #ffffff; letter-spacing: 2px;">'
-                    '🚧 该功能正在开发中，敬请期待 🚧'
-                    '</div>'
-                )
 
                 with gr.Row(equal_height=False):
                     # ============== Left: Input ==============
@@ -3640,16 +4578,16 @@ def create_ui() -> gr.Blocks:
                         # --- Generate outline button ---
                         with gr.Row():
                             ppt_outline_btn = gr.Button(
-                                "生成大纲（开发中）",
+                                "生成大纲",
                                 variant="primary",
                                 size="lg",
                                 elem_classes="story-btn",
                                 scale=4,
-                                interactive=False,
+                                interactive=True,
                             )
                             ppt_new_btn = gr.Button(
                                 "新建", variant="secondary", size="lg", scale=1, min_width=80,
-                                interactive=False,
+                                interactive=True,
                             )
 
                         # --- Outline editor (initially hidden) ---
@@ -3676,10 +4614,10 @@ def create_ui() -> gr.Blocks:
                                 )
                             with gr.Row():
                                 ppt_confirm_btn = gr.Button(
-                                    "确认并生成 PPT（开发中）",
+                                    "确认并生成 PPT",
                                     variant="primary",
                                     size="lg",
-                                    interactive=False,
+                                    interactive=True,
                                     elem_classes="story-btn",
                                 )
                                 ppt_deck_type = gr.Radio(
@@ -3708,6 +4646,25 @@ def create_ui() -> gr.Blocks:
                         )
 
                         with gr.Tabs():
+                            with gr.Tab("HTML 预览"):
+                                ppt_preview_html = gr.HTML(
+                                    value='<div style="text-align:center;color:#999;padding:40px;">生成后将显示 HTML 预览</div>',
+                                )
+                                with gr.Row():
+                                    ppt_prev_btn = gr.Button("上一页", size="sm", scale=1)
+                                    ppt_page_info = gr.Textbox(
+                                        value="- / -", interactive=False, scale=2,
+                                        show_label=False,
+                                    )
+                                    ppt_next_btn = gr.Button("下一页", size="sm", scale=1)
+                                with gr.Row():
+                                    ppt_export_btn = gr.Button(
+                                        "导出 PPTX", variant="primary", size="lg",
+                                        interactive=False,
+                                    )
+                                    ppt_download_file = gr.File(
+                                        label="下载 PPTX", visible=False,
+                                    )
                             with gr.Tab("生成结果"):
                                 ppt_output_file = gr.File(
                                     label="下载 PPT",
@@ -3852,6 +4809,9 @@ def create_ui() -> gr.Blocks:
         ppt_task_id = gr.State("")
         ppt_project_id = gr.State("")
         ppt_editable_outline = gr.State(None)
+        ppt_html_path = gr.State("")
+        ppt_current_page = gr.State(1)
+        ppt_total_pages = gr.State(0)
 
         # Timer for polling (active when any task is running)
         poll_timer = gr.Timer(value=2, active=False)
@@ -3945,8 +4905,8 @@ def create_ui() -> gr.Blocks:
                 "从主题生成",    # ppt_mode
                 "",              # ppt_topic_input
                 "",              # ppt_text_input
-                gr.update(interactive=False, value="生成大纲（开发中）"),  # ppt_outline_btn
-                gr.update(interactive=False, value="确认并生成 PPT（开发中）"),  # ppt_confirm_btn
+                gr.update(interactive=True, value="生成大纲"),  # ppt_outline_btn
+                gr.update(interactive=True, value="确认并生成 PPT"),  # ppt_confirm_btn
                 gr.update(visible=False),  # ppt_outline_editor
                 "",              # ppt_status_box
                 None,            # ppt_output_file
@@ -3958,6 +4918,14 @@ def create_ui() -> gr.Blocks:
                 None,            # ppt_editable_outline
                 gr.update(visible=True),   # ppt_topic_group
                 gr.update(visible=False),  # ppt_doc_group
+                # New HTML preview components
+                '<div style="text-align:center;color:#999;padding:40px;">生成后将显示 HTML 预览</div>',  # ppt_preview_html
+                "- / -",         # ppt_page_info
+                gr.update(interactive=False),  # ppt_export_btn
+                gr.update(visible=False, value=None),  # ppt_download_file
+                "",              # ppt_html_path
+                1,               # ppt_current_page
+                0,               # ppt_total_pages
             )
 
         ppt_new_btn.click(
@@ -3971,6 +4939,10 @@ def create_ui() -> gr.Blocks:
                 ppt_quality_display, ppt_info_display,
                 ppt_task_id, ppt_project_id, ppt_editable_outline,
                 ppt_topic_group, ppt_doc_group,
+                # New HTML preview components
+                ppt_preview_html, ppt_page_info,
+                ppt_export_btn, ppt_download_file,
+                ppt_html_path, ppt_current_page, ppt_total_pages,
             ],
         )
 
@@ -4275,6 +5247,173 @@ def create_ui() -> gr.Blocks:
             outputs=[novel_diff_display],
         )
 
+        # ====== 章节编辑事件 ======
+        novel_edit_load_btn.click(
+            fn=_novel_edit_load_chapter,
+            inputs=[novel_project_select, novel_edit_ch_num],
+            outputs=[novel_edit_text, novel_edit_status],
+        )
+
+        novel_edit_proofread_btn.click(
+            fn=_novel_edit_proofread,
+            inputs=[novel_project_select, novel_edit_ch_num, novel_edit_text],
+            outputs=[novel_edit_issues, novel_edit_issues, novel_edit_issues_state, novel_edit_status],
+        )
+
+        novel_edit_select_all_btn.click(
+            fn=_novel_edit_select_all,
+            inputs=[novel_edit_issues_state],
+            outputs=[novel_edit_issues],
+        )
+
+        novel_edit_select_none_btn.click(
+            fn=lambda: [],
+            outputs=[novel_edit_issues],
+        )
+
+        novel_edit_apply_btn.click(
+            fn=_novel_edit_apply_fixes,
+            inputs=[
+                novel_project_select, novel_edit_ch_num, novel_edit_text,
+                novel_edit_issues_state, novel_edit_issues,
+            ],
+            outputs=[novel_edit_text, novel_edit_status],
+        )
+
+        novel_edit_save_btn.click(
+            fn=_novel_edit_save,
+            inputs=[novel_project_select, novel_edit_ch_num, novel_edit_text],
+            outputs=[novel_edit_status],
+        )
+
+        # ====== 设定编辑事件（表单化） ======
+
+        # 所有世界观、角色、章节大纲表单字段
+        _world_inputs = [
+            novel_set_world_era, novel_set_world_location, novel_set_world_power_name,
+            novel_set_world_power_levels, novel_set_world_rules, novel_set_world_terms,
+        ]
+
+        _char_outputs = [
+            novel_set_char_name, novel_set_char_gender, novel_set_char_age,
+            novel_set_char_occupation, novel_set_char_status, novel_set_char_alias,
+            novel_set_char_height, novel_set_char_build, novel_set_char_hair,
+            novel_set_char_eyes, novel_set_char_clothing, novel_set_char_features,
+            novel_set_char_traits, novel_set_char_speech,
+            novel_set_char_belief, novel_set_char_motivation, novel_set_char_flaw,
+            novel_set_char_catchphrases,
+            novel_set_char_arc_init, novel_set_char_arc_final,
+        ]
+
+        _main_outputs = [
+            novel_set_main_goal, novel_set_main_conflict,
+            novel_set_main_stakes, novel_set_main_arc,
+        ]
+
+        _ch_outputs = [
+            novel_set_ch_title, novel_set_ch_mood, novel_set_ch_goal,
+            novel_set_ch_events, novel_set_ch_summary,
+        ]
+
+        _char_add_del_outputs = [novel_set_char_select, *_char_outputs, novel_setting_status]
+
+        # 加载全部设定
+        novel_setting_load_btn.click(
+            fn=_novel_setting_load_all,
+            inputs=[novel_project_select],
+            outputs=[
+                *_world_inputs,
+                novel_set_char_select,
+                *_char_outputs,
+                *_main_outputs,
+                *_ch_outputs,
+                novel_setting_status,
+            ],
+        )
+
+        # 切换角色
+        novel_set_char_select.change(
+            fn=_novel_setting_load_char,
+            inputs=[novel_project_select, novel_set_char_select],
+            outputs=_char_outputs,
+        )
+        novel_set_char_load_btn.click(
+            fn=_novel_setting_load_char,
+            inputs=[novel_project_select, novel_set_char_select],
+            outputs=_char_outputs,
+        )
+
+        # 添加/删除角色
+        novel_set_char_add_btn.click(
+            fn=_novel_setting_add_char,
+            inputs=[novel_project_select],
+            outputs=_char_add_del_outputs,
+        )
+        novel_set_char_del_btn.click(
+            fn=_novel_setting_del_char,
+            inputs=[novel_project_select, novel_set_char_select],
+            outputs=_char_add_del_outputs,
+        )
+
+        # 加载指定章节大纲
+        novel_set_ch_load_btn.click(
+            fn=_novel_setting_load_chapter,
+            inputs=[novel_project_select, novel_set_ch_num],
+            outputs=_ch_outputs,
+        )
+
+        # 保存
+        novel_setting_save_btn.click(
+            fn=_novel_setting_save_form,
+            inputs=[
+                novel_project_select,
+                *_world_inputs,
+                novel_set_char_select,
+                novel_set_char_name, novel_set_char_gender, novel_set_char_age,
+                novel_set_char_occupation, novel_set_char_status, novel_set_char_alias,
+                novel_set_char_height, novel_set_char_build, novel_set_char_hair,
+                novel_set_char_eyes, novel_set_char_clothing, novel_set_char_features,
+                novel_set_char_traits, novel_set_char_speech,
+                novel_set_char_belief, novel_set_char_motivation, novel_set_char_flaw,
+                novel_set_char_catchphrases,
+                novel_set_char_arc_init, novel_set_char_arc_final,
+                *_main_outputs,
+                novel_set_ch_num,
+                novel_set_ch_title, novel_set_ch_mood, novel_set_ch_goal,
+                novel_set_ch_events, novel_set_ch_summary,
+            ],
+            outputs=[novel_setting_status],
+        )
+
+        # 评估影响
+        novel_setting_analyze_btn.click(
+            fn=_novel_setting_analyze_form,
+            inputs=[novel_project_select, *_world_inputs],
+            outputs=[novel_setting_impact, novel_setting_impact_state, novel_setting_status],
+        )
+
+        # 回溯修改（不变）
+        novel_setting_rewrite_btn.click(
+            fn=_novel_setting_rewrite,
+            inputs=[novel_project_select, novel_setting_impact_state],
+            outputs=[novel_setting_status],
+        )
+
+        # AI 智能修改
+        novel_set_ai_btn.click(
+            fn=_novel_setting_ai_modify,
+            inputs=[novel_project_select, novel_set_ai_input],
+            outputs=[
+                novel_set_ai_result,
+                *_world_inputs,
+                novel_set_char_select,
+                *_char_outputs,
+                *_main_outputs,
+                *_ch_outputs,
+                novel_setting_status,
+            ],
+        )
+
         # ====== Director event wiring (submit to task queue) ======
         def _on_director_submit(
             insp, dur, budget, llm_svc, img_svc,
@@ -4466,6 +5605,76 @@ def create_ui() -> gr.Blocks:
             ],
         )
 
+        # ====== PPT HTML Preview Navigation ======
+
+        def _ppt_load_page(html_path_val, page_num):
+            """Load HTML file and inject JS to show specific page."""
+            if not html_path_val or not Path(html_path_val).exists():
+                return '<div style="text-align:center;color:#999;">预览不可用</div>'
+            html_content = Path(html_path_val).read_text(encoding="utf-8")
+            # Replace the initial showSlide(0) with showSlide(page_num-1)
+            html_content = html_content.replace(
+                "showSlide(0);",
+                f"showSlide({page_num - 1});"
+            )
+            return html_content
+
+        def _ppt_prev_page(current_page_val, total_pages_val, html_path_val):
+            """Go to previous page."""
+            if current_page_val <= 1:
+                return gr.update(), gr.update(), current_page_val
+            new_page = current_page_val - 1
+            html_content = _ppt_load_page(html_path_val, new_page)
+            return html_content, f"{new_page} / {total_pages_val}", new_page
+
+        def _ppt_next_page(current_page_val, total_pages_val, html_path_val):
+            """Go to next page."""
+            if current_page_val >= total_pages_val:
+                return gr.update(), gr.update(), current_page_val
+            new_page = current_page_val + 1
+            html_content = _ppt_load_page(html_path_val, new_page)
+            return html_content, f"{new_page} / {total_pages_val}", new_page
+
+        ppt_prev_btn.click(
+            fn=_ppt_prev_page,
+            inputs=[ppt_current_page, ppt_total_pages, ppt_html_path],
+            outputs=[ppt_preview_html, ppt_page_info, ppt_current_page],
+        )
+
+        ppt_next_btn.click(
+            fn=_ppt_next_page,
+            inputs=[ppt_current_page, ppt_total_pages, ppt_html_path],
+            outputs=[ppt_preview_html, ppt_page_info, ppt_current_page],
+        )
+
+        # ====== PPT Export to PPTX ======
+
+        def _on_ppt_export_click(proj_id, html_path_val):
+            """Submit PPTX export task."""
+            if not html_path_val or not proj_id:
+                gr.Warning("请先生成 HTML 预览")
+                return "", "请先生成预览", gr.update()
+            try:
+                task_id = _task_client.submit_task("ppt_export", {
+                    "project_id": proj_id,
+                    "html_path": html_path_val,
+                    "extract_text": True,
+                })
+                return (
+                    task_id,
+                    f"PPTX 导出任务已提交 (ID: {task_id})",
+                    gr.Timer(active=True),
+                )
+            except Exception as e:
+                gr.Warning(f"导出失败: {e}")
+                return "", f"导出失败: {e}", gr.update()
+
+        ppt_export_btn.click(
+            fn=_on_ppt_export_click,
+            inputs=[ppt_project_id, ppt_html_path],
+            outputs=[ppt_task_id, ppt_status_box, poll_timer],
+        )
+
         # ====== Poll timer handler ======
         def _poll_all_tasks(
             nc_tid, ng_tid, np_tid, dir_tid, vid_tid, ppt_tid,
@@ -4542,6 +5751,15 @@ def create_ui() -> gr.Blocks:
 
             # Extract PPT results when task completes
             pt_task_type = pt.get("task_type", "") if pt else ""
+            # Default values for new HTML preview outputs
+            ppt_preview_update = gr.update()
+            ppt_page_info_update = gr.update()
+            ppt_export_btn_update = gr.update()
+            ppt_download_update = gr.update()
+            ppt_html_path_update = gr.update()
+            ppt_current_page_update = gr.update()
+            ppt_total_pages_update = gr.update()
+
             if pt_done and pt_status == "completed" and pt_task_type == "ppt_outline":
                 # Outline generation completed — populate DataFrame + show editor
                 try:
@@ -4574,13 +5792,49 @@ def create_ui() -> gr.Blocks:
                 ppt_file = gr.update()
                 ppt_quality = gr.update()
                 ppt_info = gr.update()
+            elif pt_done and pt_status == "completed" and pt_task_type == "ppt_export":
+                # PPTX export completed — show download file
+                try:
+                    import json as _json
+                    pt_result = _json.loads(pt.get("result", "{}")) if isinstance(pt.get("result", "{}"), str) else pt.get("result", {})
+                    pptx_path = pt_result.get("output_path", "")
+                    if pptx_path and Path(pptx_path).exists():
+                        ppt_download_update = gr.update(value=pptx_path, visible=True)
+                        ppt_file = str(pptx_path)
+                    else:
+                        ppt_file = gr.update()
+                except Exception:
+                    ppt_file = gr.update()
+                ppt_outline_md = gr.update()
+                ppt_quality = gr.update()
+                ppt_info = gr.update()
+                ppt_proj_id_out = gr.update()
+                ppt_outline_obj_out = gr.update()
+                ppt_df_out = gr.update()
+                ppt_editor_vis = gr.update()
             elif pt_done and pt_status == "completed":
-                # PPT continue/generate completed — show result file
+                # PPT continue/generate completed — show result file + HTML preview
                 ppt_file, ppt_outline_md, ppt_quality, ppt_info = _extract_ppt_result(pt)
                 ppt_proj_id_out = gr.update()
                 ppt_outline_obj_out = gr.update()
                 ppt_df_out = gr.update()
                 ppt_editor_vis = gr.update()
+                # Check if result contains html_path for HTML preview
+                try:
+                    import json as _json
+                    pt_result = _json.loads(pt.get("result", "{}")) if isinstance(pt.get("result", "{}"), str) else pt.get("result", {})
+                    html_path_val = pt_result.get("html_path", "")
+                    total_pg = pt_result.get("total_pages", 0)
+                    if html_path_val and Path(html_path_val).exists():
+                        html_content = Path(html_path_val).read_text(encoding="utf-8")
+                        ppt_preview_update = html_content
+                        ppt_page_info_update = f"1 / {total_pg}" if total_pg else "1 / ?"
+                        ppt_html_path_update = html_path_val
+                        ppt_total_pages_update = total_pg
+                        ppt_current_page_update = 1
+                        ppt_export_btn_update = gr.update(interactive=True)
+                except Exception:
+                    pass
             else:
                 ppt_file = gr.update()
                 ppt_outline_md = gr.update()
@@ -4678,9 +5932,13 @@ def create_ui() -> gr.Blocks:
             # Auto-refresh task queue table when any task is active
             queue_table = _format_task_queue_table() if any_active else gr.update()
 
-            # PPT is disabled (under development) — keep buttons disabled
-            ppt_outline_btn_update = gr.update()
-            ppt_confirm_btn_update = gr.update()
+            # Re-enable PPT buttons when task completes
+            if pt_done:
+                ppt_outline_btn_update = gr.update(interactive=True, value="生成大纲")
+                ppt_confirm_btn_update = gr.update(interactive=True, value="确认并生成 PPT")
+            else:
+                ppt_outline_btn_update = gr.update()
+                ppt_confirm_btn_update = gr.update()
 
             return (
                 # Status boxes
@@ -4727,6 +5985,11 @@ def create_ui() -> gr.Blocks:
                 ppt_df_out, ppt_editor_vis,
                 # Task queue table (auto-refresh)
                 queue_table,
+                # PPT HTML preview outputs
+                ppt_preview_update, ppt_page_info_update,
+                ppt_export_btn_update, ppt_download_update,
+                ppt_html_path_update, ppt_current_page_update,
+                ppt_total_pages_update,
             )
 
         poll_timer.tick(
@@ -4764,6 +6027,11 @@ def create_ui() -> gr.Blocks:
                 ppt_outline_df, ppt_outline_editor,
                 # Task queue table (auto-refresh)
                 task_queue_display,
+                # PPT HTML preview outputs
+                ppt_preview_html, ppt_page_info,
+                ppt_export_btn, ppt_download_file,
+                ppt_html_path, ppt_current_page,
+                ppt_total_pages,
             ],
         )
 

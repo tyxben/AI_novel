@@ -65,6 +65,10 @@ def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:
         return _run_ppt_outline(params, progress_cb)
     elif task_type == TaskType.ppt_continue:
         return _run_ppt_continue(params, progress_cb)
+    elif task_type == TaskType.ppt_render_html:
+        return _run_ppt_render_html(params, progress_cb)
+    elif task_type == TaskType.ppt_export:
+        return _run_ppt_export(params, progress_cb)
     else:
         raise ValueError(f"Unknown task type: {task_type}")
 
@@ -281,7 +285,8 @@ def _run_ppt_continue(params: dict, progress_cb) -> dict:
     )
 
     def ppt_progress(stage, progress, message):
-        progress_cb(progress, message)
+        # Scale pipeline progress to 0-0.7
+        progress_cb(progress * 0.7, message)
 
     edited_outline = EditableOutline(**params["edited_outline"])
 
@@ -292,8 +297,60 @@ def _run_ppt_continue(params: dict, progress_cb) -> dict:
         progress_callback=ppt_progress,
     )
 
-    # Read outline, extraction, and quality report from checkpoint
+    # After pipeline completes, also render HTML preview
+    progress_cb(0.75, "渲染 HTML 预览...")
+    html_path = None
+    slides = []
+    try:
+        from src.ppt.html_renderer import HTMLRenderer
+        from src.ppt.theme_manager import ThemeManager
+        from src.ppt.models import SlideSpec, SlideContent, SlideDesign
+
+        project_id = params["project_id"]
+        ckpt = pipeline.file_manager.load_checkpoint(project_id)
+        if ckpt:
+            data = ckpt.get("data", ckpt)
+            stages = data.get("stages", {})
+            design_data = stages.get("design", {}).get("data", [])
+            content_data = stages.get("content", {}).get("data", [])
+            outline_data = stages.get("outline", {}).get("data", [])
+
+            slides = []
+            for i, design_d in enumerate(design_data):
+                content_d = content_data[i] if i < len(content_data) else {}
+                outline_d = outline_data[i] if i < len(outline_data) else {}
+                slide = SlideSpec(
+                    page_number=i + 1,
+                    content=SlideContent(**content_d) if content_d else SlideContent(title=f"第 {i+1} 页"),
+                    design=SlideDesign(**design_d),
+                    needs_image=outline_d.get("needs_image", False),
+                    image_path=outline_d.get("image_path"),
+                )
+                slides.append(slide)
+
+            theme_name = params.get("theme", "modern")
+            theme_mgr = ThemeManager()
+            theme = theme_mgr.get_theme(theme_name)
+
+            renderer = HTMLRenderer(theme)
+            html_path = renderer.render(
+                slides,
+                output_path=str(pipeline.file_manager.get_html_path(project_id)),
+            )
+    except Exception:
+        import logging
+        logging.getLogger("ppt").warning("HTML preview rendering failed", exc_info=True)
+        html_path = None
+
+    progress_cb(1.0, "PPT 生成完成！")
+
+    # Build result
     result = {"output_path": output_path, "project_id": params["project_id"]}
+    if html_path:
+        result["html_path"] = html_path
+        result["total_pages"] = len(slides) if slides else 0
+
+    # Read outline/quality from checkpoint (existing logic)
     try:
         ckpt = pipeline.file_manager.load_checkpoint(params["project_id"])
         if ckpt:
@@ -306,6 +363,112 @@ def _run_ppt_continue(params: dict, progress_cb) -> dict:
             result["planning"] = planning_data
             result["quality_report"] = quality_data
     except Exception:
-        pass  # Non-critical
+        pass
 
     return result
+
+
+def _run_ppt_render_html(params: dict, progress_cb) -> dict:
+    """Render HTML preview from existing checkpoint data."""
+    from src.ppt.html_renderer import HTMLRenderer
+    from src.ppt.pipeline import PPTPipeline
+    from src.ppt.theme_manager import ThemeManager
+    from src.ppt.models import SlideSpec, SlideContent, SlideDesign
+
+    pipeline = PPTPipeline(
+        workspace=params.get("workspace", "workspace"),
+        config=params.get("config", {}),
+    )
+
+    project_id = params["project_id"]
+    theme_name = params.get("theme", "modern")
+
+    progress_cb(0.1, "加载项目数据...")
+
+    # Load checkpoint
+    ckpt = pipeline.file_manager.load_checkpoint(project_id)
+    if not ckpt:
+        raise ValueError(f"项目 {project_id} checkpoint 不存在")
+
+    data = ckpt.get("data", ckpt)
+    stages = data.get("stages", {})
+
+    # Rebuild SlideSpec list from checkpoint stages
+    slides = []
+    design_data = stages.get("design", {}).get("data", [])
+    content_data = stages.get("content", {}).get("data", [])
+    outline_data = stages.get("outline", {}).get("data", [])
+
+    for i, design_d in enumerate(design_data):
+        content_d = content_data[i] if i < len(content_data) else {}
+        outline_d = outline_data[i] if i < len(outline_data) else {}
+
+        slide = SlideSpec(
+            page_number=i + 1,
+            content=SlideContent(**content_d) if content_d else SlideContent(title=f"第 {i+1} 页"),
+            design=SlideDesign(**design_d),
+            needs_image=outline_d.get("needs_image", False),
+            image_path=outline_d.get("image_path"),
+        )
+        slides.append(slide)
+
+    progress_cb(0.3, "加载主题...")
+    theme_mgr = ThemeManager()
+    theme = theme_mgr.get_theme(theme_name)
+
+    progress_cb(0.5, "渲染 HTML...")
+    renderer = HTMLRenderer(theme)
+    html_path = renderer.render(
+        slides,
+        output_path=str(pipeline.file_manager.get_html_path(project_id)),
+    )
+
+    progress_cb(1.0, "HTML 预览生成完成")
+    return {
+        "html_path": html_path,
+        "project_id": project_id,
+        "total_pages": len(slides),
+    }
+
+
+def _run_ppt_export(params: dict, progress_cb) -> dict:
+    """Export HTML slides to PPTX."""
+    from src.ppt.html_to_pptx import HTMLToPPTXConverter
+    from src.ppt.file_manager import FileManager
+
+    project_id = params["project_id"]
+    html_path = params["html_path"]
+    workspace = params.get("workspace", "workspace")
+
+    fm = FileManager(workspace)
+
+    # Security: validate html_path is within the project directory
+    expected_dir = str(fm._project_dir(project_id).resolve())
+    actual_path = str(Path(html_path).resolve())
+    if not actual_path.startswith(expected_dir):
+        raise ValueError(
+            f"html_path must be within project directory: {expected_dir}"
+        )
+
+    output_path = str(fm.get_output_path(project_id))
+
+    progress_cb(0.05, "初始化转换器...")
+
+    def ppt_progress(page_num, total, message):
+        # Map page progress to 0.1-0.95 range
+        pct = 0.1 + (page_num / total) * 0.85 if total > 0 else 0.5
+        progress_cb(pct, message)
+
+    converter = HTMLToPPTXConverter(
+        workspace=workspace,
+        extract_text=params.get("extract_text", True),
+    )
+
+    result_path = converter.convert(
+        html_path=html_path,
+        output_path=output_path,
+        progress_callback=ppt_progress,
+    )
+
+    progress_cb(1.0, "PPTX 导出完成")
+    return {"output_path": result_path, "project_id": project_id}

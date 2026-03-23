@@ -17,6 +17,8 @@ class TaskType(str, enum.Enum):
     ppt_generate = "ppt_generate"
     ppt_outline = "ppt_outline"
     ppt_continue = "ppt_continue"
+    ppt_render_html = "ppt_render_html"
+    ppt_export = "ppt_export"
 
 
 class TaskStatus(str, enum.Enum):
