@@ -1,0 +1,46 @@
+<section class="slide" data-page="{{ page_number }}">
+    <div style="
+        width: 100%; height: 100%;
+        display: flex; flex-direction: column;
+        justify-content: center; align-items: center;
+        text-align: center;
+        padding: {{ design.padding.left|default(80) }}px;
+        box-sizing: border-box;
+        background: {{ design.colors.background }};
+        position: relative;
+    ">
+        {# Top divider line #}
+        <div style="
+            width: 200px; height: 3px;
+            background: {{ design.colors.primary }};
+            margin-bottom: 40px;
+        "></div>
+
+        <h1 style="
+            font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ design.title_font.size }}pt;
+            font-weight: {% if design.title_font.bold %}bold{% else %}normal{% endif %};
+            {% if design.title_font.italic %}font-style: italic;{% endif %}
+            color: {{ design.title_font.color }};
+            margin: 0 0 16px 0;
+            line-height: 1.3;
+        ">{{ content.title }}</h1>
+
+        {% if content.subtitle %}
+        <p style="
+            font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ (design.body_font.size * 0.9)|int }}pt;
+            color: {{ design.colors.text }};
+            margin: 0;
+            opacity: 0.7;
+        ">{{ content.subtitle }}</p>
+        {% endif %}
+
+        {# Bottom divider line #}
+        <div style="
+            width: 200px; height: 3px;
+            background: {{ design.colors.primary }};
+            margin-top: 40px;
+        "></div>
+    </div>
+</section>

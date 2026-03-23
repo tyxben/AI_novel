@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PPT Preview</title>
+    <style>
+        {{ css|safe }}
+    </style>
+</head>
+<body>
+    <div class="slide-container">
+        {% for slide_html in slides %}
+        {{ slide_html|safe }}
+        {% endfor %}
+    </div>
+
+    <div class="navigation">
+        <button class="nav-btn" onclick="prevSlide()">&#9664; 上一页</button>
+        <span class="page-info" id="pageInfo">1 / 1</span>
+        <button class="nav-btn" onclick="nextSlide()">下一页 &#9654;</button>
+    </div>
+
+    <script>
+        {{ js|safe }}
+    </script>
+</body>
+</html>

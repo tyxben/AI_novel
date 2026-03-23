@@ -1,0 +1,54 @@
+<section class="slide" data-page="{{ page_number }}">
+    <div style="
+        width: 100%; height: 100%;
+        display: flex; flex-direction: column;
+        justify-content: center; align-items: center;
+        text-align: center;
+        padding: {{ design.padding.left|default(80) }}px {{ design.padding.right|default(80) }}px;
+        box-sizing: border-box;
+        position: relative;
+        background: {{ design.colors.background }};
+    ">
+        {# Top accent bar #}
+        <div style="
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 6px;
+            background: linear-gradient(90deg, {{ design.colors.primary }}, {{ design.colors.secondary }});
+        "></div>
+
+        <h1 style="
+            font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ design.title_font.size }}pt;
+            font-weight: {% if design.title_font.bold %}bold{% else %}normal{% endif %};
+            {% if design.title_font.italic %}font-style: italic;{% endif %}
+            color: {{ design.title_font.color }};
+            margin: 0 0 24px 0;
+            line-height: 1.3;
+        ">{{ content.title }}</h1>
+
+        {% if content.subtitle %}
+        <p style="
+            font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ design.body_font.size }}pt;
+            color: {{ design.colors.secondary }};
+            margin: 0;
+            line-height: 1.5;
+        ">{{ content.subtitle }}</p>
+        {% endif %}
+
+        {# Bottom gradient decoration #}
+        <div style="
+            position: absolute; bottom: 0; left: 0;
+            width: 100%; height: 80px;
+            background: linear-gradient(0deg, {{ design.colors.primary }}20, transparent);
+        "></div>
+
+        {% if design.decoration.has_divider %}
+        <div style="
+            width: 120px; height: {{ design.decoration.divider_width|default(2) }}px;
+            background: {{ design.decoration.divider_color|default(design.colors.accent) }};
+            margin: 20px auto 0;
+        "></div>
+        {% endif %}
+    </div>
+</section>

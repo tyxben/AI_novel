@@ -1,0 +1,63 @@
+<section class="slide" data-page="{{ page_number }}">
+    <div style="
+        width: 100%; height: 100%;
+        display: flex; flex-direction: column;
+        justify-content: center; align-items: center;
+        text-align: center;
+        padding: {{ design.padding.left|default(80) }}px {{ (design.padding.right|default(80)) + 40 }}px;
+        box-sizing: border-box;
+        background: {{ design.colors.background }};
+        position: relative;
+    ">
+        {# Decorative quotation mark #}
+        <div style="
+            position: absolute;
+            top: 80px; left: 80px;
+            font-size: 120pt;
+            color: {{ design.colors.primary }}15;
+            font-family: Georgia, serif;
+            line-height: 1;
+            user-select: none;
+        ">&ldquo;</div>
+
+        {% if content.title %}
+        <h2 style="
+            font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ (design.title_font.size * 0.75)|int }}pt;
+            color: {{ design.colors.primary }};
+            margin: 0 0 30px 0;
+            font-weight: {% if design.title_font.bold %}bold{% else %}normal{% endif %};
+        ">{{ content.title }}</h2>
+        {% endif %}
+
+        {% if content.quote %}
+        <blockquote style="
+            font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ (design.body_font.size * 1.3)|int }}pt;
+            color: {{ design.colors.text }};
+            margin: 0;
+            padding: 0 60px;
+            line-height: 1.8;
+            font-style: italic;
+            position: relative;
+            z-index: 1;
+        ">{{ content.quote }}</blockquote>
+        {% endif %}
+
+        {% if content.quote_author %}
+        <p style="
+            font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ design.body_font.size }}pt;
+            color: {{ design.colors.secondary }};
+            margin: 24px 0 0;
+        ">&mdash;&nbsp;{{ content.quote_author }}</p>
+        {% endif %}
+
+        {# Decorative accent bar #}
+        <div style="
+            width: 60px; height: 3px;
+            background: {{ design.colors.accent }};
+            margin-top: 30px;
+        "></div>
+    </div>
+</section>

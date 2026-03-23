@@ -1,0 +1,77 @@
+<section class="slide" data-page="{{ page_number }}">
+    <div style="
+        width: 100%; height: 100%;
+        display: flex; flex-direction: column;
+        background: {{ design.colors.background }};
+        padding: {{ design.padding.top|default(60) }}px {{ design.padding.left|default(80) }}px {{ design.padding.bottom|default(60) }}px;
+        box-sizing: border-box;
+    ">
+        {# Title #}
+        <h2 style="
+            font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ design.title_font.size }}pt;
+            font-weight: {% if design.title_font.bold %}bold{% else %}normal{% endif %};
+            color: {{ design.title_font.color }};
+            margin: 0 0 50px 0;
+            text-align: center;
+        ">{{ content.title }}</h2>
+
+        {# Horizontal timeline #}
+        <div style="
+            flex: 1;
+            display: flex; flex-direction: row;
+            align-items: center;
+            position: relative;
+            padding: 0 20px;
+        ">
+            {# Timeline line #}
+            <div style="
+                position: absolute;
+                top: 50%; left: 40px; right: 40px;
+                height: 3px;
+                background: {{ design.colors.primary }}40;
+                transform: translateY(-50%);
+            "></div>
+
+            {% for step in content.steps %}
+            <div style="
+                flex: 1;
+                display: flex; flex-direction: column;
+                align-items: center;
+                position: relative;
+                z-index: 1;
+            ">
+                {# Step dot #}
+                <div style="
+                    width: 20px; height: 20px;
+                    background: {{ design.colors.primary }};
+                    border-radius: 50%;
+                    border: 3px solid {{ design.colors.background }};
+                    box-shadow: 0 0 0 3px {{ design.colors.primary }};
+                    margin-bottom: 20px;
+                "></div>
+
+                {# Step label #}
+                <div style="
+                    font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                    font-size: {{ (design.body_font.size * 0.9)|int }}pt;
+                    font-weight: bold;
+                    color: {{ design.colors.primary }};
+                    margin-bottom: 8px;
+                    text-align: center;
+                ">{{ step.label }}</div>
+
+                {# Step description #}
+                <div style="
+                    font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                    font-size: {{ (design.body_font.size * 0.85)|int }}pt;
+                    color: {{ design.body_font.color }};
+                    text-align: center;
+                    max-width: 160px;
+                    line-height: 1.5;
+                ">{{ step.description }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</section>

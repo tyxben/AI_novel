@@ -1,0 +1,78 @@
+<section class="slide" data-page="{{ page_number }}">
+    <div style="
+        width: 100%; height: 100%;
+        display: flex; flex-direction: row;
+        background: {{ design.colors.background }};
+    ">
+        {# Left text panel - 50% #}
+        <div style="
+            width: 50%; height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: center;
+            padding: {{ design.padding.top|default(60) }}px {{ design.padding.right|default(80) }}px {{ design.padding.bottom|default(60) }}px {{ design.padding.left|default(80) }}px;
+            box-sizing: border-box;
+        ">
+            <h2 style="
+                font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                font-size: {{ design.title_font.size }}pt;
+                font-weight: {% if design.title_font.bold %}bold{% else %}normal{% endif %};
+                color: {{ design.title_font.color }};
+                margin: 0 0 20px 0;
+                line-height: 1.3;
+            ">{{ content.title }}</h2>
+
+            {% if content.subtitle %}
+            <p style="
+                font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                font-size: {{ design.body_font.size }}pt;
+                color: {{ design.colors.secondary }};
+                margin: 0 0 16px 0;
+            ">{{ content.subtitle }}</p>
+            {% endif %}
+
+            {% if content.bullet_points %}
+            <ul style="
+                font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                font-size: {{ design.body_font.size }}pt;
+                color: {{ design.body_font.color }};
+                margin: 0; padding: 0 0 0 20px;
+                line-height: 1.8;
+            ">
+                {% for bp in content.bullet_points %}
+                <li style="margin-bottom: 8px;">{{ bp }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            {% if content.body_text %}
+            <p style="
+                font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                font-size: {{ design.body_font.size }}pt;
+                color: {{ design.body_font.color }};
+                margin: 12px 0 0;
+                line-height: 1.6;
+            ">{{ content.body_text }}</p>
+            {% endif %}
+        </div>
+
+        {# Right image panel - 50% #}
+        <div style="
+            width: 50%; height: 100%;
+            display: flex; align-items: center; justify-content: center;
+            overflow: hidden;
+        ">
+            {% if image_path %}
+            <img src="{{ image_path }}" alt="slide image"
+                 style="width: 100%; height: 100%; object-fit: cover;" />
+            {% else %}
+            <div style="
+                width: 100%; height: 100%;
+                background: linear-gradient(135deg, {{ design.colors.primary }}30, {{ design.colors.secondary }}30);
+                display: flex; align-items: center; justify-content: center;
+            ">
+                <span style="font-size: 48px; opacity: 0.3; color: {{ design.colors.primary }};">&#128247;</span>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</section>

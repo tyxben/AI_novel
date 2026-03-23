@@ -1,0 +1,66 @@
+<section class="slide" data-page="{{ page_number }}">
+    <div style="
+        width: 100%; height: 100%;
+        display: flex; flex-direction: column;
+        justify-content: center; align-items: center;
+        text-align: center;
+        padding: {{ design.padding.left|default(80) }}px;
+        box-sizing: border-box;
+        background: {{ design.colors.background }};
+    ">
+        {% if content.title %}
+        <h2 style="
+            font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ (design.title_font.size * 0.75)|int }}pt;
+            font-weight: {% if design.title_font.bold %}bold{% else %}normal{% endif %};
+            color: {{ design.colors.text }};
+            margin: 0 0 40px 0;
+            opacity: 0.7;
+        ">{{ content.title }}</h2>
+        {% endif %}
+
+        {% if content.data_value %}
+        <div style="
+            font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: 72pt;
+            font-weight: bold;
+            color: {{ design.colors.primary }};
+            margin: 0 0 16px 0;
+            line-height: 1;
+        ">{{ content.data_value }}</div>
+        {% endif %}
+
+        {% if content.data_label %}
+        <div style="
+            font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ (design.body_font.size * 1.2)|int }}pt;
+            color: {{ design.colors.secondary }};
+            margin: 0 0 20px 0;
+            font-weight: bold;
+        ">{{ content.data_label }}</div>
+        {% endif %}
+
+        {% if content.data_description %}
+        <p style="
+            font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-size: {{ design.body_font.size }}pt;
+            color: {{ design.body_font.color }};
+            margin: 0;
+            max-width: 600px;
+            line-height: 1.6;
+            opacity: 0.8;
+        ">{{ content.data_description }}</p>
+        {% endif %}
+
+        {# Decorative accent circle #}
+        <div style="
+            position: absolute;
+            width: 300px; height: 300px;
+            border: 3px solid {{ design.colors.accent }}30;
+            border-radius: 50%;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        "></div>
+    </div>
+</section>

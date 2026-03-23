@@ -1,0 +1,65 @@
+<section class="slide" data-page="{{ page_number }}">
+    <div style="
+        width: 100%; height: 100%;
+        position: relative;
+        overflow: hidden;
+    ">
+        {# Background image or placeholder #}
+        {% if image_path %}
+        <img src="{{ image_path }}" alt="background"
+             style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;" />
+        {% else %}
+        <div style="
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(135deg, {{ design.colors.primary }}, {{ design.colors.secondary }});
+        "></div>
+        {% endif %}
+
+        {# Dark overlay for text readability #}
+        <div style="
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(180deg, rgba(0,0,0,0.3) 0%, rgba(0,0,0,0.6) 100%);
+        "></div>
+
+        {# Text content overlay #}
+        <div style="
+            position: relative; z-index: 1;
+            width: 100%; height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: flex-end;
+            padding: {{ design.padding.top|default(60) }}px {{ design.padding.left|default(80) }}px {{ (design.padding.bottom|default(60)) + 40 }}px;
+            box-sizing: border-box;
+        ">
+            <h1 style="
+                font-family: '{{ design.title_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                font-size: {{ design.title_font.size }}pt;
+                font-weight: bold;
+                color: #FFFFFF;
+                margin: 0 0 12px 0;
+                line-height: 1.3;
+                text-shadow: 0 2px 8px rgba(0,0,0,0.4);
+            ">{{ content.title }}</h1>
+
+            {% if content.subtitle %}
+            <p style="
+                font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                font-size: {{ design.body_font.size }}pt;
+                color: rgba(255,255,255,0.9);
+                margin: 0 0 12px 0;
+                text-shadow: 0 1px 4px rgba(0,0,0,0.3);
+            ">{{ content.subtitle }}</p>
+            {% endif %}
+
+            {% if content.body_text %}
+            <p style="
+                font-family: '{{ design.body_font.family }}', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+                font-size: {{ (design.body_font.size * 0.85)|int }}pt;
+                color: rgba(255,255,255,0.85);
+                margin: 0;
+                line-height: 1.6;
+                max-width: 70%;
+            ">{{ content.body_text }}</p>
+            {% endif %}
+        </div>
+    </div>
+</section>

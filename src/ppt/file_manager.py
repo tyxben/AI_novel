@@ -78,6 +78,14 @@ class FileManager:
         """获取 checkpoint 文件路径。"""
         return self._project_dir(project_id) / "checkpoints" / "latest.json"
 
+    def get_html_path(self, project_id: str) -> Path:
+        """获取 HTML 预览文件路径"""
+        return self._project_dir(project_id) / "preview.html"
+
+    def get_screenshot_dir(self, project_id: str) -> Path:
+        """获取截图临时目录"""
+        return self._project_dir(project_id) / "screenshots"
+
     # ------------------------------------------------------------------
     # 内部方法
     # ------------------------------------------------------------------
