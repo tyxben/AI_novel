@@ -54,7 +54,6 @@ import {
   Eye,
   Bot,
   Send,
-  ChevronUp,
   Scaling,
   CheckCircle2,
   Circle,
@@ -1817,11 +1816,98 @@ function EditSection({ novelId }: { novelId: string }) {
 }
 
 // ─── Agent Chat ──────────────────────────────────────────────────────
+interface ToolStep {
+  step?: number;
+  thinking?: string;
+  tool: string;
+  args?: any;
+  result?: any;
+}
+
 interface ChatMessage {
   role: "user" | "agent";
   content: string;
-  steps?: Array<{ tool: string; args?: any; result?: string }>;
+  steps?: ToolStep[];
   model?: string;
+}
+
+const TOOL_LABELS: Record<string, { label: string; icon: string }> = {
+  read_chapter: { label: "读取章节", icon: "📖" },
+  edit_setting: { label: "修改设定", icon: "✏️" },
+  rewrite_chapter: { label: "重写章节", icon: "🔄" },
+  resize_novel: { label: "调整章节数", icon: "📐" },
+  publish_chapters: { label: "标记发布", icon: "📤" },
+  proofread_chapter: { label: "校对章节", icon: "🔍" },
+  get_novel_info: { label: "获取信息", icon: "ℹ️" },
+  search_chapters: { label: "搜索内容", icon: "🔎" },
+  reply_to_user: { label: "回复", icon: "💬" },
+};
+
+function formatToolResult(result: any): string {
+  if (!result) return "";
+  if (typeof result === "string") return result;
+  if (result.error) return `❌ ${result.error}`;
+  // Compact key summaries
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(result)) {
+    if (k === "text" && typeof v === "string") {
+      lines.push(`${k}: ${(v as string).slice(0, 120)}${(v as string).length > 120 ? "..." : ""}`);
+    } else if (typeof v === "string" && (v as string).length > 200) {
+      lines.push(`${k}: ${(v as string).slice(0, 200)}...`);
+    } else if (Array.isArray(v)) {
+      lines.push(`${k}: [${(v as any[]).length} items]`);
+    } else if (typeof v === "object" && v !== null) {
+      lines.push(`${k}: ${JSON.stringify(v).slice(0, 150)}`);
+    } else {
+      lines.push(`${k}: ${v}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function ToolStepCard({ step, defaultOpen }: { step: ToolStep; defaultOpen: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const info = TOOL_LABELS[step.tool] ?? { label: step.tool, icon: "🔧" };
+  const hasError = step.result?.error;
+  const isReply = step.tool === "reply_to_user";
+
+  if (isReply) return null; // reply content shown in main bubble
+
+  return (
+    <div className={`rounded-lg border text-xs ${hasError ? "border-rose-200 bg-rose-50/50" : "border-slate-200 bg-white"}`}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50/50 transition rounded-lg"
+      >
+        <span>{info.icon}</span>
+        <span className="font-semibold text-ink">{info.label}</span>
+        {step.args && !isReply && (
+          <span className="text-slate-400 truncate flex-1">
+            {Object.entries(step.args).map(([k, v]) =>
+              typeof v === "string" ? `${k}="${(v as string).slice(0, 30)}"` : `${k}=${JSON.stringify(v)}`
+            ).join(" ")}
+          </span>
+        )}
+        {hasError && <span className="text-rose-500 text-[10px]">失败</span>}
+        {!hasError && !isReply && <span className="text-emerald-500 text-[10px]">✓</span>}
+        <ChevronDown className={`h-3 w-3 text-slate-400 transition ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="border-t border-slate-100 px-3 py-2 space-y-1.5">
+          {step.thinking && (
+            <div className="text-slate-500 italic">
+              <span className="text-slate-400">思考: </span>{step.thinking}
+            </div>
+          )}
+          {step.result && (
+            <pre className="whitespace-pre-wrap text-[11px] text-slate-600 max-h-48 overflow-y-auto bg-slate-50 rounded p-2">
+              {formatToolResult(step.result)}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function AgentChatSection({ novelId }: { novelId: string }) {
@@ -1829,7 +1915,6 @@ function AgentChatSection({ novelId }: { novelId: string }) {
   const [inputMessage, setInputMessage] = useState("");
   const [contextChapters, setContextChapters] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
-  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const agentChatMut = useAgentChat(novelId);
@@ -1920,15 +2005,6 @@ function AgentChatSection({ novelId }: { novelId: string }) {
     );
   };
 
-  const toggleSteps = (idx: number) => {
-    setExpandedSteps((prev) => {
-      const next = new Set(prev);
-      if (next.has(idx)) next.delete(idx);
-      else next.add(idx);
-      return next;
-    });
-  };
-
   const isWorking = agentChatMut.isPending || !!activeTaskId;
 
   return (
@@ -1958,7 +2034,17 @@ function AgentChatSection({ novelId }: { novelId: string }) {
               </div>
             ) : (
               <div key={idx} className="flex justify-start">
-                <div className="max-w-[85%] space-y-2">
+                <div className="max-w-[90%] space-y-2">
+                  {/* Tool call chain — always visible, like Claude Code */}
+                  {msg.steps && msg.steps.length > 0 && (
+                    <div className="space-y-1.5">
+                      {msg.steps.map((step, si) => (
+                        <ToolStepCard key={si} step={step} defaultOpen={si === msg.steps!.length - 1} />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Final reply bubble */}
                   <div className="rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink">
                     <p className="whitespace-pre-wrap">{msg.content}</p>
                     {msg.model && (
@@ -1967,52 +2053,6 @@ function AgentChatSection({ novelId }: { novelId: string }) {
                       </p>
                     )}
                   </div>
-
-                  {/* Steps accordion */}
-                  {msg.steps && msg.steps.length > 0 && (
-                    <button
-                      onClick={() => toggleSteps(idx)}
-                      className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-600 transition"
-                    >
-                      {expandedSteps.has(idx) ? (
-                        <ChevronUp className="h-3 w-3" />
-                      ) : (
-                        <ChevronDown className="h-3 w-3" />
-                      )}
-                      {msg.steps.length} 个工具调用
-                    </button>
-                  )}
-
-                  {msg.steps &&
-                    msg.steps.length > 0 &&
-                    expandedSteps.has(idx) && (
-                      <div className="space-y-1.5 pl-2 border-l-2 border-slate-200">
-                        {msg.steps.map((step, si) => (
-                          <div
-                            key={si}
-                            className="rounded-xl bg-slate-100 p-2.5 text-xs"
-                          >
-                            <p className="font-mono font-semibold text-accent">
-                              {step.tool}
-                            </p>
-                            {step.args && (
-                              <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[10px] text-slate-500">
-                                {typeof step.args === "string"
-                                  ? step.args
-                                  : JSON.stringify(step.args, null, 2)}
-                              </pre>
-                            )}
-                            {step.result && (
-                              <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[10px] text-slate-600 max-h-32 overflow-y-auto">
-                                {typeof step.result === "string"
-                                  ? step.result
-                                  : JSON.stringify(step.result, null, 2)}
-                              </pre>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
                 </div>
               </div>
             )
