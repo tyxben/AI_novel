@@ -286,8 +286,7 @@ class TestStyleKeeperNode:
         mock_create_llm.return_value = _make_fake_llm()
         state: dict[str, Any] = {
             "current_chapter_text": _SHUANGWEN_SAMPLE,
-            "style_category": "webnovel",
-            "style_subcategory": "shuangwen",
+            "style_name": "webnovel.shuangwen",
             "config": {"llm": {}},
             "current_chapter_quality": None,
         }

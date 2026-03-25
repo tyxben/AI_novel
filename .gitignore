@@ -15,3 +15,5 @@ test_screenshots/
 tests/screenshots/
 .coverage
 input/web_*.txt
+frontend/.next/
+frontend/node_modules/

@@ -25,6 +25,7 @@ class FakeLLMResponse:
     content: str
     model: str = "fake-model"
     usage: dict | None = None
+    finish_reason: str | None = "stop"
 
 
 # ---------------------------------------------------------------------------

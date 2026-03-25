@@ -204,10 +204,8 @@ def style_keeper_node(state: NovelState) -> dict[str, Any]:
             "completed_nodes": ["style_keeper"],
         }
 
-    # 获取风格名称：从 state 中组合
-    style_cat = state.get("style_category", "")
-    style_sub = state.get("style_subcategory", "")
-    style_name = f"{style_cat}.{style_sub}" if style_cat and style_sub else None
+    # 获取风格名称
+    style_name = state.get("style_name")
 
     # 创建 StyleKeeper（LLM 可选，当前主要做规则检查）
     llm_config = state.get("config", {}).get("llm", {})

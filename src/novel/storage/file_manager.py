@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,10 +97,25 @@ class FileManager:
     def save_chapter_text(
         self, novel_id: str, chapter_number: int, text: str
     ) -> Path:
-        """保存章节纯文本"""
+        """保存章节纯文本，并同步更新对应 JSON 的 full_text 和 word_count"""
         path = self._chapters_dir(novel_id) / f"chapter_{chapter_number:03d}.txt"
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
+        # Sync JSON if it exists
+        json_path = path.with_suffix(".json")
+        if json_path.exists():
+            try:
+                with open(json_path, encoding="utf-8") as jf:
+                    data = json.load(jf)
+                data["full_text"] = text
+                data["word_count"] = len(text)
+                with open(json_path, "w", encoding="utf-8") as jf:
+                    json.dump(data, jf, ensure_ascii=False, indent=2)
+            except Exception as e:
+                import logging
+                logging.getLogger("novel").warning(
+                    "Failed to sync JSON for chapter %d: %s", chapter_number, e
+                )
         return path
 
     def load_chapter_text(
@@ -236,6 +253,164 @@ class FileManager:
             with open(p, encoding="utf-8") as f:
                 results.append(json.load(f))
         return results
+
+    # ========== 备份管理 ==========
+
+    def save_backup(self, novel_id: str) -> Path:
+        """备份当前 novel.json 到 revisions/ 目录
+
+        复制 novel.json 到 revisions/novel_backup_{timestamp}.json，
+        并自动清理旧备份（保留最近 20 个）。
+
+        Args:
+            novel_id: 小说 ID
+
+        Returns:
+            备份文件路径
+
+        Raises:
+            FileNotFoundError: novel.json 不存在时
+        """
+        novel_path = self._novel_dir(novel_id) / "novel.json"
+        if not novel_path.exists():
+            raise FileNotFoundError(f"novel.json 不存在: {novel_id}")
+
+        rev_dir = self._novel_dir(novel_id) / "revisions"
+        rev_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        backup_path = rev_dir / f"novel_backup_{timestamp}.json"
+
+        shutil.copy2(novel_path, backup_path)
+
+        self._cleanup_old_backups(novel_id, keep=20)
+
+        return backup_path
+
+    def _cleanup_old_backups(self, novel_id: str, keep: int = 20) -> None:
+        """删除旧备份，保留最近 N 个
+
+        Args:
+            novel_id: 小说 ID
+            keep: 保留的备份数量
+        """
+        rev_dir = self._novel_dir(novel_id) / "revisions"
+        if not rev_dir.exists():
+            return
+
+        backups = sorted(rev_dir.glob("novel_backup_*.json"))
+        if len(backups) > keep:
+            for old in backups[:-keep]:
+                old.unlink()
+
+    # ========== 变更日志管理 ==========
+
+    def _changelogs_dir(self, novel_id: str) -> Path:
+        """获取变更日志目录"""
+        d = self._novel_dir(novel_id) / "changelogs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def save_change_log(self, novel_id: str, entry: dict[str, Any]) -> Path:
+        """保存变更日志条目
+
+        Args:
+            novel_id: 小说 ID
+            entry: 变更日志 dict，必须包含 change_id 字段
+
+        Returns:
+            保存的文件路径
+        """
+        change_id = entry.get("change_id", "unknown")
+        if "/" in change_id or "\\" in change_id or change_id in (".", ".."):
+            raise ValueError(f"非法 change_id: {change_id}")
+        log_dir = self._changelogs_dir(novel_id)
+        path = log_dir / f"{change_id}.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(entry, f, ensure_ascii=False, indent=2)
+        return path
+
+    def list_change_logs(
+        self, novel_id: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """列出变更日志（按修改时间倒序）
+
+        Args:
+            novel_id: 小说 ID
+            limit: 返回的最大条数
+
+        Returns:
+            变更日志 dict 列表
+        """
+        log_dir = self._novel_dir(novel_id) / "changelogs"
+        if not log_dir.exists():
+            return []
+
+        # 按文件修改时间倒序排列
+        log_files = sorted(
+            log_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+        results: list[dict[str, Any]] = []
+        for p in log_files[:limit]:
+            with open(p, encoding="utf-8") as f:
+                results.append(json.load(f))
+        return results
+
+    def load_change_log(
+        self, novel_id: str, change_id: str
+    ) -> dict[str, Any] | None:
+        """加载指定变更日志
+
+        Args:
+            novel_id: 小说 ID
+            change_id: 变更 ID
+
+        Returns:
+            变更日志 dict 或 None（不存在时）
+        """
+        if "/" in change_id or "\\" in change_id or change_id in (".", ".."):
+            raise ValueError(f"非法 change_id: {change_id}")
+        log_dir = self._novel_dir(novel_id) / "changelogs"
+        path = log_dir / f"{change_id}.json"
+        if not path.exists():
+            return None
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    # ========== 叙事控制导出 ==========
+
+    def export_debts_json(self, novel_id: str, debts: list[dict[str, Any]]) -> Path:
+        """导出叙事债务为 JSON 文件
+
+        Args:
+            novel_id: 小说 ID
+            debts: 债务 dict 列表
+
+        Returns:
+            导出的文件路径
+        """
+        path = self._novel_dir(novel_id) / "debts.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(debts, f, ensure_ascii=False, indent=2)
+        return path
+
+    def export_arcs_json(self, novel_id: str, arcs: list[dict[str, Any]]) -> Path:
+        """导出故事弧线为 JSON 文件
+
+        Args:
+            novel_id: 小说 ID
+            arcs: 弧线 dict 列表
+
+        Returns:
+            导出的文件路径
+        """
+        path = self._novel_dir(novel_id) / "arcs.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(arcs, f, ensure_ascii=False, indent=2)
+        return path
 
     # ========== 导出 ==========
 

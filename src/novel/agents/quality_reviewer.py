@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from src.llm.llm_client import create_llm_client
 from src.novel.agents.state import Decision, NovelState
@@ -69,6 +70,10 @@ class QualityReviewer:
         style_name: str | None = None,
         budget_mode: bool = False,
         chapter_brief: dict | None = None,
+        brief_validator: Any | None = None,
+        debt_extractor: Any | None = None,
+        obligation_tracker: Any | None = None,
+        chapter_number: int = 0,
     ) -> dict:
         """完整质量审查流程。
 
@@ -79,6 +84,10 @@ class QualityReviewer:
             style_name: 目标风格名称（可选）
             budget_mode: 省钱模式，跳过 LLM 评分
             chapter_brief: 章节任务书（可选，用于追更价值评估的任务完成度）
+            brief_validator: BriefValidator 实例（可选，用于章节任务书验证）
+            debt_extractor: DebtExtractor 实例（可选，用于提取叙事债务）
+            obligation_tracker: ObligationTracker 实例（可选，用于管理叙事债务）
+            chapter_number: 当前章节号（默认 0）
 
         Returns:
             综合质量报告字典，包含：
@@ -89,6 +98,8 @@ class QualityReviewer:
             - need_rewrite: 是否需要重写
             - rewrite_reason: 重写原因
             - suggestions: 改进建议
+            - brief_fulfillment: 任务书验证报告（如有）
+            - debts_extracted: 提取的叙事债务数量（如有）
         """
         report: dict[str, Any] = {
             "need_rewrite": False,
@@ -153,6 +164,42 @@ class QualityReviewer:
         else:
             report["scores"] = {}
             report["retention_scores"] = {}
+
+        # --- 4. Narrative Control: Brief Validation ---
+        if brief_validator and chapter_brief:
+            try:
+                brief_report = brief_validator.validate_chapter(
+                    chapter_text=chapter_text,
+                    chapter_brief=chapter_brief,
+                    chapter_number=chapter_number,
+                )
+                report["brief_fulfillment"] = brief_report
+                # Create debts for unfulfilled items
+                if obligation_tracker and not brief_report.get("overall_pass", True):
+                    for debt in brief_report.get("suggested_debts", []):
+                        obligation_tracker.add_debt(
+                            debt_id=f"brief_{chapter_number}_{debt.get('type', 'unknown')}_{uuid4().hex[:6]}",
+                            source_chapter=chapter_number,
+                            debt_type=debt.get("type", "must_pay_next"),
+                            description=debt.get("description", ""),
+                            urgency_level=debt.get("urgency_level", "high"),
+                        )
+            except Exception as e:
+                log.warning("Brief validation failed: %s", e)
+
+        # --- 5. Narrative Control: Debt Extraction ---
+        if debt_extractor:
+            try:
+                extraction = debt_extractor.extract_from_chapter(
+                    chapter_text=chapter_text,
+                    chapter_number=chapter_number,
+                )
+                report["debts_extracted"] = len(extraction.get("debts", []))
+                if obligation_tracker:
+                    for debt in extraction.get("debts", []):
+                        obligation_tracker.add_debt(**debt)
+            except Exception as e:
+                log.warning("Debt extraction failed: %s", e)
 
         return report
 
@@ -233,6 +280,11 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
     # 尝试从 state 中获取章节任务书（chapter_brief）
     chapter_brief = state.get("current_chapter_brief") or None
 
+    # 从 state 中提取叙事控制服务（可能为 None）
+    obligation_tracker = state.get("obligation_tracker")
+    brief_validator = state.get("brief_validator")
+    debt_extractor = state.get("debt_extractor")
+
     report = reviewer.review_chapter(
         chapter_text=chapter_text,
         chapter_outline=state.get("current_chapter_outline"),
@@ -240,6 +292,10 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         style_name=style_name,
         budget_mode=budget_mode,
         chapter_brief=chapter_brief,
+        brief_validator=brief_validator,
+        debt_extractor=debt_extractor,
+        obligation_tracker=obligation_tracker,
+        chapter_number=current_chapter,
     )
 
     need_rewrite = reviewer.should_rewrite(

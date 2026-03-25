@@ -119,3 +119,12 @@ class CharacterProfile(BaseModel):
 
     # 立绘（V2）
     portrait_image: str | None = None
+
+    # 版本控制（智能编辑系统）
+    effective_from_chapter: int | None = Field(
+        None, description="生效起始章节（None=从头生效）"
+    )
+    deprecated_at_chapter: int | None = Field(
+        None, description="废弃章节（None=一直生效）"
+    )
+    version: int = Field(1, ge=1, description="版本号")

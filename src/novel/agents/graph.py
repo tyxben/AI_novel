@@ -1,8 +1,6 @@
 """LangGraph 图构建 - 小说创作流水线
 
-两种图：
-- init graph: novel_director -> world_builder -> character_designer -> END
-- chapter graph: plot_planner -> writer -> consistency_checker -> style_keeper -> quality_reviewer -> END (或回到 writer 重写)
+chapter graph: plot_planner -> writer -> consistency_checker -> style_keeper -> quality_reviewer -> END (或回到 writer 重写)
 
 LangGraph 为可选依赖。如果未安装，提供 sequential fallback。
 """
@@ -10,7 +8,6 @@ LangGraph 为可选依赖。如果未安装，提供 sequential fallback。
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from src.novel.agents.state import NovelState
@@ -95,41 +92,6 @@ def _should_rewrite(state: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Build init graph
-# ---------------------------------------------------------------------------
-
-
-def build_init_graph() -> Any:
-    """Build the initialization graph (outline + world + characters).
-
-    Returns a compiled LangGraph graph, or a _SequentialRunner fallback.
-    """
-    nodes = _get_node_functions()
-
-    if _LANGGRAPH_AVAILABLE:
-        graph = StateGraph(NovelState)
-        graph.add_node("novel_director", nodes["novel_director"])
-        graph.add_node("world_builder", nodes["world_builder"])
-        graph.add_node("character_designer", nodes["character_designer"])
-
-        graph.set_entry_point("novel_director")
-        graph.add_edge("novel_director", "world_builder")
-        graph.add_edge("world_builder", "character_designer")
-        graph.add_edge("character_designer", END)
-
-        return graph.compile()
-
-    # Fallback: sequential runner
-    return _SequentialRunner(
-        [
-            ("novel_director", nodes["novel_director"]),
-            ("world_builder", nodes["world_builder"]),
-            ("character_designer", nodes["character_designer"]),
-        ]
-    )
-
-
-# ---------------------------------------------------------------------------
 # Build chapter graph
 # ---------------------------------------------------------------------------
 
@@ -201,7 +163,7 @@ def _merge_state(base: dict, update: dict) -> dict:
 
 
 class _SequentialRunner:
-    """Fallback for init graph when LangGraph is not installed."""
+    """Fallback sequential runner when LangGraph is not installed."""
 
     def __init__(self, steps: list[tuple[str, Callable]]) -> None:
         self.steps = steps
@@ -246,7 +208,7 @@ class _ChapterRunner:
                 log.error("Writer 未产生文本，跳过检查节点")
                 break
 
-            current_state = self._run_parallel_checkers(current_state)
+            current_state = self._run_checkers(current_state)
             current_state = self._run_node("quality_reviewer", current_state)
 
             # Check if rewrite needed
@@ -257,31 +219,14 @@ class _ChapterRunner:
 
         return current_state
 
-    def _run_parallel_checkers(self, state: dict) -> dict:
-        """Run consistency_checker and style_keeper in parallel."""
-        checker_names = ["consistency_checker", "style_keeper"]
-        results = {}
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {
-                executor.submit(self.nodes[name], state): name
-                for name in checker_names
-            }
-            for future in as_completed(futures):
-                name = futures[future]
-                try:
-                    results[name] = future.result()
-                except Exception as exc:
-                    log.error("节点 %s 执行失败: %s", name, exc)
-                    results[name] = {
-                        "errors": [{"agent": name, "message": str(exc)}],
-                    }
-
-        current = dict(state)
-        for name in checker_names:
-            if name in results:
-                current = _merge_state(current, results[name])
-        return current
+    def _run_checkers(self, state: dict) -> dict:
+        """串行执行 consistency_checker 和 style_keeper（与 LangGraph 图语义一致）。"""
+        merged = dict(state)
+        for name in ["consistency_checker", "style_keeper"]:
+            if name in self.nodes:
+                result = self._run_node(name, merged)
+                merged = result
+        return merged
 
     def _run_node(self, name: str, state: dict) -> dict:
         node_fn = self.nodes[name]

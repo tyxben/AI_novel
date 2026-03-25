@@ -290,6 +290,95 @@ def novel_export(project_path: str) -> dict[str, Any]:
         return {"error": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# Novel edit service helpers
+# ---------------------------------------------------------------------------
+
+def _infer_workspace(project_path: str) -> str:
+    """Infer workspace root from a project path like 'workspace/novels/novel_xxx'.
+
+    Looks for a 'novels' component; its parent is the workspace.
+    Falls back to _DEFAULT_WORKSPACE.
+    """
+    parts = project_path.replace("\\", "/").split("/")
+    if "novels" in parts:
+        idx = parts.index("novels")
+        ws = "/".join(parts[:idx])
+        return ws if ws else _DEFAULT_WORKSPACE
+    return _DEFAULT_WORKSPACE
+
+
+@mcp.tool()
+def novel_edit_setting(
+    project_path: str,
+    instruction: str,
+    effective_from_chapter: int | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Edit novel settings (characters, outline, world-building) via natural language.
+
+    Examples:
+    - "添加一个30岁女剑客反派角色柳青鸾，第10章出场"
+    - "把第5章的情绪改为大爽"
+    - "世界观增加魔法学院的设定"
+    - "删除角色张三"
+
+    Args:
+        project_path: Path to the novel project directory
+            (e.g. "workspace/novels/novel_abc12345").
+        instruction: Natural language edit instruction.
+        effective_from_chapter: Chapter from which the change takes effect
+            (None = auto-infer as current_chapter + 1).
+        dry_run: If True, only preview the change without applying (default False).
+
+    Returns:
+        Dict with change_id, status, change_type, entity_type, and details.
+    """
+    try:
+        from dataclasses import asdict
+
+        from src.novel.services.edit_service import NovelEditService
+
+        workspace = _infer_workspace(project_path)
+        service = NovelEditService(workspace=workspace)
+        result = service.edit(
+            project_path=project_path,
+            instruction=instruction,
+            effective_from_chapter=effective_from_chapter,
+            dry_run=dry_run,
+        )
+        return asdict(result)
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+@mcp.tool()
+def novel_get_change_history(
+    project_path: str,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Query the change history of novel settings.
+
+    Args:
+        project_path: Path to the novel project directory
+            (e.g. "workspace/novels/novel_abc12345").
+        limit: Maximum number of entries to return (default 20).
+
+    Returns:
+        Dict with changes list and total count.
+    """
+    try:
+        from src.novel.services.edit_service import NovelEditService
+
+        workspace = _infer_workspace(project_path)
+        service = NovelEditService(workspace=workspace)
+        limit = max(1, min(limit, 100))
+        changes = service.get_history(project_path=project_path, limit=limit)
+        return {"changes": changes, "total": len(changes)}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
 # ===========================================================================
 # PPT pipeline tools
 # ===========================================================================

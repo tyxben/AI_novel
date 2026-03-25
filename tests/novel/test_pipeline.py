@@ -278,16 +278,6 @@ def pipeline(tmp_workspace):
 class TestGraph:
     """Test graph building and node wiring."""
 
-    def test_build_init_graph_fallback(self):
-        """Init graph fallback works without langgraph."""
-        from src.novel.agents.graph import _SequentialRunner
-
-        with patch(_NODES_PATCH_TARGET, return_value=_get_mock_nodes()):
-            with patch("src.novel.agents.graph._LANGGRAPH_AVAILABLE", False):
-                from src.novel.agents.graph import build_init_graph
-                graph = build_init_graph()
-                assert isinstance(graph, _SequentialRunner)
-
     def test_build_chapter_graph_fallback(self):
         """Chapter graph fallback works without langgraph."""
         from src.novel.agents.graph import _ChapterRunner
@@ -297,27 +287,6 @@ class TestGraph:
                 from src.novel.agents.graph import build_chapter_graph
                 graph = build_chapter_graph()
                 assert isinstance(graph, _ChapterRunner)
-
-    def test_init_graph_invoke(self):
-        """Init graph runs all 3 nodes and produces outline/world/characters."""
-        with patch(_NODES_PATCH_TARGET, return_value=_get_mock_nodes()):
-            with patch("src.novel.agents.graph._LANGGRAPH_AVAILABLE", False):
-                from src.novel.agents.graph import build_init_graph
-                graph = build_init_graph()
-                state = _make_fake_state()
-                # Clear fields to force generation
-                state["outline"] = None
-                state["world_setting"] = None
-                state["characters"] = []
-
-                result = graph.invoke(state)
-
-                assert result["outline"] is not None
-                assert result["world_setting"] is not None
-                assert len(result["characters"]) > 0
-                assert "novel_director" in result["completed_nodes"]
-                assert "world_builder" in result["completed_nodes"]
-                assert "character_designer" in result["completed_nodes"]
 
     def test_chapter_graph_invoke_pass(self):
         """Chapter graph runs all 5 nodes when quality passes."""

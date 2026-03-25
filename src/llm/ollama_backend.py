@@ -54,8 +54,12 @@ class OllamaBackend(LLMClient):
                 + response.get("eval_count", 0),
             }
 
+        # Ollama: done_reason = "stop" | "length"
+        finish_reason = response.get("done_reason")
+
         return LLMResponse(
             content=content,
             model=self._model,
             usage=usage,
+            finish_reason=finish_reason,
         )

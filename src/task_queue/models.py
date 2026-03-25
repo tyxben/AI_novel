@@ -19,6 +19,9 @@ class TaskType(str, enum.Enum):
     ppt_continue = "ppt_continue"
     ppt_render_html = "ppt_render_html"
     ppt_export = "ppt_export"
+    novel_rewrite_affected = "novel_rewrite_affected"
+    novel_resize = "novel_resize"
+    novel_agent_chat = "novel_agent_chat"
 
 
 class TaskStatus(str, enum.Enum):

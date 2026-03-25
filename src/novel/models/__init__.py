@@ -40,6 +40,9 @@ from src.novel.models.refinement import (
     SettingConflict,
     SettingImpact,
 )
+from src.novel.models.story_unit import ArcBrief, StoryUnit
+from src.novel.models.debt import ChapterDebt, DebtContext, DebtExtractionResult
+from src.novel.models.validation import BriefFulfillmentReport, BriefItemResult
 from src.novel.models.world import PowerLevel, PowerSystem, WorldSetting
 
 # 解析 Novel 和 Volume 中的前向引用（Chapter, CharacterProfile, WorldSetting, VolumeSnapshot）
@@ -94,4 +97,14 @@ __all__ = [
     "ProofreadingIssueType",
     "SettingConflict",
     "SettingImpact",
+    # story_unit.py
+    "StoryUnit",
+    "ArcBrief",
+    # debt.py
+    "ChapterDebt",
+    "DebtExtractionResult",
+    "DebtContext",
+    # validation.py
+    "BriefItemResult",
+    "BriefFulfillmentReport",
 ]
