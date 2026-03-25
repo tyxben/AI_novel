@@ -182,7 +182,9 @@ class AgentToolExecutor:
     def _tool_publish_chapters(self, chapters: list, published: bool = True) -> dict:
         from src.novel.storage.file_manager import FileManager
         fm = FileManager(self.workspace)
-        data = fm.load_novel_json(self.novel_id)
+        data = fm.load_novel(self.novel_id)
+        if not data:
+            return {"error": f"小说不存在: {self.novel_id}"}
         pub_set = set(data.get("published_chapters", []))
         for ch in chapters:
             if published:
@@ -190,14 +192,15 @@ class AgentToolExecutor:
             else:
                 pub_set.discard(ch)
         data["published_chapters"] = sorted(pub_set)
-        fm.save_novel_json(self.novel_id, data)
+        fm.save_novel(self.novel_id, data)
         return {"published_chapters": data["published_chapters"]}
 
     def _tool_proofread_chapter(self, chapter_number: int) -> dict:
         from src.novel.pipeline import NovelPipeline
         pipe = NovelPipeline(workspace=self.workspace)
         result = pipe.proofread_chapter(self._project_path, chapter_number)
-        issues = result.get("issues", [])
+        # proofread_chapter returns list[dict] directly, not a dict with "issues" key
+        issues = result if isinstance(result, list) else result.get("issues", [])
         return {
             "chapter_number": chapter_number,
             "total_issues": len(issues),
@@ -207,7 +210,9 @@ class AgentToolExecutor:
     def _tool_get_novel_info(self) -> dict:
         from src.novel.storage.file_manager import FileManager
         fm = FileManager(self.workspace)
-        data = fm.load_novel_json(self.novel_id)
+        data = fm.load_novel(self.novel_id)
+        if not data:
+            return {"error": f"小说不存在: {self.novel_id}"}
         outline = data.get("outline", {})
         chapters = outline.get("chapters", [])
         characters = data.get("characters", [])

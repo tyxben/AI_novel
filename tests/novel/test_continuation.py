@@ -377,5 +377,5 @@ class TestMaxTokensIncreased:
         )
 
         call_kwargs = writer.llm.chat.call_args
-        # max_tokens should be max(6144, 3000*3) = 9000
-        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 9000
+        # max_tokens should be min(8192, max(6144, 3000*3)) = 8192 (clamped)
+        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 8192

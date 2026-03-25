@@ -407,7 +407,8 @@ class Writer:
         ]
 
         # max_tokens: 中文1字 ≈ 1.5~2 token，给足空间让 LLM 完整收束
-        max_tokens = max(6144, target_words * 3)
+        # clamp to 8192 to avoid DeepSeek 400 error
+        max_tokens = min(8192, max(6144, target_words * 3))
         response = self.llm.chat(messages, temperature=0.85, max_tokens=max_tokens)
         scene_text = self._continue_if_truncated(
             response, messages, temperature=0.85, max_tokens=max_tokens,
