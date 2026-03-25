@@ -800,8 +800,7 @@ class TestFileManager:
             "genre": "玄幻",
             "theme": "成长",
             "target_words": 100000,
-            "style_category": "网文",
-            "style_subcategory": "爽文",
+            "style_name": "webnovel.shuangwen",
             "status": "writing",
             "current_chapter": 3,
             "outline": {

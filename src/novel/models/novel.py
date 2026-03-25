@@ -71,6 +71,16 @@ class ChapterOutline(BaseModel):
         default_factory=dict,
         description="章节任务书：main_conflict, payoff, character_arc_step, foreshadowing_plant, foreshadowing_collect, end_hook_type",
     )
+    arc_id: str | None = Field(None, description="Parent story arc ID")
+
+    # 版本控制（智能编辑系统）
+    effective_from_chapter: int | None = Field(
+        None, description="生效起始章节（None=从头生效）"
+    )
+    deprecated_at_chapter: int | None = Field(
+        None, description="废弃章节（None=一直生效）"
+    )
+    version: int = Field(1, ge=1, description="版本号")
 
 
 class Outline(BaseModel):
@@ -98,6 +108,9 @@ class Volume(BaseModel):
         "planning", description="卷状态"
     )
     snapshot: VolumeSnapshot | None = None
+    story_units: list = Field(
+        default_factory=list, description="StoryUnit arcs in this volume"
+    )
 
 
 class Novel(BaseModel):
@@ -114,10 +127,9 @@ class Novel(BaseModel):
     target_words: int = Field(..., gt=0, description="目标字数")
 
     # 风格
-    style_category: str = Field(
-        ..., min_length=1, description="武侠/网文/文学/轻小说"
+    style_name: str = Field(
+        "webnovel.shuangwen", min_length=1, description="风格预设名，如 webnovel.shuangwen"
     )
-    style_subcategory: str = Field(..., min_length=1, description="子类风格")
     custom_style_reference: str | None = Field(
         None, description="自定义风格参考文本"
     )

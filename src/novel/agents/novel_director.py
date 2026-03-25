@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -23,6 +24,7 @@ from src.novel.models.novel import (
     Outline,
     VolumeOutline,
 )
+from src.novel.models.story_unit import StoryUnit
 from src.novel.templates.outline_templates import get_template
 
 log = logging.getLogger("novel")
@@ -137,8 +139,8 @@ class NovelDirector:
         """分析并丰富用户输入。
 
         Returns:
-            dict 包含 suggested_template, suggested_style_category,
-            suggested_style, volume_count, chapters_per_volume,
+            dict 包含 suggested_template, suggested_style,
+            volume_count, chapters_per_volume,
             total_chapters, analysis_summary。
         """
         total_chapters = max(1, target_words // _WORDS_PER_CHAPTER)
@@ -541,6 +543,215 @@ class NovelDirector:
         parsed_chapters.sort(key=lambda c: c["chapter_number"])
         log.info("卷%d大纲生成完成: %d章 (第%d-%d章)", volume_number, len(parsed_chapters), start_ch, end_ch)
         return parsed_chapters
+
+    # ------------------------------------------------------------------
+    # 5. Story Arc 生成（叙事弧线）
+    # ------------------------------------------------------------------
+
+    def generate_story_arcs(
+        self,
+        volume_outline: VolumeOutline,
+        chapter_outlines: list[ChapterOutline | dict],
+        genre: str,
+    ) -> list[dict]:
+        """为指定卷生成故事弧线（StoryUnit 结构）。
+
+        将一卷的章节分组为多个 3-7 章的叙事弧线（mini-arc），每个弧线
+        有自己的开端钩子、升级点、转折点、收束方式和遗留悬念。
+
+        Args:
+            volume_outline: 卷大纲对象（含 volume_number, core_conflict 等）。
+            chapter_outlines: 本卷的章节大纲列表。
+            genre: 题材（玄幻/科幻/都市等），影响弧线风格。
+
+        Returns:
+            list[dict]: StoryUnit 兼容字段的 dict 列表。如果 LLM 调用
+            失败，返回基本的占位弧线结构。
+        """
+        chapters = volume_outline.chapters
+        if not chapters:
+            return []
+
+        volume_id = volume_outline.volume_number
+
+        # 确定弧线数量：目标每弧线约 5 章
+        arc_count = max(1, math.ceil(len(chapters) / 5))
+
+        # 分配章节到各弧线（每弧线 3-7 章）
+        arc_chapter_groups = self._distribute_chapters_to_arcs(
+            chapters, arc_count
+        )
+
+        # 构建章节信息摘要，供 LLM 使用
+        ch_outline_map: dict[int, dict] = {}
+        for co in chapter_outlines:
+            if isinstance(co, dict):
+                ch_outline_map[co.get("chapter_number", 0)] = co
+            else:
+                ch_outline_map[co.chapter_number] = co.model_dump() if hasattr(co, "model_dump") else {"chapter_number": co.chapter_number, "title": co.title, "goal": co.goal}
+
+        arcs: list[dict] = []
+        for i, arc_chapters in enumerate(arc_chapter_groups):
+            arc_id = f"arc_{volume_id}_{i + 1}"
+
+            # 收集本弧线章节的大纲信息
+            arc_ch_outlines = [
+                ch_outline_map.get(ch_num, {"chapter_number": ch_num, "title": f"第{ch_num}章", "goal": "待规划"})
+                for ch_num in arc_chapters
+            ]
+
+            arc_data = self._generate_single_arc(
+                volume_outline=volume_outline,
+                arc_chapters=arc_chapters,
+                arc_chapter_outlines=arc_ch_outlines,
+                arc_number=i + 1,
+                arc_id=arc_id,
+                genre=genre,
+            )
+            arcs.append(arc_data)
+
+        log.info(
+            "卷%d弧线生成完成: %d个弧线",
+            volume_id, len(arcs),
+        )
+        return arcs
+
+    def _distribute_chapters_to_arcs(
+        self, chapters: list[int], arc_count: int
+    ) -> list[list[int]]:
+        """将章节列表均匀分配到弧线中，每弧线 3-7 章。
+
+        Args:
+            chapters: 排序后的章节号列表。
+            arc_count: 目标弧线数。
+
+        Returns:
+            每个弧线的章节号列表。
+        """
+        sorted_chapters = sorted(chapters)
+        total = len(sorted_chapters)
+
+        if total <= 7:
+            return [sorted_chapters]
+
+        base_size = total // arc_count
+        remainder = total % arc_count
+
+        groups: list[list[int]] = []
+        idx = 0
+        for i in range(arc_count):
+            size = base_size + (1 if i < remainder else 0)
+            # Clamp to 3-7
+            size = max(3, min(7, size))
+            group = sorted_chapters[idx : idx + size]
+            if group:
+                groups.append(group)
+            idx += size
+            if idx >= total:
+                break
+
+        # Handle remaining chapters (assign to last group)
+        if idx < total and groups:
+            groups[-1].extend(sorted_chapters[idx:])
+            # If last group exceeds 7, split it
+            if len(groups[-1]) > 7:
+                overflow = groups[-1][7:]
+                groups[-1] = groups[-1][:7]
+                groups.append(overflow)
+
+        return groups
+
+    def _generate_single_arc(
+        self,
+        volume_outline: VolumeOutline,
+        arc_chapters: list[int],
+        arc_chapter_outlines: list[dict],
+        arc_number: int,
+        arc_id: str,
+        genre: str,
+    ) -> dict:
+        """通过 LLM 生成单个弧线的叙事结构。
+
+        Args:
+            volume_outline: 父卷大纲。
+            arc_chapters: 本弧线包含的章节号。
+            arc_chapter_outlines: 本弧线各章节的大纲信息。
+            arc_number: 弧线序号（从 1 开始）。
+            arc_id: 弧线唯一标识。
+            genre: 题材。
+
+        Returns:
+            StoryUnit 兼容的 dict。
+        """
+        # 构建章节摘要
+        ch_summaries = []
+        for co in arc_chapter_outlines:
+            ch_num = co.get("chapter_number", "?")
+            title = co.get("title", "")
+            goal = co.get("goal", "")
+            ch_summaries.append(f"  第{ch_num}章「{title}」：{goal}")
+        chapters_text = "\n".join(ch_summaries)
+
+        # 计算关键点位
+        escalation_idx = max(0, int(len(arc_chapters) * 0.6) - 1)
+        turning_idx = max(0, int(len(arc_chapters) * 0.75) - 1)
+        escalation_ch = arc_chapters[min(escalation_idx, len(arc_chapters) - 1)]
+        turning_ch = arc_chapters[min(turning_idx, len(arc_chapters) - 1)]
+
+        prompt = f"""请为小说的第{volume_outline.volume_number}卷第{arc_number}段叙事弧线生成结构。
+
+题材：{genre}
+卷核心矛盾：{volume_outline.core_conflict}
+本弧线章节（第{arc_chapters[0]}-{arc_chapters[-1]}章）：
+{chapters_text}
+
+请严格按以下 JSON 格式返回：
+{{
+  "name": "弧线名称（如：新生试炼篇）",
+  "hook": "开端钩子：什么事件启动了这段故事弧线",
+  "closure_method": "收束方式：这段弧线如何结束",
+  "residual_question": "遗留悬念：结束后留下什么未解之谜引入下一弧线"
+}}
+
+要求：
+1. name 简短有力，2-6个字
+2. hook 必须与第{arc_chapters[0]}章的内容相关
+3. closure_method 必须与第{arc_chapters[-1]}章的结局相关
+4. residual_question 要为后续弧线留钩子
+"""
+
+        try:
+            response = self.llm.chat(
+                messages=[
+                    {"role": "system", "content": "你是一位资深网络小说策划编辑。请严格按照 JSON 格式返回弧线结构。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                json_mode=True,
+                max_tokens=1024,
+            )
+            arc_data = _extract_json_obj(response.content)
+        except Exception as exc:
+            log.warning("弧线%d LLM 生成失败: %s，使用占位结构", arc_number, exc)
+            arc_data = None
+
+        if arc_data is None:
+            arc_data = {}
+
+        return {
+            "arc_id": arc_id,
+            "volume_id": volume_outline.volume_number,
+            "name": arc_data.get("name", f"第{arc_number}段"),
+            "chapters": arc_chapters,
+            "phase": "setup",
+            "hook": arc_data.get("hook", f"第{arc_chapters[0]}章开始"),
+            "escalation_point": escalation_ch,
+            "turning_point": turning_ch,
+            "closure_method": arc_data.get("closure_method", f"第{arc_chapters[-1]}章收束"),
+            "residual_question": arc_data.get("residual_question", "待规划"),
+            "status": "planning",
+            "completion_rate": 0.0,
+        }
 
     # ------------------------------------------------------------------
     # 内部方法

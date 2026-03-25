@@ -117,6 +117,8 @@ class StructuredDB:
         """初始化表结构"""
         with self.transaction() as cur:
             cur.executescript(self._SCHEMA)
+        self._ensure_chapter_debts_table()
+        self._ensure_story_units_table()
 
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Cursor, None, None]:
@@ -432,3 +434,274 @@ class StructuredDB:
             for row in rows:
                 row["key_events"] = json.loads(row["key_events"])
             return rows
+
+    # ========== chapter_debts table ==========
+
+    def _ensure_chapter_debts_table(self) -> None:
+        """创建 chapter_debts 表（叙事债务追踪）"""
+        with self.transaction() as cur:
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS chapter_debts (
+                    debt_id TEXT PRIMARY KEY,
+                    source_chapter INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    urgency_level TEXT NOT NULL DEFAULT 'normal',
+                    target_chapter INTEGER,
+                    fulfilled_at TEXT,
+                    fulfillment_note TEXT,
+                    character_pending TEXT,
+                    emotional_debt TEXT,
+                    escalation_history TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_chapter_debts_status
+                    ON chapter_debts(status);
+                CREATE INDEX IF NOT EXISTS idx_chapter_debts_source_chapter
+                    ON chapter_debts(source_chapter);
+                CREATE INDEX IF NOT EXISTS idx_chapter_debts_urgency_level
+                    ON chapter_debts(urgency_level);
+            """)
+
+    def insert_debt(
+        self,
+        debt_id: str,
+        source_chapter: int,
+        type: str,
+        description: str,
+        **kwargs: Any,
+    ) -> None:
+        """插入叙事债务
+
+        Args:
+            debt_id: 债务唯一 ID
+            source_chapter: 来源章节号
+            type: 债务类型 (must_pay_next / pay_within_3 / long_tail_payoff)
+            description: 债务描述
+            **kwargs: 可选字段 - status, urgency_level, target_chapter,
+                      fulfilled_at, fulfillment_note, character_pending,
+                      emotional_debt, escalation_history
+        """
+        from datetime import datetime, timezone
+
+        status = kwargs.get("status", "pending")
+        urgency_level = kwargs.get("urgency_level", "normal")
+        target_chapter = kwargs.get("target_chapter")
+        fulfilled_at = kwargs.get("fulfilled_at")
+        fulfillment_note = kwargs.get("fulfillment_note")
+        character_pending = kwargs.get("character_pending")
+        emotional_debt = kwargs.get("emotional_debt")
+        escalation_history = kwargs.get("escalation_history")
+        created_at = kwargs.get(
+            "created_at", datetime.now(timezone.utc).isoformat()
+        )
+
+        # Serialize list/dict fields to JSON strings
+        if character_pending is not None and not isinstance(character_pending, str):
+            character_pending = json.dumps(character_pending, ensure_ascii=False)
+        if escalation_history is not None and not isinstance(escalation_history, str):
+            escalation_history = json.dumps(escalation_history, ensure_ascii=False)
+
+        with self.transaction() as cur:
+            cur.execute(
+                """INSERT INTO chapter_debts
+                   (debt_id, source_chapter, created_at, type, description,
+                    status, urgency_level, target_chapter, fulfilled_at,
+                    fulfillment_note, character_pending, emotional_debt,
+                    escalation_history)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(debt_id) DO NOTHING
+                """,
+                (
+                    debt_id, source_chapter, created_at, type, description,
+                    status, urgency_level, target_chapter, fulfilled_at,
+                    fulfillment_note, character_pending, emotional_debt,
+                    escalation_history,
+                ),
+            )
+
+    def update_debt_status(
+        self,
+        debt_id: str,
+        status: str,
+        fulfilled_at: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        """更新债务状态
+
+        Args:
+            debt_id: 债务唯一 ID
+            status: 新状态 (pending / fulfilled / overdue / abandoned)
+            fulfilled_at: 完成时间 (ISO format)
+            note: 完成说明
+        """
+        with self.transaction() as cur:
+            cur.execute(
+                """UPDATE chapter_debts
+                   SET status = ?,
+                       fulfilled_at = COALESCE(?, fulfilled_at),
+                       fulfillment_note = COALESCE(?, fulfillment_note)
+                   WHERE debt_id = ?
+                """,
+                (status, fulfilled_at, note, debt_id),
+            )
+
+    def query_debts(
+        self,
+        status: str | None = None,
+        source_chapter: int | None = None,
+        before_chapter: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """查询叙事债务，支持按状态、来源章节、目标章节过滤
+
+        Args:
+            status: 按状态过滤
+            source_chapter: 按来源章节过滤
+            before_chapter: 查询来源章节小于此值的债务
+
+        Returns:
+            债务 dict 列表
+        """
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            conditions: list[str] = []
+            params: list[Any] = []
+
+            if status is not None:
+                conditions.append("status = ?")
+                params.append(status)
+            if source_chapter is not None:
+                conditions.append("source_chapter = ?")
+                params.append(source_chapter)
+            if before_chapter is not None:
+                conditions.append("source_chapter < ?")
+                params.append(before_chapter)
+
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            cur.execute(
+                f"SELECT * FROM chapter_debts {where} ORDER BY source_chapter ASC",
+                params,
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    # ========== story_units table ==========
+
+    def _ensure_story_units_table(self) -> None:
+        """创建 story_units 表（故事单元/弧线追踪）"""
+        with self.transaction() as cur:
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS story_units (
+                    arc_id TEXT PRIMARY KEY,
+                    volume_id TEXT,
+                    name TEXT NOT NULL,
+                    chapters TEXT,
+                    phase TEXT NOT NULL DEFAULT 'setup',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    completion_rate REAL NOT NULL DEFAULT 0.0,
+                    hook TEXT,
+                    escalation_point TEXT,
+                    turning_point TEXT,
+                    closure_method TEXT,
+                    residual_question TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_story_units_volume_id
+                    ON story_units(volume_id);
+                CREATE INDEX IF NOT EXISTS idx_story_units_status
+                    ON story_units(status);
+            """)
+
+    def insert_story_unit(
+        self,
+        arc_id: str,
+        volume_id: str,
+        name: str,
+        chapters_json: str,
+        **kwargs: Any,
+    ) -> None:
+        """插入故事单元/弧线
+
+        Args:
+            arc_id: 弧线唯一 ID
+            volume_id: 所属卷 ID
+            name: 弧线名称
+            chapters_json: 章节列表 JSON 字符串 (e.g., "[1,2,3,4]")
+            **kwargs: 可选字段 - phase, status, completion_rate, hook,
+                      escalation_point, turning_point, closure_method,
+                      residual_question
+        """
+        phase = kwargs.get("phase", "setup")
+        status = kwargs.get("status", "active")
+        completion_rate = kwargs.get("completion_rate", 0.0)
+        hook = kwargs.get("hook")
+        escalation_point = kwargs.get("escalation_point")
+        turning_point = kwargs.get("turning_point")
+        closure_method = kwargs.get("closure_method")
+        residual_question = kwargs.get("residual_question")
+
+        with self.transaction() as cur:
+            cur.execute(
+                """INSERT INTO story_units
+                   (arc_id, volume_id, name, chapters, phase, status,
+                    completion_rate, hook, escalation_point, turning_point,
+                    closure_method, residual_question)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(arc_id) DO NOTHING
+                """,
+                (
+                    arc_id, volume_id, name, chapters_json, phase, status,
+                    completion_rate, hook, escalation_point, turning_point,
+                    closure_method, residual_question,
+                ),
+            )
+
+    def update_story_unit_progress(
+        self,
+        arc_id: str,
+        completion_rate: float,
+        phase: str,
+    ) -> None:
+        """更新故事单元进度
+
+        Args:
+            arc_id: 弧线唯一 ID
+            completion_rate: 完成度 (0.0-1.0)
+            phase: 当前阶段 (setup / escalation / climax / resolution)
+        """
+        with self.transaction() as cur:
+            cur.execute(
+                """UPDATE story_units
+                   SET completion_rate = ?, phase = ?
+                   WHERE arc_id = ?
+                """,
+                (completion_rate, phase, arc_id),
+            )
+
+    def query_story_units(
+        self,
+        volume_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """查询故事单元，可按卷过滤
+
+        Args:
+            volume_id: 按卷 ID 过滤
+
+        Returns:
+            故事单元 dict 列表，chapters 字段为 JSON 字符串
+        """
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            if volume_id is not None:
+                cur.execute(
+                    "SELECT * FROM story_units WHERE volume_id = ? ORDER BY arc_id ASC",
+                    (volume_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM story_units ORDER BY volume_id ASC, arc_id ASC"
+                )
+            return [dict(row) for row in cur.fetchall()]

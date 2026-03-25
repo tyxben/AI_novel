@@ -15,6 +15,8 @@ class LLMResponse:
     content: str
     model: str
     usage: dict | None = field(default=None)
+    finish_reason: str | None = field(default=None)
+    """停止原因: "stop"=正常结束, "length"=触达 max_tokens 被截断。"""
 
 
 class LLMClient(ABC):

@@ -68,4 +68,5 @@ class OpenAIBackend(LLMClient):
             content=choice.message.content or "",
             model=response.model,
             usage=usage,
+            finish_reason=choice.finish_reason,
         )

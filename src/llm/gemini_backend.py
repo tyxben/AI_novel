@@ -89,8 +89,20 @@ class GeminiBackend(LLMClient):
                 "total_tokens": response.usage_metadata.total_token_count,
             }
 
+        # Gemini finish_reason: STOP / MAX_TOKENS / SAFETY / ...
+        finish_reason = None
+        if response.candidates:
+            raw_reason = response.candidates[0].finish_reason
+            if raw_reason is not None:
+                reason_str = str(raw_reason).upper()
+                if "MAX_TOKENS" in reason_str:
+                    finish_reason = "length"
+                else:
+                    finish_reason = "stop"
+
         return LLMResponse(
             content=text,
             model=self._model,
             usage=usage,
+            finish_reason=finish_reason,
         )

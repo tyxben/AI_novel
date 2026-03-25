@@ -31,6 +31,7 @@ def _make_llm(content: str = "测试生成的场景内容。"):
         content: str
         model: str = "test"
         usage: dict | None = None
+        finish_reason: str | None = "stop"
 
     llm = MagicMock()
     llm.chat.return_value = LLMResponse(content=content)
@@ -271,6 +272,7 @@ class TestGenerateChapterIntegration:
             content: str
             model: str = "test"
             usage: dict | None = None
+            finish_reason: str | None = "stop"
 
         call_count = 0
 
@@ -326,6 +328,7 @@ class TestGenerateChapterIntegration:
             content: str
             model: str = "test"
             usage: dict | None = None
+            finish_reason: str | None = "stop"
 
         responses = iter([
             LLMResponse(content=scene1_text),
@@ -365,6 +368,7 @@ class TestGenerateChapterIntegration:
             content: str
             model: str = "test"
             usage: dict | None = None
+            finish_reason: str | None = "stop"
 
         captured_messages = []
 

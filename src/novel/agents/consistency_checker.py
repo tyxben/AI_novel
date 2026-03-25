@@ -131,19 +131,24 @@ class ConsistencyChecker:
         chapter_text: str,
         chapter_number: int,
         previous_summary: str,
+        chapter_outline_hint: str = "",
     ) -> list[dict[str, Any]]:
         """LLM-based narrative logic check for the current chapter.
 
         Detects:
+        - Plot thread continuity (foreshadowing / setups must be followed up)
+        - Dangling threads (missions, tasks, plans left unaddressed)
+        - Character whereabouts (characters cannot vanish mid-action)
         - Character resurrection / disappearance
         - Event duplication
         - Data inconsistency (numbers, distances, times)
-        - Unresolved plans/schemes
 
         Args:
             chapter_text: Current chapter text
             chapter_number: Current chapter number
             previous_summary: Summary of previous chapters for context
+            chapter_outline_hint: Optional outline info for this chapter
+                (goal, key events) so the checker can verify they are addressed
 
         Returns:
             List of narrative logic issues found
@@ -151,19 +156,42 @@ class ConsistencyChecker:
         if not previous_summary:
             return []
 
+        # Build optional outline section
+        outline_section = ""
+        if chapter_outline_hint:
+            outline_section = (
+                f"\n【第{chapter_number}章大纲要求】\n"
+                f"{chapter_outline_hint}\n"
+            )
+
         prompt = (
             f"请检查以下第{chapter_number}章内容是否存在叙事逻辑问题。\n\n"
-            f"【前文摘要】\n{previous_summary[:2000]}\n\n"
+            f"【前文摘要（最近1-2章的关键情节）】\n{previous_summary[:3000]}\n"
+            f"{outline_section}\n"
             f"【第{chapter_number}章正文】\n{chapter_text[:3000]}\n\n"
-            "请检查以下问题（必须逐项检查）：\n"
-            "1. 角色生死状态：是否有已死角色复活或正常对话的情况？\n"
-            "2. 角色去向：是否有角色说要去做某事后就消失没有后续？\n"
-            "3. 事件重复：是否有同一个事件（战斗、会议、发现）被描写了两次以上？\n"
-            "4. 数据一致：距离、时间、数量等具体数字是否前后矛盾？\n"
-            "5. 方案闭环：是否有提出的计划/方案没有交代结果？\n\n"
+            "请逐项检查以下问题：\n\n"
+            "## A. 情节线索连贯性（最重要）\n"
+            "1. **伏笔/铺垫延续**：前文设置的伏笔、铺垫、悬念，本章是否合理延续或至少提及？"
+            "如果前文提到了某个重要线索（如派人去某地、发现某个秘密、收到某个消息），"
+            "本章不能完全忽略它。\n"
+            "2. **悬挂线索**：前文中角色被指派的任务、做出的承诺、出发去执行的行动，"
+            "本章是否有交代进展？如果角色A在上一章说'我去铁剑门谈判'，"
+            "本章必须提到这件事的进展或结果，不能当它没发生过。\n"
+            "3. **角色去向**：上一章末尾某角色正在做某事或去某地，"
+            "本章该角色不能毫无交代地消失或出现在完全无关的地方。\n\n"
+            "## B. 基础一致性\n"
+            "4. 角色生死状态：是否有已死角色复活或正常对话的情况？\n"
+            "5. 事件重复：是否有同一个事件（战斗、会议、发现）被描写了两次以上？\n"
+            "6. 数据一致：距离、时间、数量等具体数字是否前后矛盾？\n"
+            "7. 方案闭环：是否有提出的计划/方案没有交代结果？\n\n"
+            "**判断标准**：只报告确实存在的问题。"
+            "如果前文只是轻微提及某事而非重要铺垫，不算问题。"
+            "只有明确的、读者会注意到的断裂才需要报告。\n\n"
             "请以 JSON 格式返回：\n"
             '{"issues": [{"type": "问题类型", "description": "具体描述", '
             '"severity": "high/medium/low"}]}\n'
+            '类型可选值：伏笔断裂、悬挂线索、角色失踪、角色复活、'
+            '事件重复、数据矛盾、方案未闭环\n'
             "如果没有发现问题，返回：{\"issues\": []}"
         )
 
@@ -173,7 +201,9 @@ class ConsistencyChecker:
                     {
                         "role": "system",
                         "content": (
-                            "你是一位严谨的小说编辑，专门检查叙事逻辑一致性。"
+                            "你是一位严谨的小说编辑，专门检查章节间的叙事连贯性。"
+                            "你特别关注情节线索是否在章节间断裂——"
+                            "即前文铺垫的事件、任务、承诺是否在后续章节中被遗忘。"
                             "只报告确实存在的问题，不要捏造问题。"
                         ),
                     },
@@ -280,7 +310,12 @@ def consistency_checker_node(state: NovelState) -> dict[str, Any]:
     # 每9章做一次完整 LLM 检查，其余用 BM25 轻量检查
     use_bm25 = chapter_number % 9 != 0
 
-    # ---- BM25 lightweight check (no LLM needed) ----
+    # Build narrative context (shared by BM25 + full LLM paths)
+    previous_summary, chapter_outline_hint = _build_narrative_context(
+        state, chapter_number
+    )
+
+    # ---- BM25 lightweight check ----
     if use_bm25:
         bm25_report = _bm25_check(state, chapter_text, chapter_number)
         decisions.append(
@@ -291,11 +326,28 @@ def consistency_checker_node(state: NovelState) -> dict[str, Any]:
                 data={"contradictions_count": len(bm25_report["contradictions"])},
             )
         )
+
+        # Run narrative logic check alongside BM25 (1 LLM call) to catch
+        # plot thread breaks that keyword matching cannot detect.
+        narrative_issues = _run_narrative_logic_check(
+            state, chapter_text, chapter_number,
+            previous_summary, chapter_outline_hint,
+            decisions, errors,
+        )
+
+        all_contradictions = bm25_report["contradictions"] + narrative_issues
+        overall_passed = bm25_report["passed"] and len(narrative_issues) == 0
+
         existing_quality = state.get("current_chapter_quality") or {}
         return {
             "current_chapter_quality": {
                 **existing_quality,
-                "consistency_check": bm25_report,
+                "consistency_check": {
+                    **bm25_report,
+                    "contradictions": all_contradictions,
+                    "passed": overall_passed,
+                    "narrative_issues_count": len(narrative_issues),
+                },
             },
             "decisions": decisions,
             "errors": errors,
@@ -377,36 +429,12 @@ def consistency_checker_node(state: NovelState) -> dict[str, Any]:
             pass
 
     # 叙事逻辑检查（在完整 LLM 检查时额外执行）
-    previous_summary = ""
-    chapters_done = state.get("chapters", [])
-    if chapters_done:
-        # 取最近几章的摘要作为前文上下文
-        recent_chapters = chapters_done[-3:]
-        summary_parts = []
-        for ch in recent_chapters:
-            ch_num = ch.get("chapter_number", "?")
-            ch_text = ch.get("full_text", "")
-            if ch_text:
-                summary_parts.append(f"第{ch_num}章：{ch_text[:500]}")
-        previous_summary = "\n".join(summary_parts)
-
-    narrative_issues: list[dict] = []
-    if previous_summary:
-        try:
-            narrative_issues = checker.check_narrative_logic(
-                chapter_text, chapter_number, previous_summary
-            )
-            if narrative_issues:
-                decisions.append(
-                    _make_decision(
-                        step="narrative_logic_check",
-                        decision=f"发现{len(narrative_issues)}个叙事逻辑问题",
-                        reason="叙事逻辑检查：角色状态/事件重复/数据一致性",
-                        data={"issues_count": len(narrative_issues)},
-                    )
-                )
-        except Exception as exc:
-            log.warning("叙事逻辑检查异常: %s", exc)
+    narrative_issues = _run_narrative_logic_check(
+        state, chapter_text, chapter_number,
+        previous_summary, chapter_outline_hint,
+        decisions, errors,
+        checker=checker,
+    )
 
     # Merge narrative issues into report contradictions
     all_contradictions = report["contradictions"] + narrative_issues
@@ -430,6 +458,108 @@ def consistency_checker_node(state: NovelState) -> dict[str, Any]:
         "errors": errors,
         "completed_nodes": ["consistency_checker"],
     }
+
+
+def _build_narrative_context(
+    state: NovelState,
+    chapter_number: int,
+) -> tuple[str, str]:
+    """Build previous-chapter summary and chapter outline hint from state.
+
+    Returns:
+        (previous_summary, chapter_outline_hint) tuple.
+    """
+    # -- Previous summary: last 2 chapters, 1000 chars each (enough to
+    #    capture plot threads, missions, foreshadowing at chapter end) --
+    previous_summary = ""
+    chapters_done = state.get("chapters", [])
+    if chapters_done:
+        recent_chapters = chapters_done[-2:]
+        summary_parts = []
+        for ch in recent_chapters:
+            ch_num = ch.get("chapter_number", "?")
+            ch_text = ch.get("full_text", "")
+            if ch_text:
+                # Use first 500 chars (setup) + last 500 chars (conclusions/hooks)
+                head = ch_text[:500]
+                tail = ch_text[-500:] if len(ch_text) > 500 else ""
+                separator = "\n...\n" if tail else ""
+                summary_parts.append(
+                    f"第{ch_num}章：{head}{separator}{tail}"
+                )
+        previous_summary = "\n\n".join(summary_parts)
+
+    # -- Chapter outline hint: what this chapter is supposed to accomplish --
+    chapter_outline_hint = ""
+    ch_outline = state.get("current_chapter_outline")
+    if ch_outline and isinstance(ch_outline, dict):
+        hint_parts = []
+        if ch_outline.get("title"):
+            hint_parts.append(f"标题：{ch_outline['title']}")
+        if ch_outline.get("goal"):
+            hint_parts.append(f"目标：{ch_outline['goal']}")
+        if ch_outline.get("key_events"):
+            events = ch_outline["key_events"]
+            if isinstance(events, list):
+                events = "、".join(events)
+            hint_parts.append(f"关键事件：{events}")
+        chapter_outline_hint = "\n".join(hint_parts)
+
+    return previous_summary, chapter_outline_hint
+
+
+def _run_narrative_logic_check(
+    state: NovelState,
+    chapter_text: str,
+    chapter_number: int,
+    previous_summary: str,
+    chapter_outline_hint: str,
+    decisions: list,
+    errors: list,
+    checker: ConsistencyChecker | None = None,
+) -> list[dict[str, Any]]:
+    """Run narrative logic check, creating a ConsistencyChecker if needed.
+
+    This is factored out so both BM25 and full-LLM paths can call it.
+    Returns the list of narrative issues found (may be empty).
+    """
+    if not previous_summary:
+        return []
+
+    # Create checker if not provided (BM25 path)
+    if checker is None:
+        from src.llm.llm_client import create_llm_client
+
+        llm_config = state.get("config", {}).get("llm", {})
+        try:
+            llm = create_llm_client(llm_config)
+        except Exception as exc:
+            log.warning("叙事逻辑检查 LLM 初始化失败: %s", exc)
+            errors.append({
+                "agent": "ConsistencyChecker",
+                "message": f"叙事逻辑检查 LLM 初始化失败: {exc}",
+            })
+            return []
+        checker = ConsistencyChecker(llm)
+
+    try:
+        narrative_issues = checker.check_narrative_logic(
+            chapter_text, chapter_number, previous_summary,
+            chapter_outline_hint=chapter_outline_hint,
+        )
+        if narrative_issues:
+            decisions.append(
+                _make_decision(
+                    step="narrative_logic_check",
+                    decision=f"发现{len(narrative_issues)}个叙事逻辑问题",
+                    reason="叙事逻辑检查：情节线索连贯性/角色去向/悬挂线索",
+                    data={"issues_count": len(narrative_issues)},
+                )
+            )
+        return narrative_issues
+    except Exception as exc:
+        log.warning("叙事逻辑检查异常: %s", exc)
+        return []
 
 
 def _bm25_check(

@@ -39,7 +39,7 @@ def _make_novel_data(
         "outline": {"chapters": chapters},
         "world_setting": {"era": "古代", "location": "中原"},
         "characters": [{"name": "主角", "role": "protagonist"}],
-        "style_subcategory": "webnovel.shuangwen",
+        "style_name": "webnovel.shuangwen",
     }
 
 

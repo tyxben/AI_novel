@@ -1061,6 +1061,7 @@ def _novel_get_progress(project: str) -> str:
 def _novel_generate(
     project: str,
     batch_size: int,
+    target_total_input: int,
     silent: bool,
     llm_backend: str,
     key_gemini: str,
@@ -1092,15 +1093,18 @@ def _novel_generate(
     outline = ckpt.get("outline", {})
     outlined_chapters = len(outline.get("chapters", []))
 
+    # User can override target total to expand beyond the outline
+    user_target = int(target_total_input) if target_total_input and int(target_total_input) > 0 else 0
+
     # For long novels, the target total may exceed current outlined chapters.
-    # Compute the full target from target_words (each chapter ~ 2500 words).
     novel_data = fm.load_novel(novel_id) or {}
     target_words = novel_data.get("target_words", 0)
-    target_total_chapters = max(outlined_chapters, target_words // 2500) if target_words else outlined_chapters
+    auto_target = max(outlined_chapters, target_words // 2500) if target_words else outlined_chapters
+    target_total_chapters = max(auto_target, user_target)
 
     if start_ch > target_total_chapters:
         gr.Info("所有章节已生成完成!")
-        return f"所有章节已生成完成 ({target_total_chapters}/{target_total_chapters} 章)", ""
+        return f"所有章节已生成完成 ({target_total_chapters}/{target_total_chapters} 章)\n提示：想扩充？填写更大的「目标总章数」后点击继续写作", ""
 
     batch = int(batch_size) if batch_size else 20
     end_ch = min(start_ch + batch - 1, target_total_chapters)
@@ -1129,10 +1133,10 @@ def _novel_generate(
     new_completed = (max(completed) if completed else 0) + len(generated)
     status = (
         f"本批完成! 生成了第 {start_ch}-{start_ch + len(generated) - 1} 章\n"
-        f"当前进度: {new_completed}/{total_chapters} 章"
+        f"当前进度: {new_completed}/{target_total_chapters} 章"
     )
-    if new_completed < total_chapters:
-        status += f"\n剩余: {total_chapters - new_completed} 章待生成"
+    if new_completed < target_total_chapters:
+        status += f"\n剩余: {target_total_chapters - new_completed} 章待生成"
     else:
         status += "\n全部章节已生成完成!"
     if errors:
@@ -1149,24 +1153,32 @@ def _novel_generate(
 
 
 def _novel_load_chapter_text(project_path: str, chapter_num: int) -> str:
-    """Load a specific chapter's text from files (with title header)."""
+    """Load a specific chapter's text from files (with title header).
+
+    优先读 .txt（最新写入源），标题从 .json 取。
+    """
+    ch_txt = Path(project_path) / "chapters" / f"chapter_{chapter_num:03d}.txt"
     ch_json = Path(project_path) / "chapters" / f"chapter_{chapter_num:03d}.json"
+    # 优先从 .txt 读正文（rewrite 直接写 .txt）
+    text = ""
+    title = ""
+    if ch_txt.exists():
+        text = ch_txt.read_text(encoding="utf-8")
     if ch_json.exists():
         data = json.loads(ch_json.read_text(encoding="utf-8"))
         title = data.get("title", "")
-        text = data.get("full_text", "")
-        header = f"第{chapter_num}章 {title}" if title else f"第{chapter_num}章"
-        word_count = data.get("word_count", len(text))
-        return f"{'='*40}\n{header}（{word_count}字）\n{'='*40}\n\n{text}"
-    # Fallback: try plain text
-    ch_file = Path(project_path) / "chapters" / f"chapter_{chapter_num:03d}.txt"
-    if ch_file.exists():
-        return ch_file.read_text(encoding="utf-8")
-    return ""
+        # 如果 .txt 不存在，从 .json 取 full_text
+        if not text:
+            text = data.get("full_text", "")
+    if not text:
+        return ""
+    header = f"第{chapter_num}章 {title}" if title else f"第{chapter_num}章"
+    word_count = len(text)
+    return f"{'='*40}\n{header}（{word_count}字）\n{'='*40}\n\n{text}"
 
 
 def _novel_list_chapter_titles(project_path: str) -> str:
-    """List all chapter titles as markdown."""
+    """List all chapter titles as markdown. 字数从 .txt 文件实际长度取。"""
     chapters_dir = Path(project_path) / "chapters"
     if not chapters_dir.exists():
         return "*暂无章节*"
@@ -1175,7 +1187,12 @@ def _novel_list_chapter_titles(project_path: str) -> str:
         data = json.loads(f.read_text(encoding="utf-8"))
         num = data.get("chapter_number", 0)
         title = data.get("title", "无标题")
-        wc = data.get("word_count", 0)
+        # 优先从 .txt 取实际字数
+        txt_path = f.with_suffix(".txt")
+        if txt_path.exists():
+            wc = len(txt_path.read_text(encoding="utf-8"))
+        else:
+            wc = data.get("word_count", 0)
         lines.append(f"**第{num}章** {title}　({wc}字)")
     if not lines:
         return "*暂无章节*"
@@ -1310,7 +1327,7 @@ def _novel_export(project: str):
 def _novel_apply_feedback(
     project: str,
     feedback: str,
-    chapter_num: int,
+    chapter_input: str,
     dry_run: bool,
     llm_backend: str,
     key_gemini: str,
@@ -1331,7 +1348,12 @@ def _novel_apply_feedback(
     _novel_set_env_keys(llm_backend, key_gemini, key_deepseek, key_openai)
     pipe = _novel_create_pipeline(llm_backend)
 
-    ch_num = int(chapter_num) if chapter_num and chapter_num > 0 else None
+    chapters = _parse_chapter_input(str(chapter_input) if chapter_input else "")
+    fb_text = feedback.strip()
+    if len(chapters) > 1:
+        ch_str = ", ".join(str(c) for c in chapters)
+        fb_text = f"[涉及章节: 第{ch_str}章] {fb_text}"
+    ch_num = chapters[0] if chapters else None
 
     def _progress_cb(pct, msg):
         progress(pct, desc=msg)
@@ -1339,7 +1361,7 @@ def _novel_apply_feedback(
     try:
         result = pipe.apply_feedback(
             project_path=project_path,
-            feedback_text=feedback.strip(),
+            feedback_text=fb_text,
             chapter_number=ch_num,
             dry_run=dry_run,
             progress_callback=_progress_cb,
@@ -2290,42 +2312,11 @@ def _novel_setting_rewrite(project: str, impact_state: dict):
     return status
 
 
-_AI_SETTING_SYSTEM = """你是一位小说编辑助手。用户会给你当前小说的设定（JSON），以及一条修改指令。
-你需要理解指令，修改 JSON 中对应的字段，然后返回：
-1. 修改后的完整 JSON（保持原有结构不变，只改需要改的部分）
-2. 修改摘要
+def _novel_setting_ai_modify(project: str, instruction: str, effective_from_chapter: float | None = None):
+    """AI 智能修改设定（通过 NovelEditService）。
 
-返回格式（严格 JSON）：
-{
-  "modified_json": { ... 修改后的完整设定 ... },
-  "changes": [
-    {"field": "修改的字段路径", "old": "原值摘要", "new": "新值摘要"}
-  ]
-}
-
-注意：
-- 只改用户明确要求改的部分，其他保持不变
-- 如果指令涉及世界规则，修改 world_setting.rules
-- 如果指令涉及角色，修改 characters 数组中对应角色
-- 如果指令涉及大纲/章节，修改 outline.chapters 或 outline.main_storyline
-- 如果要添加新角色，在 characters 数组末尾添加完整的角色对象
-- modified_json 必须包含原始 JSON 的所有顶层字段"""
-
-_AI_SETTING_USER = """## 当前设定
-
-```json
-{current_json}
-```
-
-## 修改指令
-
-{instruction}
-
-请按照系统提示的格式返回修改后的 JSON 和变更摘要。"""
-
-
-def _novel_setting_ai_modify(project: str, instruction: str):
-    """AI 智能修改设定。Returns (result_md, load_all_outputs..., status)."""
+    Returns (result_md, load_all_outputs..., status).
+    """
     if not project:
         empty = gr.update()
         return ("", *([empty] * 36), "请先选择项目")
@@ -2340,95 +2331,162 @@ def _novel_setting_ai_modify(project: str, instruction: str):
         empty = gr.update()
         return ("", *([empty] * 36), "项目文件不存在")
 
-    data = json.loads(novel_json_path.read_text(encoding="utf-8"))
+    from src.novel.services.edit_service import NovelEditService
 
-    # 精简 JSON：只发送设定相关字段，不发 chapters 全文等大字段
-    setting_keys = ["world_setting", "characters", "outline", "title", "genre", "theme"]
-    setting_data = {k: data.get(k) for k in setting_keys if k in data}
-    # outline 中章节大纲可能很大，只保留前50章
-    if "outline" in setting_data and "chapters" in setting_data["outline"]:
-        setting_data["outline"]["chapters"] = setting_data["outline"]["chapters"][:50]
+    svc = NovelEditService(workspace="workspace")
 
-    current_json = json.dumps(setting_data, ensure_ascii=False, indent=2)
-
-    # 限制发送长度，避免 token 爆炸
-    if len(current_json) > 15000:
-        current_json = current_json[:15000] + "\n... (已截断)"
-
-    from src.novel.config import load_novel_config
-    from src.llm import create_llm_client
-    config = load_novel_config()
-    llm = create_llm_client(config.llm.to_dict())
-
-    messages = [
-        {"role": "system", "content": _AI_SETTING_SYSTEM},
-        {"role": "user", "content": _AI_SETTING_USER.format(
-            current_json=current_json, instruction=instruction,
-        )},
-    ]
+    # Gradio Number returns float; convert to int if provided
+    eff_ch = int(effective_from_chapter) if effective_from_chapter is not None else None
 
     try:
-        response = llm.chat(messages, temperature=0.3, json_mode=True, max_tokens=8192)
-        raw = response.content
+        result = svc.edit(
+            project_path=project_path,
+            instruction=instruction.strip(),
+            effective_from_chapter=eff_ch,
+        )
     except Exception as e:
         empty = gr.update()
-        return ("", *([empty] * 36), f"AI 调用失败: {e}")
+        return ("", *([empty] * 36), f"AI 编辑服务调用失败: {e}")
 
-    # 解析返回
-    import re as _re
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        match = _re.search(r'\{.*\}', raw, _re.DOTALL)
-        if match:
-            try:
-                result = json.loads(match.group())
-            except json.JSONDecodeError:
-                empty = gr.update()
-                return ("", *([empty] * 36), "AI 返回格式错误，请重试")
-        else:
-            empty = gr.update()
-            return ("", *([empty] * 36), "AI 返回格式错误，请重试")
+    # 格式化 EditResult 为用户友好的 Markdown
+    md = _format_edit_result(result)
 
-    modified = result.get("modified_json", {})
-    changes = result.get("changes", [])
-
-    if not modified:
+    if result.status == "failed":
         empty = gr.update()
-        return ("", *([empty] * 36), "AI 未返回修改结果")
-
-    # 备份旧版本
-    import shutil
-    from datetime import datetime as _dt
-    backup_dir = Path(project_path) / "revisions"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = _dt.now().strftime("%Y%m%d_%H%M%S")
-    shutil.copy2(novel_json_path, backup_dir / f"novel_backup_{timestamp}.json")
-
-    # 合并修改到原数据（只覆盖 AI 返回的字段）
-    for key in setting_keys:
-        if key in modified:
-            data[key] = modified[key]
-
-    data["updated_at"] = _dt.now().isoformat()
-    novel_json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    # 格式化变更摘要
-    md = "### AI 修改完成\n\n"
-    if changes:
-        for c in changes:
-            md += f"- **{c.get('field', '?')}**: {c.get('old', '?')} → {c.get('new', '?')}\n"
-    else:
-        md += "已应用修改（AI 未提供详细变更列表）\n"
+        return (md, *([empty] * 36), f"AI 修改失败: {result.error or '未知错误'}")
 
     # 重新加载表单
     load_result = _novel_setting_load_all(project)
 
-    return (md, *load_result[:-1], f"AI 修改完成，已自动保存（旧版本已备份）")
+    return (md, *load_result[:-1], "AI 修改完成，已自动保存（旧版本已备份）")
+
+
+def _format_edit_result(result) -> str:
+    """将 EditResult 格式化为用户友好的 Markdown。"""
+    if result.status == "failed":
+        return f"### AI 修改失败\n\n{result.error or '未知错误'}"
+
+    entity_labels = {
+        "character": "角色",
+        "outline": "大纲",
+        "world_setting": "世界观",
+    }
+    change_labels = {
+        "add": "新增",
+        "update": "修改",
+        "delete": "删除",
+    }
+
+    entity_label = entity_labels.get(result.entity_type, result.entity_type)
+    change_label = change_labels.get(result.change_type, result.change_type)
+
+    md = f"### AI 修改完成\n\n"
+    md += f"- **操作**: {change_label}{entity_label}\n"
+
+    if result.entity_id:
+        md += f"- **对象**: {result.entity_id}\n"
+
+    if result.effective_from_chapter is not None:
+        md += f"- **生效章节**: 第 {result.effective_from_chapter} 章起\n"
+
+    if result.reasoning:
+        md += f"- **说明**: {result.reasoning}\n"
+
+    # 显示变更详情
+    if result.old_value and result.new_value:
+        md += "\n**变更详情:**\n"
+        old_flat = _flatten_dict(result.old_value)
+        new_flat = _flatten_dict(result.new_value)
+        all_keys = set(old_flat.keys()) | set(new_flat.keys())
+        for key in sorted(all_keys):
+            old_v = old_flat.get(key, "(无)")
+            new_v = new_flat.get(key, "(无)")
+            if old_v != new_v:
+                md += f"- `{key}`: {_truncate(str(old_v))} → {_truncate(str(new_v))}\n"
+    elif result.new_value:
+        md += "\n**新增内容:**\n"
+        for k, v in result.new_value.items():
+            if v:
+                md += f"- `{k}`: {_truncate(str(v))}\n"
+
+    md += f"\n*变更ID: {result.change_id[:8]}...*"
+    return md
+
+
+def _flatten_dict(d: dict, prefix: str = "") -> dict:
+    """将嵌套 dict 展平为点分路径 dict（用于变更详情展示）。"""
+    items = {}
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            items.update(_flatten_dict(v, key))
+        else:
+            items[key] = v
+    return items
+
+
+def _truncate(s: str, max_len: int = 60) -> str:
+    """截断过长字符串。"""
+    return s if len(s) <= max_len else s[:max_len] + "..."
+
+
+def _format_feedback_report(result: dict) -> str:
+    """Format feedback analysis/rewrite result as Markdown."""
+    if not result:
+        return ""
+
+    analysis = result.get("analysis", {})
+    rewritten = result.get("rewritten_chapters", [])
+    dry_run = result.get("dry_run", False)
+
+    lines = []
+    mode = "分析报告" if dry_run else "重写报告"
+    lines.append(f"## 📋 反馈{mode}\n")
+
+    # Analysis summary
+    if analysis:
+        severity_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+        severity = analysis.get("severity", "?")
+        icon = severity_icons.get(severity, "⚪")
+        lines.append(f"**问题类型**: {analysis.get('feedback_type', '未知')}")
+        lines.append(f"**严重程度**: {icon} {severity}")
+        lines.append(f"**诊断摘要**: {analysis.get('summary', '无')}\n")
+
+        target = analysis.get("target_chapters", [])
+        propagation = analysis.get("propagation_chapters", [])
+        if target:
+            lines.append(f"**直接影响章节**: 第{'、'.join(str(c) for c in target)}章")
+        if propagation:
+            lines.append(f"**传播影响章节**: 第{'、'.join(str(c) for c in propagation)}章")
+        lines.append("")
+
+        # Rewrite instructions (the key info user needs)
+        instructions = analysis.get("rewrite_instructions", {})
+        if instructions:
+            lines.append("### 修改方案\n")
+            for ch_num, instr in sorted(instructions.items(), key=lambda x: int(x[0])):
+                lines.append(f"**第{ch_num}章**:")
+                lines.append(f"> {instr}\n")
+
+    # Rewrite results (if not dry_run)
+    if rewritten:
+        lines.append("### 重写结果\n")
+        lines.append("| 章节 | 原字数 | 新字数 | 类型 |")
+        lines.append("|------|--------|--------|------|")
+        for rw in rewritten:
+            ch = rw.get("chapter_number", "?")
+            orig = rw.get("original_chars", 0)
+            new = rw.get("new_chars", 0)
+            rtype = "传播修改" if rw.get("is_propagation") else "直接修改"
+            lines.append(f"| 第{ch}章 | {orig}字 | {new}字 | {rtype} |")
+    elif dry_run:
+        lines.append("\n*仅分析模式 — 修改方案已填入编辑框，可调整后点「确认重写」执行修改*")
+
+    return "\n".join(lines)
 
 
 def _extract_novel_polish_result(task: dict) -> str:
-    """Extract polish result from completed task and format report."""
+    """Extract polish/feedback result from completed task and format report."""
     if not task or task.get("status") != "completed":
         return ""
     result_str = task.get("result", "")
@@ -2438,6 +2496,9 @@ def _extract_novel_polish_result(task: dict) -> str:
         result = json.loads(result_str) if isinstance(result_str, str) else result_str
     except (json.JSONDecodeError, TypeError):
         return ""
+    # Detect feedback vs polish by checking for 'analysis' key
+    if "analysis" in result:
+        return _format_feedback_report(result)
     return _format_polish_report(result)
 
 
@@ -3245,7 +3306,7 @@ def _submit_novel_create(
 
 
 def _submit_novel_generate(
-    project, batch_size, silent,
+    project, batch_size, target_total, silent,
     llm_backend, key_gemini, key_deepseek, key_openai,
 ):
     """Submit novel_generate to task server."""
@@ -3255,12 +3316,14 @@ def _submit_novel_generate(
     if not _ensure_task_server():
         return "", "后端服务未启动"
     project_path = _novel_extract_project_path(project)
+    target = int(target_total) if target_total and int(target_total) > 0 else None
     try:
         task_id = _task_client.submit_task("novel_generate", {
             "project_path": project_path,
             "start_chapter": None,  # auto-detect in worker
             "end_chapter": None,
             "batch_size": int(batch_size) if batch_size else 20,
+            "target_total": target,
             "silent": bool(silent),
             "_keys": _collect_keys_dict(key_gemini, key_deepseek, key_openai),
         })
@@ -3287,6 +3350,77 @@ def _submit_novel_polish(
             "_keys": _collect_keys_dict(key_gemini, key_deepseek, key_openai),
         })
         return task_id, f"精修任务已提交 (ID: {task_id})..."
+    except Exception as e:
+        return "", f"提交失败: {e}"
+
+
+def _parse_chapter_input(text: str) -> list[int]:
+    """Parse chapter input like '8', '8-12', '3,7,15', '3,8-12,15' into sorted list."""
+    if not text or not text.strip():
+        return []
+    chapters = set()
+    for part in text.replace("，", ",").replace("、", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                start, end = part.split("-", 1)
+                for n in range(int(start), int(end) + 1):
+                    if n > 0:
+                        chapters.add(n)
+            except ValueError:
+                continue
+        else:
+            try:
+                n = int(part)
+                if n > 0:
+                    chapters.add(n)
+            except ValueError:
+                continue
+    return sorted(chapters)
+
+
+def _submit_novel_feedback(
+    project, chapter_input, feedback_text, dry_run,
+    llm_backend, key_gemini, key_deepseek, key_openai,
+):
+    """Submit novel_feedback to task server."""
+    if not project:
+        return "", "请先选择项目"
+    if not _ensure_task_server():
+        return "", "后端服务未启动"
+    project_path = _novel_extract_project_path(project)
+
+    chapters = _parse_chapter_input(str(chapter_input) if chapter_input else "")
+
+    # Auto-generate feedback text if user only provided chapter numbers
+    fb_text = (feedback_text or "").strip()
+    if not fb_text and chapters:
+        ch_str = "、".join(str(c) for c in chapters)
+        fb_text = f"请分析第{ch_str}章的问题：检查章节间的衔接是否连贯、伏笔是否接续、角色行为是否一致、情节是否完整不截断"
+    elif not fb_text:
+        return "", "请输入章节号或反馈内容"
+
+    if len(chapters) > 1:
+        ch_str = ", ".join(str(c) for c in chapters)
+        fb_text = f"[涉及章节: 第{ch_str}章] {fb_text}"
+
+    # chapter_number = first chapter as primary focus, None if empty
+    ch_num = chapters[0] if chapters else None
+
+    _novel_set_env_keys(llm_backend, key_gemini, key_deepseek, key_openai)
+    try:
+        task_id = _task_client.submit_task("novel_feedback", {
+            "project_path": project_path,
+            "feedback_text": fb_text,
+            "chapter_number": ch_num,
+            "dry_run": dry_run,
+            "_keys": _collect_keys_dict(key_gemini, key_deepseek, key_openai),
+        })
+        mode = "分析" if dry_run else "反馈重写"
+        ch_desc = f"第{','.join(str(c) for c in chapters)}章" if chapters else "AI自动判断"
+        return task_id, f"{mode}任务已提交 ({ch_desc}) (ID: {task_id})..."
     except Exception as e:
         return "", f"提交失败: {e}"
 
@@ -4190,14 +4324,24 @@ def create_ui() -> gr.Blocks:
                             choices=_novel_list_projects(),
                             value=None,
                         )
-                        novel_batch_size = gr.Slider(
-                            label="本次生成章节数",
-                            minimum=1,
-                            maximum=100,
-                            step=1,
-                            value=20,
-                            info="从当前进度自动续写，每次写一批（超长篇可适当增大）",
-                        )
+                        with gr.Row():
+                            novel_batch_size = gr.Slider(
+                                label="本次生成章节数",
+                                minimum=1,
+                                maximum=100,
+                                step=1,
+                                value=20,
+                                info="每次写一批",
+                                scale=2,
+                            )
+                            novel_target_total = gr.Number(
+                                label="目标总章数（0=按大纲）",
+                                value=0,
+                                minimum=0,
+                                precision=0,
+                                info="想扩充章节？填更大的数",
+                                scale=1,
+                            )
                         novel_silent = gr.Checkbox(
                             label="静默模式（跳过审核暂停）",
                             value=True,
@@ -4232,6 +4376,36 @@ def create_ui() -> gr.Blocks:
                             variant="secondary",
                             size="lg",
                             elem_classes="story-btn",
+                        )
+
+                        # --- Section 4: 手动反馈修改 ---
+                        gr.HTML('<div class="section-title">手动反馈修改</div>')
+                        gr.Markdown("*指出具体问题，AI 针对性重写（如衔接不连贯、人设崩塌等）*", elem_classes="hint-text")
+                        novel_fb_chapter = gr.Textbox(
+                            label="问题章节",
+                            value="",
+                            placeholder="例: 8  或 8-12  或 3,7,15  留空=AI自动判断",
+                            info="支持单章(8)、区间(8-12)、多选(3,7,15)、混合(3,8-12,15)",
+                        )
+                        novel_fb_text = gr.Textbox(
+                            label="反馈内容（可选）",
+                            placeholder="可留空让AI自动分析，或描述具体问题：如衔接断裂、人设崩塌、伏笔丢失等",
+                            lines=3,
+                        )
+                        novel_fb_analyze_btn = gr.Button(
+                            "开始分析", variant="primary", size="lg",
+                            elem_classes="story-btn",
+                        )
+                        novel_fb_plan = gr.Textbox(
+                            label="AI修改方案（可编辑后确认重写）",
+                            lines=8,
+                            interactive=False,
+                            value="",
+                            placeholder="点击「开始分析」后，AI会在此显示修改方案...",
+                        )
+                        novel_fb_confirm_btn = gr.Button(
+                            "确认重写", variant="stop", size="lg",
+                            interactive=False,
                         )
 
                     # ============== Right column: Novel Output ==============
@@ -4447,6 +4621,13 @@ def create_ui() -> gr.Blocks:
                                     label="修改指令",
                                     lines=3,
                                     placeholder="例：\n• 系统每天只能使用3次，使用后消耗精神力\n• 主角年龄改成16岁\n• 第5章的目标改成：主角首次使用系统",
+                                    interactive=True,
+                                )
+                                novel_set_ai_effective_ch = gr.Number(
+                                    label="生效起始章节（留空=下一章自动生效）",
+                                    precision=0,
+                                    minimum=1,
+                                    value=None,
                                     interactive=True,
                                 )
                                 with gr.Row():
@@ -4885,6 +5066,9 @@ def create_ui() -> gr.Blocks:
                 "",              # novel_create_task_id
                 "",              # novel_gen_task_id
                 "",              # novel_polish_task_id
+                gr.update(interactive=True, value="开始分析"),  # novel_fb_analyze_btn
+                gr.update(value="", interactive=False),         # novel_fb_plan
+                gr.update(interactive=False, value="确认重写"),  # novel_fb_confirm_btn
             )
 
         novel_new_btn.click(
@@ -4896,6 +5080,7 @@ def create_ui() -> gr.Blocks:
                 novel_outline_display, novel_chars_display, novel_world_display,
                 novel_chapter_display, novel_info_display, novel_polish_report,
                 novel_create_task_id, novel_gen_task_id, novel_polish_task_id,
+                novel_fb_analyze_btn, novel_fb_plan, novel_fb_confirm_btn,
             ],
         )
 
@@ -5153,21 +5338,23 @@ def create_ui() -> gr.Blocks:
         )
 
         # Generate chapters (submit to task queue)
-        def _on_novel_gen_submit(project, batch, silent, llm_be, k_gem, k_ds, k_oai):
+        def _on_novel_gen_submit(project, batch, target_total, silent, llm_be, k_gem, k_ds, k_oai):
             task_id, status = _submit_novel_generate(
-                project, batch, silent, llm_be, k_gem, k_ds, k_oai,
+                project, batch, target_total, silent, llm_be, k_gem, k_ds, k_oai,
             )
+            if not task_id:
+                return ("", status, gr.update(), gr.update())
             return (
                 task_id, status,
                 gr.update(interactive=False, value="写作中..."),
-                gr.Timer(active=bool(task_id)),
+                gr.Timer(active=True),
             )
 
         novel_generate_btn.click(
             fn=_on_novel_gen_submit,
             inputs=[
                 novel_project_select, novel_batch_size,
-                novel_silent,
+                novel_target_total, novel_silent,
                 llm_backend, key_gemini, key_deepseek, key_openai,
             ],
             outputs=[
@@ -5222,10 +5409,12 @@ def create_ui() -> gr.Blocks:
             task_id, status = _submit_novel_polish(
                 project, start, end, llm_be, k_gem, k_ds, k_oai,
             )
+            if not task_id:
+                return ("", status, gr.update(), gr.update())
             return (
                 task_id, status,
                 gr.update(interactive=False, value="精修中..."),
-                gr.Timer(active=bool(task_id)),
+                gr.Timer(active=True),
             )
 
         novel_polish_btn.click(
@@ -5237,6 +5426,100 @@ def create_ui() -> gr.Blocks:
             outputs=[
                 novel_polish_task_id, novel_status_box,
                 novel_polish_btn, poll_timer,
+            ],
+        )
+
+        # Feedback analyze (dry_run=True)
+        def _on_novel_fb_analyze(project, ch_num, fb_text, llm_be, k_gem, k_ds, k_oai):
+            task_id, status = _submit_novel_feedback(
+                project, ch_num, fb_text, True,
+                llm_be, k_gem, k_ds, k_oai,
+            )
+            if not task_id:
+                # Submit failed — keep buttons enabled
+                return ("", status, gr.update(), gr.update(), gr.update())
+            return (
+                task_id, status,
+                gr.update(interactive=False, value="分析中..."),
+                gr.update(interactive=False, value="分析中..."),  # disable confirm btn while analyzing
+                gr.Timer(active=True),
+            )
+
+        novel_fb_analyze_btn.click(
+            fn=_on_novel_fb_analyze,
+            inputs=[
+                novel_project_select, novel_fb_chapter, novel_fb_text,
+                llm_backend, key_gemini, key_deepseek, key_openai,
+            ],
+            outputs=[
+                novel_polish_task_id, novel_status_box,
+                novel_fb_analyze_btn, novel_fb_confirm_btn, poll_timer,
+            ],
+        )
+
+        # Feedback confirm rewrite (dry_run=False, uses edited plan text)
+        def _on_novel_fb_confirm(project, ch_num, plan_text, llm_be, k_gem, k_ds, k_oai):
+            # Parse edited plan text into rewrite_instructions dict
+            # Format: "第8章: instruction\n\n第9章: instruction\n\n..."
+            import re as _re
+            instructions = {}
+            if plan_text:
+                # Split by "第N章:" pattern
+                parts = _re.split(r'第(\d+)章[:：]\s*', plan_text.strip())
+                # parts = ['', '8', 'instruction...', '9', 'instruction...', ...]
+                for i in range(1, len(parts) - 1, 2):
+                    ch = parts[i].strip()
+                    instr = parts[i + 1].strip()
+                    if ch and instr:
+                        instructions[ch] = instr
+
+            if not instructions:
+                # Fallback: treat entire plan as feedback text
+                task_id, status = _submit_novel_feedback(
+                    project, ch_num, plan_text, False,
+                    llm_be, k_gem, k_ds, k_oai,
+                )
+            else:
+                # Submit with pre-computed instructions (skip re-analysis)
+                if not project:
+                    return ("", "请先选择项目", gr.update(), gr.update(), gr.update())
+                if not _ensure_task_server():
+                    return ("", "后端服务未启动", gr.update(), gr.update(), gr.update())
+                project_path = _novel_extract_project_path(project)
+                chapters = _parse_chapter_input(str(ch_num) if ch_num else "")
+                ch = chapters[0] if chapters else None
+                _novel_set_env_keys(llm_be, k_gem, k_ds, k_oai)
+                try:
+                    task_id = _task_client.submit_task("novel_feedback", {
+                        "project_path": project_path,
+                        "feedback_text": plan_text,
+                        "chapter_number": ch,
+                        "dry_run": False,
+                        "rewrite_instructions": instructions,
+                        "_keys": _collect_keys_dict(k_gem, k_ds, k_oai),
+                    })
+                    ch_str = ",".join(instructions.keys())
+                    status = f"重写任务已提交 (第{ch_str}章) (ID: {task_id})"
+                except Exception as e:
+                    return ("", f"提交失败: {e}", gr.update(), gr.update(), gr.update())
+            if not task_id:
+                return ("", status, gr.update(), gr.update(), gr.update())
+            return (
+                task_id, status,
+                gr.update(interactive=False, value="重写中..."),
+                gr.update(interactive=False, value="重写中..."),
+                gr.Timer(active=True),
+            )
+
+        novel_fb_confirm_btn.click(
+            fn=_on_novel_fb_confirm,
+            inputs=[
+                novel_project_select, novel_fb_chapter, novel_fb_plan,
+                llm_backend, key_gemini, key_deepseek, key_openai,
+            ],
+            outputs=[
+                novel_polish_task_id, novel_status_box,
+                novel_fb_analyze_btn, novel_fb_confirm_btn, poll_timer,
             ],
         )
 
@@ -5402,7 +5685,7 @@ def create_ui() -> gr.Blocks:
         # AI 智能修改
         novel_set_ai_btn.click(
             fn=_novel_setting_ai_modify,
-            inputs=[novel_project_select, novel_set_ai_input],
+            inputs=[novel_project_select, novel_set_ai_input, novel_set_ai_effective_ch],
             outputs=[
                 novel_set_ai_result,
                 *_world_inputs,
@@ -5909,6 +6192,30 @@ def create_ui() -> gr.Blocks:
                     novel_create_world = gr.update()
                     novel_create_info = gr.update()
                     novel_project_update = gr.update(choices=_novel_list_projects())
+            elif ng_done and ng_status == "completed":
+                # Novel generate completed — refresh chapter display with latest chapter
+                novel_create_status = gr.update()
+                novel_create_outline = gr.update()
+                novel_create_chars = gr.update()
+                novel_create_world = gr.update()
+                novel_create_info = gr.update()
+                novel_project_update = gr.update(choices=_novel_list_projects())
+                try:
+                    import json as _json
+                    ng_result = _json.loads(ng.get("result", "{}")) if isinstance(ng.get("result"), str) else ng.get("result", {})
+                    ng_params = ng.get("params", {})
+                    ng_project_path = ng_params.get("project_path", "")
+                    chapters_generated = ng_result.get("chapters_generated", [])
+                    if ng_project_path and chapters_generated:
+                        last_ch = max(chapters_generated)
+                        novel_create_ch = _novel_load_chapter_text(ng_project_path, last_ch)
+                        novel_create_ch_list = _novel_list_chapter_titles(ng_project_path)
+                    else:
+                        novel_create_ch = gr.update()
+                        novel_create_ch_list = gr.update()
+                except Exception:
+                    novel_create_ch = gr.update()
+                    novel_create_ch_list = gr.update()
             else:
                 novel_create_status = gr.update()
                 novel_create_ch = gr.update()
@@ -5917,15 +6224,70 @@ def create_ui() -> gr.Blocks:
                 novel_create_chars = gr.update()
                 novel_create_world = gr.update()
                 novel_create_info = gr.update()
-                # Refresh project list when novel generate completes too
-                if ng_done and ng_status == "completed":
-                    novel_project_update = gr.update(choices=_novel_list_projects())
-                else:
-                    novel_project_update = gr.update()
+                novel_project_update = gr.update()
 
-            # Extract polish report when task completes
+            # Extract polish/feedback report + refresh chapter preview
+            np_chapter_preview = gr.update()
+            # Defaults for feedback plan textbox and confirm button
+            fb_plan_update = gr.update()
+            fb_confirm_btn_update = gr.update()
+            fb_analyze_btn_update = gr.update()
             if np_done and np_status == "completed":
                 polish_report = _extract_novel_polish_result(np_)
+                # Determine if this was a dry_run (analysis only) or actual rewrite
+                try:
+                    import json as _json
+                    np_result = _json.loads(np_.get("result", "{}")) if isinstance(np_.get("result"), str) else np_.get("result", {})
+                except Exception:
+                    np_result = {}
+                is_dry_run = np_result.get("dry_run", False)
+                if is_dry_run and "analysis" in np_result:
+                    # Analysis completed — show report in status, plan in editable textbox
+                    analysis = np_result.get("analysis", {})
+                    instructions = analysis.get("rewrite_instructions", {})
+                    # Format instructions as editable text
+                    plan_lines = []
+                    for ch_num, instr in sorted(instructions.items(), key=lambda x: int(x[0])):
+                        plan_lines.append(f"第{ch_num}章: {instr}")
+                    plan_text = "\n\n".join(plan_lines) if plan_lines else "AI未生成具体修改方案"
+                    fb_plan_update = gr.update(value=plan_text, interactive=True)
+                    fb_confirm_btn_update = gr.update(interactive=True, value="确认重写")
+                    fb_analyze_btn_update = gr.update(interactive=True, value="开始分析")
+                    # Show analysis summary in status box
+                    severity_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+                    severity = analysis.get("severity", "?")
+                    icon = severity_icons.get(severity, "⚪")
+                    status_summary = (
+                        f"分析完成 | {icon} {analysis.get('feedback_type', '')} ({severity})\n"
+                        f"诊断: {analysis.get('summary', '无')}\n"
+                        f"修改方案已填入下方，可编辑后点击「确认重写」"
+                    )
+                    novel_status = status_summary
+                else:
+                    # Actual rewrite completed — hide plan/confirm, refresh chapter
+                    fb_plan_update = gr.update(value="", interactive=False)
+                    fb_confirm_btn_update = gr.update(interactive=False, value="确认重写")
+                    fb_analyze_btn_update = gr.update(interactive=True, value="开始分析")
+                    # Auto-refresh chapter preview + chapter list after rewrite
+                    try:
+                        rewritten = np_result.get("rewritten_chapters") or np_result.get("polished_chapters") or []
+                        np_params = np_.get("params", {})
+                        project_path = np_params.get("project_path", "")
+                        if rewritten and project_path:
+                            first_ch = rewritten[0].get("chapter_number")
+                            if first_ch:
+                                np_chapter_preview = _novel_load_chapter_text(project_path, first_ch)
+                            # Also refresh chapter list to update word counts
+                            novel_create_ch_list = _novel_list_chapter_titles(project_path)
+                    except Exception as e:
+                        import logging
+                        logging.getLogger("novel").warning("刷新章节预览失败: %s", e)
+            elif np_done:
+                # Failed or cancelled — re-enable buttons, hide plan
+                polish_report = gr.update()
+                fb_analyze_btn_update = gr.update(interactive=True, value="开始分析")
+                fb_confirm_btn_update = gr.update(interactive=False, value="确认重写")
+                fb_plan_update = gr.update(value="", interactive=False)
             else:
                 polish_report = gr.update()
 
@@ -5950,6 +6312,11 @@ def create_ui() -> gr.Blocks:
                 gr.update(interactive=True, value="创建项目") if nc_done else gr.update(),
                 gr.update(interactive=True, value="继续写作") if ng_done else gr.update(),
                 gr.update(interactive=True, value="开始精修") if np_done else gr.update(),
+                # Feedback analyze btn + plan textbox + confirm btn
+                fb_analyze_btn_update,
+                fb_plan_update,
+                fb_confirm_btn_update,
+                # Other buttons
                 gr.update(interactive=True, value="一键生成视频") if dr_done else gr.update(),
                 gr.update(interactive=True, value="生成视频") if vd_done else gr.update(),
                 gr.update(interactive=True, value="生成 PPT") if pt_done else gr.update(),
@@ -5973,9 +6340,10 @@ def create_ui() -> gr.Blocks:
                 # Novel create result outputs
                 novel_create_outline, novel_create_chars,
                 novel_create_world, novel_create_info,
-                novel_create_ch, novel_create_ch_list,
+                np_chapter_preview if isinstance(np_chapter_preview, str) else novel_create_ch,
+                novel_create_ch_list,
                 novel_project_update,
-                # Polish report
+                # Polish report / feedback result
                 polish_report,
                 # PPT result outputs
                 ppt_file, ppt_outline_md,
@@ -6001,6 +6369,7 @@ def create_ui() -> gr.Blocks:
             outputs=[
                 novel_status_box, director_status, status_box, ppt_status_box,
                 novel_create_btn, novel_generate_btn, novel_polish_btn,
+                novel_fb_analyze_btn, novel_fb_plan, novel_fb_confirm_btn,
                 director_generate_btn, generate_btn, ppt_generate_btn,
                 ppt_confirm_btn, ppt_outline_btn,
                 poll_timer,

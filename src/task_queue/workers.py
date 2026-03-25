@@ -52,9 +52,9 @@ def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:
     elif task_type == TaskType.novel_generate:
         return _run_novel_generate(params, progress_cb)
     elif task_type == TaskType.novel_polish:
-        return _run_novel_polish(params)
+        return _run_novel_polish(params, progress_cb)
     elif task_type == TaskType.novel_feedback:
-        return _run_novel_feedback(params)
+        return _run_novel_feedback(params, progress_cb)
     elif task_type == TaskType.director_generate:
         return _run_director_generate(params, progress_cb)
     elif task_type == TaskType.video_generate:
@@ -69,6 +69,12 @@ def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:
         return _run_ppt_render_html(params, progress_cb)
     elif task_type == TaskType.ppt_export:
         return _run_ppt_export(params, progress_cb)
+    elif task_type == TaskType.novel_rewrite_affected:
+        return _run_novel_rewrite_affected(params, progress_cb)
+    elif task_type == TaskType.novel_resize:
+        return _run_novel_resize(params, progress_cb)
+    elif task_type == TaskType.novel_agent_chat:
+        return _run_novel_agent_chat(params, progress_cb)
     else:
         raise ValueError(f"Unknown task type: {task_type}")
 
@@ -103,12 +109,14 @@ def _run_novel_generate(params: dict, progress_cb) -> dict:
     completed = fm.list_chapters(novel_id)
     start_ch = params.get("start_chapter") or ((max(completed) + 1) if completed else 1)
 
-    # Auto-detect end chapter from outline
+    # Auto-detect end chapter from outline (or user-specified target)
     end_ch = params.get("end_chapter")
     if end_ch is None:
         ckpt = pipe._load_checkpoint(novel_id)
         if ckpt:
-            total = len(ckpt.get("outline", {}).get("chapters", []))
+            outlined = len(ckpt.get("outline", {}).get("chapters", []))
+            target_total = params.get("target_total")  # user override
+            total = max(outlined, target_total) if target_total else outlined
             batch = params.get("batch_size", 20)
             end_ch = min(start_ch + batch - 1, total)
 
@@ -121,7 +129,7 @@ def _run_novel_generate(params: dict, progress_cb) -> dict:
     )
 
 
-def _run_novel_polish(params: dict) -> dict:
+def _run_novel_polish(params: dict, progress_cb=None) -> dict:
     from src.novel.pipeline import NovelPipeline
 
     pipe = NovelPipeline(workspace=params.get("workspace", "workspace"))
@@ -129,10 +137,11 @@ def _run_novel_polish(params: dict) -> dict:
         project_path=params["project_path"],
         start_chapter=params.get("start_chapter", 1),
         end_chapter=params.get("end_chapter"),
+        progress_callback=progress_cb,
     )
 
 
-def _run_novel_feedback(params: dict) -> dict:
+def _run_novel_feedback(params: dict, progress_cb=None) -> dict:
     from src.novel.pipeline import NovelPipeline
 
     pipe = NovelPipeline(workspace=params.get("workspace", "workspace"))
@@ -141,6 +150,19 @@ def _run_novel_feedback(params: dict) -> dict:
         feedback_text=params["feedback_text"],
         chapter_number=params.get("chapter_number"),
         dry_run=params.get("dry_run", False),
+        progress_callback=progress_cb,
+        rewrite_instructions=params.get("rewrite_instructions"),
+    )
+
+
+def _run_novel_rewrite_affected(params: dict, progress_cb=None) -> dict:
+    from src.novel.pipeline import NovelPipeline
+
+    pipe = NovelPipeline(workspace=params.get("workspace", "workspace"))
+    return pipe.rewrite_affected_chapters(
+        project_path=params["project_path"],
+        impact=params["impact"],
+        progress_callback=progress_cb,
     )
 
 
@@ -472,3 +494,47 @@ def _run_ppt_export(params: dict, progress_cb) -> dict:
 
     progress_cb(1.0, "PPTX 导出完成")
     return {"output_path": result_path, "project_id": project_id}
+
+
+def _run_novel_resize(params: dict, progress_cb) -> dict:
+    """Resize novel outline (expand chapters via LLM)."""
+    from src.novel.pipeline import NovelPipeline
+
+    workspace = params["workspace"]
+    project_path = params["project_path"]
+    new_total = params["new_total"]
+
+    progress_cb(0.05, f"正在调整章节数至 {new_total}...")
+
+    pipe = NovelPipeline(workspace=workspace)
+    result = pipe.resize_novel(project_path, new_total, progress_callback=progress_cb)
+
+    progress_cb(1.0, f"章节数调整完成: {result['old_total']} → {result['new_total']}")
+    return result
+
+
+def _run_novel_agent_chat(params: dict, progress_cb) -> dict:
+    """Agent chat — autonomous tool-calling agent that interprets user intent
+    and executes multi-step operations on the novel."""
+    from src.novel.services.agent_chat import run_agent_chat
+
+    workspace = params["workspace"]
+    project_path = params["project_path"]
+    message = params["message"]
+    context_chapters = params.get("context_chapters")
+    history = params.get("history")
+    novel_id = Path(project_path).name
+
+    progress_cb(0.05, "启动 Agent...")
+
+    result = run_agent_chat(
+        workspace=workspace,
+        novel_id=novel_id,
+        message=message,
+        context_chapters=context_chapters,
+        history=history,
+        progress_callback=progress_cb,
+    )
+
+    progress_cb(1.0, "Agent 完成")
+    return result

@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from src.llm.llm_client import LLMClient, create_llm_client
+from src.llm.llm_client import LLMClient, LLMResponse, create_llm_client
 from src.novel.models.chapter import Chapter, Scene
 from src.novel.models.character import CharacterProfile
 from src.novel.models.novel import ChapterOutline
@@ -19,6 +19,9 @@ from src.novel.templates.style_presets import get_style
 from src.novel.utils import count_words, truncate_text
 
 log = logging.getLogger("novel")
+
+# 续写相关常量
+_MAX_CONTINUATIONS = 3  # 最多续写次数，防止无限循环
 
 # ---------------------------------------------------------------------------
 # 反 AI 味指令（写入每个 scene prompt）
@@ -101,6 +104,70 @@ class Writer:
         self._chapter_brief = chapter_brief if chapter_brief else None
 
     # ------------------------------------------------------------------
+    # 续写辅助：检测截断并自动续写
+    # ------------------------------------------------------------------
+
+    def _continue_if_truncated(
+        self,
+        response: LLMResponse,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """如果 LLM 回复因 max_tokens 被截断，自动续写直到完成。
+
+        Args:
+            response: 初始 LLM 回复
+            messages: 原始消息列表
+            temperature: 生成温度
+            max_tokens: 单次最大 token 数
+
+        Returns:
+            完整的文本（可能经过多次续写拼接）
+        """
+        text = response.content.strip()
+
+        if response.finish_reason != "length":
+            return text
+
+        log.warning(
+            "LLM 输出被截断（finish_reason=length, %d字），尝试续写...",
+            len(text),
+        )
+
+        for attempt in range(1, _MAX_CONTINUATIONS + 1):
+            # 构建续写消息：在原始对话后追加已生成内容 + 续写指令
+            continuation_messages = messages + [
+                {"role": "assistant", "content": text},
+                {
+                    "role": "user",
+                    "content": (
+                        "你的上一段输出被截断了，请从断点处继续写完。"
+                        "直接续写正文，不要重复已写内容，不要加任何前缀说明。"
+                        "必须写出完整的结尾段落，让场景有收束感，不要在动作或对话中途停止。"
+                    ),
+                },
+            ]
+
+            cont_response = self.llm.chat(
+                continuation_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            continuation = cont_response.content.strip()
+
+            if not continuation:
+                break
+
+            text = text + continuation
+            log.info("续写第%d次，累计%d字", attempt, len(text))
+
+            if cont_response.finish_reason != "length":
+                break  # 正常结束
+
+        return text
+
+    # ------------------------------------------------------------------
     # 主线上下文设置
     # ------------------------------------------------------------------
 
@@ -172,6 +239,7 @@ class Writer:
         context: str,
         style_name: str,
         scenes_written_summary: str = "",
+        debt_summary: str = "",
     ) -> Scene:
         """生成单个场景正文。"""
         char_desc = self._build_character_description(characters)
@@ -289,7 +357,16 @@ class Writer:
                     + "禁止自行创造新角色名或给已有角色改名/加姓氏。路人用职业称呼即可。\n"
                 )
 
+        # 叙事债务注入
+        debt_prompt = ""
+        if debt_summary:
+            debt_prompt = (
+                f"【前文未了结的叙事义务 — 本场景应尽量推进以下事项】\n"
+                f"{debt_summary}\n\n"
+            )
+
         user_prompt = (
+            f"{debt_prompt}"
             f"【场景信息】\n"
             f"- 地点：{scene_plan.get('location', '未指定')}\n"
             f"- 时间：{scene_plan.get('time', '未指定')}\n"
@@ -313,11 +390,15 @@ class Writer:
 
         user_prompt += (
             f"请直接输出场景正文，不要输出标题、序号或任何元信息。\n"
-            f"【字数要求 - 必须遵守】\n"
-            f"- 目标字数：{target_words}字（允许范围：{max(target_words - 200, 300)}-{target_words + 200}字）\n"
-            f"- 超过{target_words + 200}字的内容会被强制截断导致情节不完整，你必须自行控制节奏\n"
-            f"- 写到{target_words - 100}字左右时开始收束当前场景，在完整的句子处结束\n"
-            f"- 宁可少写50字，也不要超出上限"
+            f"【字数要求】\n"
+            f"- 目标字数：{target_words}字左右\n"
+            f"- 写到接近目标字数时自然收束场景，确保在完整句子处结束\n"
+            f"- 最重要的是场景完整、情节闭合，不要在动作或对话中途停止\n"
+            f"【收束要求 — 极其重要】\n"
+            f"- 场景必须有明确的结尾段落：角色做出决定、事件有阶段性结果、或情绪有落点\n"
+            f"- 禁止在对话、动作、战斗的中途戛然而止\n"
+            f"- 结尾至少需要2-3个完整句子来收束当前场景的叙事\n"
+            f"- 可以留悬念引出下文，但当前场景本身必须是完整的"
         )
 
         messages = [
@@ -325,31 +406,15 @@ class Writer:
             {"role": "user", "content": user_prompt},
         ]
 
-        # 用 max_tokens 硬限制输出长度
-        # DeepSeek/GPT 对中文 tokenizer 效率高：1 中文字 ≈ 0.6~1.0 token
-        # 用 1.0 作为保守换算，确保 max_tokens 真正约束输出长度
-        max_tokens = min(2048, target_words + 200)
+        # max_tokens: 中文1字 ≈ 1.5~2 token，给足空间让 LLM 完整收束
+        max_tokens = max(6144, target_words * 3)
         response = self.llm.chat(messages, temperature=0.85, max_tokens=max_tokens)
-        scene_text = response.content.strip()
+        scene_text = self._continue_if_truncated(
+            response, messages, temperature=0.85, max_tokens=max_tokens,
+        )
 
-        # 安全截断：仅在严重超标（1.5 倍）时触发，优先在段落/句子边界截断
-        hard_limit = int(target_words * 1.5)
-        if len(scene_text) > hard_limit:
-            # 优先找段落边界（\n\n）
-            cut_pos = scene_text.rfind("\n\n", 0, hard_limit)
-            if cut_pos > hard_limit // 2:
-                scene_text = scene_text[:cut_pos]
-            else:
-                # 其次找句子边界（。！？）
-                for sep in ("。", "！", "？", "!", "?", "\n"):
-                    cut_pos = scene_text.rfind(sep, 0, hard_limit)
-                    if cut_pos > hard_limit // 2:
-                        scene_text = scene_text[: cut_pos + 1]
-                        break
-                else:
-                    # 最后兜底：硬截断（极少触发）
-                    scene_text = scene_text[:hard_limit]
-            log.warning("场景文本超长(%d字)，截断至%d字", len(response.content), len(scene_text))
+        if len(scene_text) > target_words * 2:
+            log.warning("场景文本超长(%d字，目标%d字)", len(scene_text), target_words)
 
         # 角色名称校验：检测占位符和未知名称
         scene_text = self._check_character_names(scene_text, characters)
@@ -378,6 +443,7 @@ class Writer:
         world_setting: WorldSetting,
         context: str,
         style_name: str,
+        debt_summary: str = "",
     ) -> Chapter:
         """生成完整章节（逐场景生成，滑动窗口传递上下文）。"""
         # 从 chapter_outline 设置章节任务书
@@ -388,7 +454,9 @@ class Writer:
         scenes: list[Scene] = []
         running_context = context or ""
 
-        for plan in scene_plans:
+        for plan_idx, plan in enumerate(scene_plans):
+            is_last_scene = (plan_idx == len(scene_plans) - 1)
+
             # 构建本章已写场景上下文（渐进式：最近场景全文，更早场景给摘要）
             # 这样既能有效检测重复，又控制 token 增长
             scenes_written_summary = ""
@@ -413,6 +481,21 @@ class Writer:
                         )
                 scenes_written_summary = "\n\n".join(summaries)
 
+            # 最后一个场景需要强调章节结尾收束
+            if is_last_scene:
+                plan = dict(plan)  # don't mutate original
+                existing_goal = plan.get("goal", plan.get("summary", ""))
+                plan["goal"] = (
+                    existing_goal + "\n"
+                    "【这是本章最后一个场景】必须为整章写出完整的结尾：\n"
+                    "- 本场景的事件必须有阶段性结论（不能悬在半空）\n"
+                    "- 结尾用2-3段收束本章叙事，给读者一个「章节结束」的完整感\n"
+                    "- 可以留一个引向下章的钩子（一句话暗示即可），但本章的主要情节必须闭合"
+                )
+
+            # 叙事债务仅注入第一个场景
+            scene_debt_summary = debt_summary if plan_idx == 0 else ""
+
             scene = self.generate_scene(
                 scene_plan=plan,
                 chapter_outline=chapter_outline,
@@ -421,6 +504,7 @@ class Writer:
                 context=running_context,
                 style_name=style_name,
                 scenes_written_summary=scenes_written_summary,
+                debt_summary=scene_debt_summary,
             )
 
             # 【修复】场景去重：移除与前文重复的段落
@@ -543,8 +627,11 @@ class Writer:
         char_desc = self._build_character_description(characters)
         style = self._get_style_prompt(style_name)
         trimmed_context = truncate_text(context, _MAX_CONTEXT_CHARS) if context else ""
-        # Compress original text to save tokens
-        original_summary = truncate_text(original_text, 2000)
+        # Propagation needs full text for minimal edits; direct rewrite can use summary
+        if is_propagation:
+            original_summary = original_text
+        else:
+            original_summary = truncate_text(original_text, 3000)
         target_words = chapter_outline.estimated_words
 
         if is_propagation:
@@ -590,34 +677,23 @@ class Writer:
                 f"- 写到接近目标字数时在完整句子处自然收束，宁少勿多"
             )
 
-        # 1 中文字 ≈ 0.6~1.0 token，用 1.0 保守换算
-        max_tokens = min(2048, target_words + 300)
+        max_tokens = max(6144, target_words * 3)
+        rewrite_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
         response = self.llm.chat(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=rewrite_messages,
             temperature=0.8,
             max_tokens=max_tokens,
         )
 
-        rewritten = response.content.strip()
+        rewritten = self._continue_if_truncated(
+            response, rewrite_messages, temperature=0.8, max_tokens=max_tokens,
+        )
 
-        # 安全截断：仅在严重超标时触发，优先在段落/句子边界截断
-        hard_limit = int(target_words * 1.5)
-        if len(rewritten) > hard_limit:
-            cut_pos = rewritten.rfind("\n\n", 0, hard_limit)
-            if cut_pos > hard_limit // 2:
-                rewritten = rewritten[:cut_pos]
-            else:
-                for sep in ("。", "！", "？", "!", "?", "\n"):
-                    cut_pos = rewritten.rfind(sep, 0, hard_limit)
-                    if cut_pos > hard_limit // 2:
-                        rewritten = rewritten[: cut_pos + 1]
-                        break
-                else:
-                    rewritten = rewritten[:hard_limit]
-            log.warning("重写文本超长(%d字)，截断至%d字", len(response.content), len(rewritten))
+        if len(rewritten) > target_words * 2:
+            log.warning("重写文本超长(%d字，目标%d字)", len(rewritten), target_words)
 
         return rewritten
 
@@ -746,33 +822,23 @@ class Writer:
             f"- 宁可少写也不要超出上限"
         )
 
-        max_tokens = min(4096, target_words + 500)
+        max_tokens = max(6144, target_words * 3)
+        polish_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
         response = self.llm.chat(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=polish_messages,
             temperature=0.7,
             max_tokens=max_tokens,
         )
 
-        polished = response.content.strip()
+        polished = self._continue_if_truncated(
+            response, polish_messages, temperature=0.7, max_tokens=max_tokens,
+        )
 
-        # 安全截断
-        hard_limit = int(target_words * 1.5)
-        if len(polished) > hard_limit:
-            cut_pos = polished.rfind("\n\n", 0, hard_limit)
-            if cut_pos > hard_limit // 2:
-                polished = polished[:cut_pos]
-            else:
-                for sep in ("。", "！", "？", "!", "?", "\n"):
-                    cut_pos = polished.rfind(sep, 0, hard_limit)
-                    if cut_pos > hard_limit // 2:
-                        polished = polished[:cut_pos + 1]
-                        break
-                else:
-                    polished = polished[:hard_limit]
-            log.warning("精修文本超长(%d字)，截断至%d字", len(response.content), len(polished))
+        if len(polished) > target_words * 2:
+            log.warning("精修文本超长(%d字，目标%d字)", len(polished), target_words)
 
         return polished
 

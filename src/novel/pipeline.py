@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from src.novel.agents.graph import build_chapter_graph, build_init_graph, _merge_state
+from src.novel.agents.graph import build_chapter_graph, _merge_state
 from src.novel.config import NovelConfig, load_novel_config
 from src.novel.storage.file_manager import FileManager
 
@@ -174,6 +174,44 @@ class NovelPipeline:
         return data
 
     # ------------------------------------------------------------------
+    # Refresh state from novel.json (canonical source of truth)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _refresh_state_from_novel(state: dict, novel_data: dict | None) -> dict:
+        """Merge authoritative fields from novel.json into runtime state.
+
+        Edit operations (via edit_service) write to novel.json only.
+        The checkpoint may still contain stale data.  This method brings
+        outline / characters / world_setting / style_name up-to-date so
+        that generate_chapters() and apply_feedback() see the latest edits.
+
+        Args:
+            state: Runtime state loaded from checkpoint.json.
+            novel_data: Dict loaded from novel.json (may be None).
+
+        Returns:
+            The *same* state dict, mutated in-place for convenience.
+        """
+        if not novel_data:
+            return state
+
+        for key in ("outline", "characters", "world_setting"):
+            if key in novel_data:
+                state[key] = novel_data[key]
+
+        # Refresh main_storyline from outline
+        if "outline" in novel_data and isinstance(novel_data["outline"], dict):
+            if "main_storyline" in novel_data["outline"]:
+                state["main_storyline"] = novel_data["outline"]["main_storyline"]
+
+        # Refresh style_name
+        if "style_name" in novel_data:
+            state["style_name"] = novel_data["style_name"]
+
+        return state
+
+    # ------------------------------------------------------------------
     # create_novel
     # ------------------------------------------------------------------
 
@@ -290,6 +328,35 @@ class NovelPipeline:
             if isinstance(first, dict):
                 protagonist_names.append(first.get("name", ""))
 
+        # --- Story Arc Generation (optional) ---
+        try:
+            from src.novel.agents.novel_director import NovelDirector
+            from src.llm.llm_client import create_llm_client as _create_llm
+
+            _llm_config = state.get("config", {}).get("llm", {})
+            _llm = _create_llm(_llm_config)
+            director = NovelDirector(_llm)
+
+            outline_data = state.get("outline", {})
+            chapters = outline_data.get("chapters", []) if isinstance(outline_data, dict) else []
+            if chapters and hasattr(director, 'generate_story_arcs'):
+                arcs = director.generate_story_arcs(
+                    volume_outline=outline_data,
+                    chapter_outlines=chapters,
+                    genre=genre,
+                )
+                if arcs:
+                    state.setdefault("story_arcs", []).extend(arcs)
+                    # Update chapter arc_ids
+                    for arc in arcs:
+                        for ch_num in arc.get("chapters", []):
+                            for ch in chapters:
+                                if ch.get("chapter_number") == ch_num:
+                                    ch["arc_id"] = arc.get("arc_id")
+                    log.info("Generated %d story arcs", len(arcs))
+        except Exception as e:
+            log.warning("Story arc generation failed (non-critical): %s", e)
+
         # Generate synopsis from outline
         outline = state.get("outline", {})
         synopsis = outline.get("synopsis", "") if isinstance(outline, dict) else ""
@@ -389,6 +456,9 @@ class NovelPipeline:
         if state is None:
             raise FileNotFoundError(f"找不到项目检查点: {project_path}")
 
+        # ★ Refresh settings from novel.json (edit_service writes there)
+        self._refresh_state_from_novel(state, fm.load_novel(novel_id))
+
         outline = state.get("outline")
         if not outline:
             raise ValueError("项目大纲不存在，请先运行 create_novel")
@@ -424,6 +494,31 @@ class NovelPipeline:
         consecutive_failures = 0
         chapter_graph = build_chapter_graph()
 
+        # --- Narrative Control (optional) ---
+        obligation_tracker = None
+        debt_extractor = None
+        brief_validator = None
+        try:
+            from src.novel.services.obligation_tracker import ObligationTracker
+            from src.novel.services.debt_extractor import DebtExtractor
+            from src.novel.tools.brief_validator import BriefValidator
+            from src.llm.llm_client import create_llm_client
+
+            llm_config = state.get("config", {}).get("llm", {})
+            llm = create_llm_client(llm_config)
+
+            # Use memory's structured_db if available
+            if hasattr(self, 'memory') and self.memory and hasattr(self.memory, 'structured_db'):
+                obligation_tracker = ObligationTracker(self.memory.structured_db)
+            else:
+                obligation_tracker = ObligationTracker(db=None)  # in-memory fallback
+
+            debt_extractor = DebtExtractor(llm)
+            brief_validator = BriefValidator(llm)
+            log.info("Narrative control services initialized")
+        except Exception as e:
+            log.warning("Narrative control initialization failed (non-critical): %s", e)
+
         for ch_num in range(start_chapter, end_chapter + 1):
             log.info("=== 生成第 %d/%d 章 ===", ch_num, total_chapters)
 
@@ -433,6 +528,15 @@ class NovelPipeline:
                 done_in_batch = ch_num - start_chapter
                 pct = done_in_batch / total_in_batch
                 progress_callback(pct, f"正在生成第{ch_num}/{total_chapters}章...")
+
+            # --- Narrative Control: escalate overdue debts ---
+            if obligation_tracker:
+                try:
+                    escalated = obligation_tracker.escalate_debts(ch_num)
+                    if escalated > 0:
+                        log.info("Escalated %d overdue debts for chapter %d", escalated, ch_num)
+                except Exception:
+                    pass
 
             # Set up current chapter in state
             ch_outline = self._get_chapter_outline(outline, ch_num)
@@ -445,6 +549,17 @@ class NovelPipeline:
             state["current_chapter_text"] = None
             state["current_chapter_quality"] = None
             state["current_scenes"] = None
+
+            # --- Narrative Control: pass services to state ---
+            state["obligation_tracker"] = obligation_tracker
+            state["brief_validator"] = brief_validator
+            state["debt_extractor"] = debt_extractor
+
+            # --- Narrative Control: add chapter_brief to state (Task 6.3) ---
+            if ch_outline:
+                state["current_chapter_brief"] = ch_outline.get("chapter_brief", {})
+            else:
+                state["current_chapter_brief"] = {}
 
             # Run chapter graph
             try:
@@ -517,12 +632,21 @@ class NovelPipeline:
         if progress_callback:
             progress_callback(1.0, f"章节生成完成 ({len(chapters_generated)}章)")
 
-        return {
+        result = {
             "novel_id": novel_id,
             "chapters_generated": chapters_generated,
             "total_generated": len(chapters_generated),
             "errors": state.get("errors", []),
         }
+
+        # --- Narrative Control: include debt statistics ---
+        if obligation_tracker:
+            try:
+                result["debt_statistics"] = obligation_tracker.get_debt_statistics()
+            except Exception:
+                pass
+
+        return result
 
     # ------------------------------------------------------------------
     # resume_novel
@@ -875,6 +999,7 @@ class NovelPipeline:
         max_propagation: int = 10,
         dry_run: bool = False,
         progress_callback: Callable[[float, str], None] | None = None,
+        rewrite_instructions: dict | None = None,
     ) -> dict:
         """应用读者反馈，重写受影响章节。
 
@@ -898,28 +1023,46 @@ class NovelPipeline:
 
         # Load state
         novel_id = Path(project_path).name
+        fm = self._get_file_manager()
         state = self._load_checkpoint(novel_id)
         if state is None:
             raise FileNotFoundError(f"找不到项目检查点: {project_path}")
+
+        # ★ Refresh settings from novel.json (edit_service writes there)
+        self._refresh_state_from_novel(state, fm.load_novel(novel_id))
 
         # Initialize LLM
         llm_config = state.get("config", {}).get("llm", {})
         llm = create_llm_client(llm_config)
 
-        # Analyze feedback
-        if progress_callback:
-            progress_callback(0.1, "正在分析反馈...")
-        analyzer = FeedbackAnalyzer(llm)
+        # Analyze feedback (or use pre-computed instructions)
         outline_chapters = state.get("outline", {}).get("chapters", [])
         characters = state.get("characters", [])
 
-        analysis = analyzer.analyze(
-            feedback_text=feedback_text,
-            chapter_number=chapter_number,
-            outline_chapters=outline_chapters,
-            characters=characters,
-            max_propagation=max_propagation,
-        )
+        if rewrite_instructions:
+            # Skip LLM analysis — use user-approved instructions directly
+            log.info("使用预设重写指令，跳过 LLM 分析")
+            # Parse chapter numbers from instruction keys
+            target_chs = sorted(int(k) for k in rewrite_instructions.keys() if str(k).isdigit())
+            analysis = {
+                "feedback_type": "user_approved",
+                "severity": "medium",
+                "target_chapters": target_chs,
+                "propagation_chapters": [],
+                "rewrite_instructions": rewrite_instructions,
+                "summary": feedback_text,
+            }
+        else:
+            if progress_callback:
+                progress_callback(0.1, "正在分析反馈...")
+            analyzer = FeedbackAnalyzer(llm)
+            analysis = analyzer.analyze(
+                feedback_text=feedback_text,
+                chapter_number=chapter_number,
+                outline_chapters=outline_chapters,
+                characters=characters,
+                max_propagation=max_propagation,
+            )
 
         log.info(
             "反馈分析完成: 类型=%s, 严重度=%s, 直接修改%d章, 传播%d章",
@@ -942,7 +1085,6 @@ class NovelPipeline:
 
         # Prepare writer
         writer = Writer(llm)
-        fm = self._get_file_manager()
 
         # Restore models
         char_profiles: list[CharacterProfile] = []
@@ -1450,7 +1592,7 @@ class NovelPipeline:
             world_setting = WorldSetting(era="未知", location="未知")
 
         style_name = novel_data.get(
-            "style_subcategory", "webnovel.shuangwen"
+            "style_name", "webnovel.shuangwen"
         )
 
         rewritten: list[dict] = []
@@ -1537,6 +1679,74 @@ class NovelPipeline:
             if ch.get("chapter_number") == chapter_number:
                 return ch
         return None
+
+    # ------------------------------------------------------------------
+    # resize_novel — change total chapter count
+    # ------------------------------------------------------------------
+
+    def resize_novel(
+        self,
+        project_path: str,
+        new_total: int,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> dict:
+        """Resize a novel's outline to *new_total* chapters.
+
+        - **Expand** (new_total > current): uses ``_extend_outline()`` to
+          generate additional volume outlines via LLM.
+        - **Shrink** (new_total < current): truncates the outline, keeping
+          only the first *new_total* chapter entries.  Already-written
+          chapter files are **not** deleted (they remain on disk for safety).
+
+        Returns a summary dict with old/new counts.
+        """
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+        state = self._load_checkpoint(novel_id)
+        if state is None:
+            raise FileNotFoundError(f"找不到项目检查点: {project_path}")
+
+        outline = state.get("outline")
+        if not outline:
+            raise ValueError("项目大纲不存在")
+
+        chapters = outline.get("chapters", [])
+        old_total = len(chapters)
+
+        if new_total < 1:
+            raise ValueError("目标章节数必须 >= 1")
+
+        if new_total == old_total:
+            return {"novel_id": novel_id, "old_total": old_total, "new_total": old_total, "action": "none"}
+
+        if new_total > old_total:
+            # Expand
+            self._extend_outline(novel_id, state, new_total, progress_callback)
+            action = "expanded"
+        else:
+            # Shrink — truncate outline entries beyond new_total
+            outline["chapters"] = chapters[:new_total]
+            state["outline"] = outline
+            action = "shrunk"
+
+        # Update novel.json
+        novel_data = fm.load_novel_json(novel_id)
+        novel_data["outline"] = state["outline"]
+        novel_data["total_chapters"] = len(state["outline"].get("chapters", []))
+        fm.save_novel_json(novel_id, novel_data)
+
+        # Save checkpoint
+        self._save_checkpoint(novel_id, state)
+
+        final_total = len(state["outline"].get("chapters", []))
+        log.info("小说 %s 章节数调整: %d → %d (%s)", novel_id, old_total, final_total, action)
+
+        return {
+            "novel_id": novel_id,
+            "old_total": old_total,
+            "new_total": final_total,
+            "action": action,
+        }
 
     # ------------------------------------------------------------------
     # Outline extension (volume-based generation for long novels)
