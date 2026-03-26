@@ -83,12 +83,14 @@ def create_app() -> FastAPI:
     from src.api.ppt_routes import router as ppt_router
     from src.api.project_routes import router as project_router
     from src.api.settings_routes import router as settings_router
+    from src.api.prompts_routes import router as prompts_router
 
     app.include_router(novel_router)
     app.include_router(video_router)
     app.include_router(ppt_router)
     app.include_router(project_router)
     app.include_router(settings_router)
+    app.include_router(prompts_router)
 
     return app
 
