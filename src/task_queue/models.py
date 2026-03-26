@@ -22,6 +22,7 @@ class TaskType(str, enum.Enum):
     novel_rewrite_affected = "novel_rewrite_affected"
     novel_resize = "novel_resize"
     novel_agent_chat = "novel_agent_chat"
+    novel_narrative_rebuild = "novel_narrative_rebuild"
 
 
 class TaskStatus(str, enum.Enum):

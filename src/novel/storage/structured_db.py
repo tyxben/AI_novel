@@ -6,8 +6,10 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator
+from uuid import uuid4
 
 from src.novel.models.memory import ChapterSummary, Fact
 
@@ -119,6 +121,7 @@ class StructuredDB:
             cur.executescript(self._SCHEMA)
         self._ensure_chapter_debts_table()
         self._ensure_story_units_table()
+        self._ensure_conversations_table()
 
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Cursor, None, None]:
@@ -705,3 +708,166 @@ class StructuredDB:
                     "SELECT * FROM story_units ORDER BY volume_id ASC, arc_id ASC"
                 )
             return [dict(row) for row in cur.fetchall()]
+
+    # ========== conversations / chat_messages tables ==========
+
+    def _ensure_conversations_table(self) -> None:
+        """创建 conversations + chat_messages 表（Agent Chat 会话持久化）"""
+        with self.transaction() as cur:
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    session_id TEXT PRIMARY KEY,
+                    novel_id TEXT NOT NULL,
+                    title TEXT DEFAULT '新对话',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    message_count INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    message_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    steps TEXT,
+                    model TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES conversations(session_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_conversations_novel_id
+                    ON conversations(novel_id);
+                CREATE INDEX IF NOT EXISTS idx_conversations_updated_at
+                    ON conversations(updated_at);
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id
+                    ON chat_messages(session_id);
+            """)
+
+    def create_conversation(
+        self, novel_id: str, title: str = "新对话"
+    ) -> dict[str, Any]:
+        """创建新会话
+
+        Returns:
+            包含 session_id, novel_id, title, created_at 的 dict
+        """
+        session_id = f"conv_{uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat()
+        with self.transaction() as cur:
+            cur.execute(
+                """INSERT INTO conversations
+                   (session_id, novel_id, title, created_at, updated_at, message_count)
+                   VALUES (?, ?, ?, ?, ?, 0)
+                """,
+                (session_id, novel_id, title, now, now),
+            )
+        return {
+            "session_id": session_id,
+            "novel_id": novel_id,
+            "title": title,
+            "created_at": now,
+            "updated_at": now,
+            "message_count": 0,
+        }
+
+    def list_conversations(
+        self, novel_id: str
+    ) -> list[dict[str, Any]]:
+        """列出指定小说的所有会话，按 updated_at DESC 排序"""
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM conversations WHERE novel_id = ? ORDER BY updated_at DESC",
+                (novel_id,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_conversation_messages(
+        self, session_id: str
+    ) -> list[dict[str, Any]]:
+        """获取会话的所有消息，按 created_at ASC 排序。steps 字段会从 JSON 反序列化。"""
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC",
+                (session_id,),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                if row.get("steps"):
+                    try:
+                        row["steps"] = json.loads(row["steps"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Leave as string if not valid JSON
+            return rows
+
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        steps: list | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """添加消息到会话，同时更新会话的 updated_at 和 message_count
+
+        Returns:
+            消息 dict
+        """
+        message_id = f"msg_{uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat()
+        steps_json = json.dumps(steps, ensure_ascii=False) if steps is not None else None
+        with self.transaction() as cur:
+            cur.execute(
+                """INSERT INTO chat_messages
+                   (message_id, session_id, role, content, steps, model, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, session_id, role, content, steps_json, model, now),
+            )
+            cur.execute(
+                """UPDATE conversations
+                   SET updated_at = ?,
+                       message_count = message_count + 1
+                   WHERE session_id = ?
+                """,
+                (now, session_id),
+            )
+        return {
+            "message_id": message_id,
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "steps": steps,
+            "model": model,
+            "created_at": now,
+        }
+
+    def delete_conversation(self, session_id: str) -> bool:
+        """删除会话及其所有消息
+
+        Returns:
+            True if conversation existed and was deleted, False otherwise
+        """
+        with self.transaction() as cur:
+            cur.execute(
+                "DELETE FROM chat_messages WHERE session_id = ?",
+                (session_id,),
+            )
+            cur.execute(
+                "DELETE FROM conversations WHERE session_id = ?",
+                (session_id,),
+            )
+            return cur.rowcount > 0
+
+    def update_conversation_title(
+        self, session_id: str, title: str
+    ) -> None:
+        """更新会话标题"""
+        with self.transaction() as cur:
+            cur.execute(
+                "UPDATE conversations SET title = ? WHERE session_id = ?",
+                (title, session_id),
+            )

@@ -31,6 +31,11 @@ import {
   useKnowledgeGraph,
   useChapterBrief,
   useFulfillDebt,
+  useConversations,
+  useConversationMessages,
+  useCreateConversation,
+  useDeleteConversation,
+  useRebuildNarrative,
 } from "@/lib/hooks";
 import { PageHeader } from "@/components/layout/page-header";
 import { Panel } from "@/components/ui/panel";
@@ -45,6 +50,7 @@ import {
   Download,
   Trash2,
   MessageSquare,
+  MessageSquarePlus,
   Pencil,
   BookOpenText,
   Users,
@@ -1924,17 +1930,46 @@ function ToolStepCard({ step, defaultOpen }: { step: ToolStep; defaultOpen: bool
 }
 
 function AgentChatSection({ novelId }: { novelId: string }) {
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [optimisticMessages, setOptimisticMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [contextChapters, setContextChapters] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const qc = useQueryClient();
 
+  const { data: conversations, isLoading: convsLoading } = useConversations(novelId);
+  const { data: serverMessages, refetch: refetchMessages } = useConversationMessages(novelId, activeSessionId);
+  const createConv = useCreateConversation(novelId);
+  const deleteConv = useDeleteConversation(novelId);
   const agentChatMut = useAgentChat(novelId);
   const { data: taskData } = useTask(activeTaskId);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Merge server messages with optimistic messages
+  const displayMessages: ChatMessage[] = (() => {
+    const base: ChatMessage[] = (serverMessages ?? []).map((m) => ({
+      role: m.role,
+      content: m.content,
+      steps: m.steps,
+      model: m.model,
+    }));
+    // Append optimistic user messages not yet in server response
+    const serverCount = base.length;
+    const optimisticNew = optimisticMessages.slice(
+      Math.max(0, serverCount)
+    );
+    return [...base, ...optimisticNew];
+  })();
+
+  // Auto-select latest conversation on load
+  useEffect(() => {
+    if (!activeSessionId && conversations && conversations.length > 0) {
+      setActiveSessionId(conversations[0].session_id);
+    }
+  }, [conversations, activeSessionId]);
+
+  // Auto-scroll to bottom when messages change
   const scrollToBottom = useCallback(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -1943,45 +1978,66 @@ function AgentChatSection({ novelId }: { novelId: string }) {
 
   useEffect(() => {
     scrollToBottom();
-  }, [chatHistory, scrollToBottom]);
+  }, [displayMessages.length, scrollToBottom]);
+
+  // Clear optimistic messages when switching sessions
+  useEffect(() => {
+    setOptimisticMessages([]);
+    setActiveTaskId(null);
+  }, [activeSessionId]);
 
   // Poll task completion
   useEffect(() => {
     if (!taskData || !activeTaskId) return;
     if (taskData.status === "completed") {
-      let reply = "Agent 处理完成。";
-      let steps: any[] = [];
-      let model: string | undefined;
-      try {
-        const result =
-          typeof taskData.result === "string"
-            ? JSON.parse(taskData.result)
-            : taskData.result;
-        if (result?.reply) reply = result.reply;
-        if (result?.steps) steps = result.steps;
-        if (result?.model) model = result.model;
-      } catch {
-        reply = typeof taskData.result === "string" ? taskData.result : reply;
-      }
-      setChatHistory((prev) => [
-        ...prev,
-        { role: "agent", content: reply, steps, model },
-      ]);
+      // Refetch server messages to get the stored agent reply
+      refetchMessages();
+      setOptimisticMessages([]);
       setActiveTaskId(null);
-      // Invalidate all novel-related caches — agent may have modified chapters, settings, etc.
+      // Invalidate caches — agent may have modified chapters, settings, etc.
       qc.invalidateQueries({ queryKey: ["novel", novelId] });
       qc.invalidateQueries({ queryKey: ["chapter"] });
       qc.invalidateQueries({ queryKey: ["novel-settings", novelId] });
       qc.invalidateQueries({ queryKey: ["tasks"] });
+      qc.invalidateQueries({ queryKey: ["conversations", novelId] });
     } else if (taskData.status === "failed") {
       const errMsg = taskData.error || "Agent 处理失败，请稍后重试。";
-      setChatHistory((prev) => [
+      setOptimisticMessages((prev) => [
         ...prev,
         { role: "agent", content: `[错误] ${errMsg}` },
       ]);
       setActiveTaskId(null);
     }
-  }, [taskData, activeTaskId]);
+  }, [taskData, activeTaskId, novelId, qc, refetchMessages]);
+
+  const handleNewConversation = async () => {
+    try {
+      const conv = await createConv.mutateAsync(undefined);
+      setActiveSessionId(conv.session_id);
+      setOptimisticMessages([]);
+      setActiveTaskId(null);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDeleteConversation = async (sessionId: string) => {
+    try {
+      await deleteConv.mutateAsync(sessionId);
+      if (activeSessionId === sessionId) {
+        setActiveSessionId(null);
+        setOptimisticMessages([]);
+        setActiveTaskId(null);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSelectConversation = (sessionId: string) => {
+    if (sessionId === activeSessionId) return;
+    setActiveSessionId(sessionId);
+  };
 
   const handleSend = () => {
     const msg = inputMessage.trim();
@@ -1992,11 +2048,13 @@ function AgentChatSection({ novelId }: { novelId: string }) {
       .map((s) => parseInt(s.trim(), 10))
       .filter((n) => !isNaN(n) && n > 0);
 
-    setChatHistory((prev) => [...prev, { role: "user", content: msg }]);
+    // Optimistically add user message
+    setOptimisticMessages((prev) => [...prev, { role: "user", content: msg }]);
     setInputMessage("");
 
     // Build conversation history for multi-turn context
-    const history = chatHistory.map((m) => ({
+    const allMsgs = [...displayMessages, { role: "user" as const, content: msg }];
+    const history = allMsgs.map((m) => ({
       role: m.role === "agent" ? "assistant" : "user",
       content: m.content,
     }));
@@ -2006,13 +2064,19 @@ function AgentChatSection({ novelId }: { novelId: string }) {
         message: msg,
         contextChapters: chapters.length > 0 ? chapters : undefined,
         history: history.length > 0 ? history : undefined,
+        sessionId: activeSessionId ?? undefined,
       },
       {
         onSuccess: (data) => {
           setActiveTaskId(data.task_id);
+          // If backend created a new session, track it
+          if (data.session_id && !activeSessionId) {
+            setActiveSessionId(data.session_id);
+            qc.invalidateQueries({ queryKey: ["conversations", novelId] });
+          }
         },
         onError: (err) => {
-          setChatHistory((prev) => [
+          setOptimisticMessages((prev) => [
             ...prev,
             {
               role: "agent",
@@ -2026,124 +2090,227 @@ function AgentChatSection({ novelId }: { novelId: string }) {
 
   const isWorking = agentChatMut.isPending || !!activeTaskId;
 
+  const formatDate = (dateStr: string) => {
+    try {
+      const d = new Date(dateStr);
+      const now = new Date();
+      const diffMs = now.getTime() - d.getTime();
+      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      if (diffDays === 0) return "今天";
+      if (diffDays === 1) return "昨天";
+      if (diffDays < 7) return `${diffDays}天前`;
+      return `${d.getMonth() + 1}/${d.getDate()}`;
+    } catch {
+      return "";
+    }
+  };
+
   return (
     <Panel title="Agent 对话" description="与 AI Agent 对话，讨论你的小说。">
-      <div className="flex flex-col" style={{ height: "min(70vh, 680px)" }}>
-        {/* Chat history */}
+      <div className="flex" style={{ height: "min(70vh, 680px)" }}>
+        {/* Left sidebar — conversation list */}
         <div
-          ref={scrollRef}
-          className="flex-1 overflow-y-auto space-y-3 px-1 py-2"
+          className={`shrink-0 border-r border-slate-200 transition-all overflow-hidden ${
+            sidebarOpen ? "w-[200px]" : "w-0 border-r-0"
+          }`}
         >
-          {chatHistory.length === 0 && !isWorking && (
-            <div className="flex flex-col items-center justify-center py-16 text-slate-400">
-              <Bot className="mb-3 h-10 w-10" />
-              <p className="text-sm">向 Agent 提问关于你的小说的任何问题</p>
-              <p className="mt-1 text-xs text-slate-400">
-                例如：分析第3章的角色动机、检查前5章的伏笔一致性...
-              </p>
-            </div>
-          )}
+          <div className="flex flex-col h-full w-[200px]">
+            {/* New conversation button */}
+            <button
+              onClick={handleNewConversation}
+              disabled={createConv.isPending}
+              className="m-2 flex items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-300 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-accent hover:text-accent disabled:opacity-50"
+            >
+              {createConv.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <MessageSquarePlus className="h-3.5 w-3.5" />
+              )}
+              新对话
+            </button>
 
-          {chatHistory.map((msg, idx) =>
-            msg.role === "user" ? (
-              <div key={idx} className="flex justify-end">
-                <div className="max-w-[80%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-sm text-white">
-                  <p className="whitespace-pre-wrap">{msg.content}</p>
+            {/* Conversation list */}
+            <div className="flex-1 overflow-y-auto">
+              {convsLoading ? (
+                <div className="flex items-center justify-center py-6 text-slate-400">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 </div>
-              </div>
-            ) : (
-              <div key={idx} className="flex justify-start">
-                <div className="max-w-[90%] space-y-2">
-                  {/* Tool call chain — always visible, like Claude Code */}
-                  {msg.steps && msg.steps.length > 0 && (
-                    <div className="space-y-1.5">
-                      {msg.steps.map((step, si) => (
-                        <ToolStepCard key={si} step={step} defaultOpen={si === msg.steps!.length - 1} />
-                      ))}
+              ) : !conversations || conversations.length === 0 ? (
+                <p className="px-3 py-4 text-center text-xs text-slate-400">
+                  暂无对话
+                </p>
+              ) : (
+                <div className="space-y-0.5 px-1.5">
+                  {conversations.map((conv) => (
+                    <div
+                      key={conv.session_id}
+                      className={`group relative flex items-center rounded-lg px-2.5 py-2 text-xs cursor-pointer transition ${
+                        activeSessionId === conv.session_id
+                          ? "bg-accent/10 text-accent font-semibold"
+                          : "text-slate-600 hover:bg-slate-50"
+                      }`}
+                      onClick={() => handleSelectConversation(conv.session_id)}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="truncate">{conv.title || "新对话"}</p>
+                        <p className="mt-0.5 text-[10px] text-slate-400">
+                          {formatDate(conv.updated_at || conv.created_at)}
+                          {conv.message_count > 0 && ` / ${conv.message_count}条`}
+                        </p>
+                      </div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteConversation(conv.session_id);
+                        }}
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-300 opacity-0 transition hover:bg-rose-50 hover:text-rose-500 group-hover:opacity-100"
+                        title="删除对话"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
                     </div>
-                  )}
-
-                  {/* Final reply bubble */}
-                  <div className="rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink">
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
-                    {msg.model && (
-                      <p className="mt-1.5 text-[10px] text-slate-400">
-                        model: {msg.model}
-                      </p>
-                    )}
-                  </div>
+                  ))}
                 </div>
-              </div>
-            )
-          )}
-
-          {/* Thinking indicator */}
-          {isWorking && (
-            <div className="flex justify-start">
-              <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-500">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>
-                  Agent 思考中
-                  {taskData?.progress != null &&
-                    taskData.progress > 0 &&
-                    ` (${taskData.progress}%)`}
-                  {taskData?.progress_msg && ` — ${taskData.progress_msg}`}
-                  ...
-                </span>
-              </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
 
-        {/* Divider */}
-        <div className="border-t border-slate-200" />
+        {/* Right main area */}
+        <div className="flex flex-1 flex-col min-w-0">
+          {/* Toggle sidebar button */}
+          <div className="flex items-center gap-2 border-b border-slate-100 px-2 py-1">
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+              title={sidebarOpen ? "收起会话列表" : "展开会话列表"}
+            >
+              {sidebarOpen ? (
+                <ChevronRight className="h-3.5 w-3.5 rotate-180" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
+            </button>
+            <span className="text-xs text-slate-400 truncate">
+              {activeSessionId
+                ? conversations?.find((c) => c.session_id === activeSessionId)?.title || "当前对话"
+                : "选择或创建对话"}
+            </span>
+          </div>
 
-        {/* Input area */}
-        <div className="space-y-2 pt-3">
-          <div className="flex items-end gap-2">
-            <div className="flex-1 space-y-2">
-              <textarea
-                className={inputCls + " min-h-[48px] max-h-[120px] resize-none"}
-                placeholder="输入消息..."
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                rows={1}
+          {/* Chat messages */}
+          <div
+            ref={scrollRef}
+            className="flex-1 overflow-y-auto space-y-3 px-3 py-2"
+          >
+            {displayMessages.length === 0 && !isWorking && (
+              <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                <Bot className="mb-3 h-10 w-10" />
+                <p className="text-sm">向 Agent 提问关于你的小说的任何问题</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  例如：分析第3章的角色动机、检查前5章的伏笔一致性...
+                </p>
+              </div>
+            )}
+
+            {displayMessages.map((msg, idx) =>
+              msg.role === "user" ? (
+                <div key={idx} className="flex justify-end">
+                  <div className="max-w-[80%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-sm text-white">
+                    <p className="whitespace-pre-wrap">{msg.content}</p>
+                  </div>
+                </div>
+              ) : (
+                <div key={idx} className="flex justify-start">
+                  <div className="max-w-[90%] space-y-2">
+                    {msg.steps && msg.steps.length > 0 && (
+                      <div className="space-y-1.5">
+                        {msg.steps.map((step, si) => (
+                          <ToolStepCard key={si} step={step} defaultOpen={si === msg.steps!.length - 1} />
+                        ))}
+                      </div>
+                    )}
+                    <div className="rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink">
+                      <p className="whitespace-pre-wrap">{msg.content}</p>
+                      {msg.model && (
+                        <p className="mt-1.5 text-[10px] text-slate-400">
+                          model: {msg.model}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            )}
+
+            {/* Thinking indicator */}
+            {isWorking && (
+              <div className="flex justify-start">
+                <div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-500">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>
+                    Agent 思考中
+                    {taskData?.progress != null &&
+                      taskData.progress > 0 &&
+                      ` (${Math.round(taskData.progress * 100)}%)`}
+                    {taskData?.progress_msg && ` — ${taskData.progress_msg}`}
+                    ...
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Divider */}
+          <div className="border-t border-slate-200" />
+
+          {/* Input area */}
+          <div className="space-y-2 px-3 pt-3 pb-1">
+            <div className="flex items-end gap-2">
+              <div className="flex-1 space-y-2">
+                <textarea
+                  className={inputCls + " min-h-[48px] max-h-[120px] resize-none"}
+                  placeholder="输入消息..."
+                  value={inputMessage}
+                  onChange={(e) => setInputMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  rows={1}
+                  disabled={isWorking}
+                />
+              </div>
+              <button
+                className={btnPrimary + " shrink-0 px-3"}
+                onClick={handleSend}
+                disabled={!inputMessage.trim() || isWorking}
+                title="发送"
+              >
+                {isWorking ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </button>
+            </div>
+
+            {/* Context chapters input */}
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-400 whitespace-nowrap">
+                参考章节
+              </label>
+              <input
+                type="text"
+                className={inputCls + " max-w-[220px] !py-1.5 text-xs"}
+                placeholder="如 1,3,5 (可选)"
+                value={contextChapters}
+                onChange={(e) => setContextChapters(e.target.value)}
                 disabled={isWorking}
               />
             </div>
-            <button
-              className={btnPrimary + " shrink-0 px-3"}
-              onClick={handleSend}
-              disabled={!inputMessage.trim() || isWorking}
-              title="发送"
-            >
-              {isWorking ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-            </button>
-          </div>
-
-          {/* Context chapters input */}
-          <div className="flex items-center gap-2">
-            <label className="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-400 whitespace-nowrap">
-              参考章节
-            </label>
-            <input
-              type="text"
-              className={inputCls + " max-w-[220px] !py-1.5 text-xs"}
-              placeholder="如 1,3,5 (可选)"
-              value={contextChapters}
-              onChange={(e) => setContextChapters(e.target.value)}
-              disabled={isWorking}
-            />
           </div>
         </div>
       </div>
@@ -3037,6 +3204,7 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
   const [debtFilter, setDebtFilter] = useState("all");
   const [graphOpen, setGraphOpen] = useState(false);
   const [selectedBriefChapter, setSelectedBriefChapter] = useState<number | null>(null);
+  const [rebuildTaskId, setRebuildTaskId] = useState<string | null>(null);
 
   const { data: overview, isLoading: overviewLoading } = useNarrativeOverview(novelId);
   const { data: debts, isLoading: debtsLoading } = useNarrativeDebts(novelId, debtFilter);
@@ -3044,6 +3212,27 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
   const { data: graph, isLoading: graphLoading } = useKnowledgeGraph(novelId);
   const { data: brief } = useChapterBrief(novelId, selectedBriefChapter);
   const fulfillDebt = useFulfillDebt(novelId);
+  const rebuildMut = useRebuildNarrative(novelId);
+  const { data: rebuildTask } = useTask(rebuildTaskId);
+
+  // Track rebuild task completion
+  useEffect(() => {
+    if (!rebuildTask || !rebuildTaskId) return;
+    if (rebuildTask.status === "completed" || rebuildTask.status === "failed") {
+      // Keep the task ID for a short while so user sees the result
+      const timer = setTimeout(() => setRebuildTaskId(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [rebuildTask, rebuildTaskId]);
+
+  const handleRebuild = async () => {
+    try {
+      const result = await rebuildMut.mutateAsync();
+      setRebuildTaskId(result.task_id);
+    } catch {
+      // error handled by mutation state
+    }
+  };
 
   const debtFilterTabs = [
     { key: "all", label: "全部" },
@@ -3085,6 +3274,35 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
         ) : (
           <p className="py-4 text-center text-sm text-slate-400">暂无叙事数据</p>
         )}
+
+        {/* Rebuild narrative button */}
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            onClick={handleRebuild}
+            disabled={rebuildMut.isPending || (!!rebuildTaskId && rebuildTask?.status !== "completed" && rebuildTask?.status !== "failed")}
+            className="inline-flex items-center gap-2 rounded-xl bg-purple-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-purple-700 disabled:opacity-50"
+          >
+            {rebuildMut.isPending || (rebuildTaskId && rebuildTask?.status !== "completed" && rebuildTask?.status !== "failed") ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            从已有章节重建叙事数据
+          </button>
+          {rebuildTaskId && rebuildTask && (
+            <span className={`text-xs font-medium ${
+              rebuildTask.status === "completed" ? "text-emerald-600" :
+              rebuildTask.status === "failed" ? "text-rose-600" :
+              "text-purple-600"
+            }`}>
+              {rebuildTask.status === "completed"
+                ? "重建完成！"
+                : rebuildTask.status === "failed"
+                ? `重建失败: ${rebuildTask.error || "未知错误"}`
+                : rebuildTask.progress_msg || "正在分析所有章节..."}
+            </span>
+          )}
+        </div>
       </Panel>
 
       {/* B. Debts Panel */}

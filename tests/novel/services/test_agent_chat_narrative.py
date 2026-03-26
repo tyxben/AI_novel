@@ -116,8 +116,8 @@ class TestToolDefinitions:
         assert "get_narrative_overview" in names
 
     def test_total_tool_count(self):
-        # 9 original + 6 new = 15
-        assert len(TOOLS) == 15
+        # 9 original + 6 narrative + 1 rebuild = 16
+        assert len(TOOLS) == 16
 
     def test_tools_description_includes_new(self):
         desc = _tools_description()

@@ -5,6 +5,33 @@ import type {
   TaskDetail,
 } from "./types";
 
+export interface Conversation {
+  session_id: string;
+  novel_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface ToolStep {
+  step?: number;
+  thinking?: string;
+  tool: string;
+  args?: any;
+  result?: any;
+}
+
+export interface ChatMessageData {
+  message_id: string;
+  session_id: string;
+  role: "user" | "agent";
+  content: string;
+  steps?: ToolStep[];
+  model?: string;
+  created_at: string;
+}
+
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -182,14 +209,35 @@ export const api = {
         body: JSON.stringify({ chapters, published }),
       }
     ),
-  agentChat: (id: string, message: string, contextChapters?: number[], history?: Array<{role: string; content: string}>) =>
-    request<{ task_id: string }>(`/api/novels/${id}/agent-chat`, {
+  agentChat: (id: string, message: string, contextChapters?: number[], history?: Array<{role: string; content: string}>, sessionId?: string) =>
+    request<{ task_id: string; session_id?: string }>(`/api/novels/${id}/agent-chat`, {
       method: "POST",
-      body: JSON.stringify({ message, context_chapters: contextChapters, history }),
+      body: JSON.stringify({ message, context_chapters: contextChapters, history, session_id: sessionId }),
     }),
   exportNovel: (id: string) => request<any>(`/api/novels/${id}/export`),
   deleteNovel: (id: string) =>
     request<void>(`/api/novels/${id}`, { method: "DELETE" }),
+
+  // Conversations
+  getConversations: (novelId: string) =>
+    request<Conversation[]>(`/api/novels/${novelId}/conversations`),
+  createConversation: (novelId: string, title?: string) =>
+    request<Conversation>(`/api/novels/${novelId}/conversations`, {
+      method: "POST",
+      body: JSON.stringify({ title: title || "新对话" }),
+    }),
+  getConversationMessages: (novelId: string, sessionId: string) =>
+    request<ChatMessageData[]>(`/api/novels/${novelId}/conversations/${sessionId}/messages`),
+  deleteConversation: (novelId: string, sessionId: string) =>
+    request<void>(`/api/novels/${novelId}/conversations/${sessionId}`, {
+      method: "DELETE",
+    }),
+
+  // Narrative rebuild
+  rebuildNarrative: (novelId: string) =>
+    request<{ task_id: string }>(`/api/novels/${novelId}/narrative/rebuild`, {
+      method: "POST",
+    }),
 
   // Narrative Control
   getNarrativeOverview: (id: string) => request<any>(`/api/novels/${id}/narrative/overview`),

@@ -132,6 +132,18 @@ TOOLS = [
         "description": "获取叙事控制总览：待处理债务数、弧线进度、最近章节质量",
         "parameters": {},
     },
+    {
+        "name": "rebuild_narrative",
+        "description": "从已有章节重建叙事控制数据（债务、故事弧线）。适用于写了一半但没有叙事控制数据的小说。",
+        "parameters": {
+            "method": {
+                "type": "string",
+                "description": "提取方法: rule_based(纯规则快速), llm(AI分析精准), hybrid(混合推荐)",
+                "default": "hybrid",
+                "optional": True,
+            },
+        },
+    },
 ]
 
 
@@ -723,6 +735,28 @@ class AgentToolExecutor:
 
         return overview
 
+    def _tool_rebuild_narrative(self, method: str = "hybrid") -> dict:
+        from src.novel.services.narrative_rebuild import NarrativeRebuildService
+
+        # Create LLM client for hybrid/llm methods
+        llm = None
+        if method != "rule_based":
+            try:
+                from src.llm.llm_client import create_llm_client
+
+                llm = create_llm_client({})
+            except Exception:
+                pass
+
+        service = NarrativeRebuildService(
+            self._project_path, llm_client=llm
+        )
+        try:
+            result = service.rebuild_all(method=method)
+        finally:
+            service.close()
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Agent loop
@@ -860,6 +894,7 @@ def run_agent_chat(
                 "get_chapter_brief": "查看章节任务书",
                 "get_knowledge_graph": "查看知识图谱",
                 "get_narrative_overview": "叙事总览",
+                "rebuild_narrative": "重建叙事数据",
             }.get(tool_name, tool_name)
             progress_callback(
                 0.1 + (i / MAX_ITERATIONS) * 0.8,

@@ -75,6 +75,8 @@ def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:
         return _run_novel_resize(params, progress_cb)
     elif task_type == TaskType.novel_agent_chat:
         return _run_novel_agent_chat(params, progress_cb)
+    elif task_type == TaskType.novel_narrative_rebuild:
+        return _run_novel_narrative_rebuild(params, progress_cb)
     else:
         raise ValueError(f"Unknown task type: {task_type}")
 
@@ -538,5 +540,55 @@ def _run_novel_agent_chat(params: dict, progress_cb) -> dict:
         progress_callback=progress_cb,
     )
 
+    # Persist agent reply to conversation if session_id provided
+    session_id = params.get("session_id")
+    if session_id:
+        try:
+            from src.novel.storage.structured_db import StructuredDB
+            db_path = os.path.join(project_path, "memory.db")
+            db = StructuredDB(db_path)
+            db.add_message(
+                session_id=session_id,
+                role="agent",
+                content=result.get("reply", ""),
+                steps=result.get("steps"),
+                model=result.get("model"),
+            )
+        except Exception:
+            import logging
+            logging.getLogger("workers").warning(
+                "Failed to persist agent reply to session %s", session_id, exc_info=True
+            )
+
     progress_cb(1.0, "Agent 完成")
+    return result
+
+
+def _run_novel_narrative_rebuild(params: dict, progress_cb) -> dict:
+    """Worker: rebuild narrative control from existing chapters."""
+    from src.novel.services.narrative_rebuild import NarrativeRebuildService
+
+    project_path = params["project_path"]
+    method = params.get("method", "hybrid")
+
+    progress_cb(0.05, "初始化叙事重建服务...")
+
+    # Create LLM client if possible (for hybrid/llm extraction)
+    llm = None
+    try:
+        from src.llm.llm_client import create_llm_client
+
+        llm = create_llm_client({})
+    except Exception:
+        pass  # Rule-based only if LLM unavailable
+
+    progress_cb(0.1, "扫描章节...")
+
+    service = NarrativeRebuildService(project_path, llm_client=llm)
+    try:
+        result = service.rebuild_all(method=method)
+    finally:
+        service.close()
+
+    progress_cb(1.0, "叙事重建完成")
     return result

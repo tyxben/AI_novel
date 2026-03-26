@@ -78,6 +78,11 @@ class AgentChatRequest(BaseModel):
     message: str
     context_chapters: Optional[list[int]] = None
     history: Optional[list[dict]] = None
+    session_id: Optional[str] = None
+
+
+class CreateConversationRequest(BaseModel):
+    title: str = "新对话"
 
 
 class ChapterSaveRequest(BaseModel):
@@ -126,6 +131,15 @@ def _load_novel_json(novel_id: str) -> dict[str, Any]:
 def _project_path(novel_id: str) -> str:
     """Return the canonical project_path string."""
     return str(_novels_dir() / novel_id)
+
+
+def _get_structured_db(novel_id: str):
+    """Return a StructuredDB instance for the given novel."""
+    import os
+    from src.novel.storage.structured_db import StructuredDB
+    project_path = _project_path(novel_id)
+    db_path = os.path.join(project_path, "memory.db")
+    return StructuredDB(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +456,47 @@ def publish_chapters(novel_id: str, req: ChapterPublishRequest):
     return {"published_chapters": data["published_chapters"]}
 
 
+# ---------------------------------------------------------------------------
+# Conversation endpoints (Agent Chat session persistence)
+# ---------------------------------------------------------------------------
+
+@router.get("/{novel_id}/conversations")
+def list_conversations(novel_id: str):
+    """List all chat conversations for a novel."""
+    validate_id(novel_id)
+    db = _get_structured_db(novel_id)
+    return db.list_conversations(novel_id)
+
+
+@router.post("/{novel_id}/conversations", status_code=201)
+def create_conversation(novel_id: str, req: CreateConversationRequest):
+    """Create a new chat conversation."""
+    validate_id(novel_id)
+    db = _get_structured_db(novel_id)
+    return db.create_conversation(novel_id, title=req.title)
+
+
+@router.get("/{novel_id}/conversations/{session_id}/messages")
+def get_conversation_messages(novel_id: str, session_id: str):
+    """Get all messages in a conversation."""
+    validate_id(novel_id)
+    db = _get_structured_db(novel_id)
+    return db.get_conversation_messages(session_id)
+
+
+@router.delete("/{novel_id}/conversations/{session_id}")
+def delete_conversation(novel_id: str, session_id: str):
+    """Delete a conversation and its messages."""
+    validate_id(novel_id)
+    db = _get_structured_db(novel_id)
+    db.delete_conversation(session_id)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Agent Chat
+# ---------------------------------------------------------------------------
+
 @router.post("/{novel_id}/agent-chat", status_code=201)
 def agent_chat(novel_id: str, req: AgentChatRequest, request: Request):
     """Natural language agent chat — interpret user instruction and execute.
@@ -456,14 +511,26 @@ def agent_chat(novel_id: str, req: AgentChatRequest, request: Request):
     if not req.message or not req.message.strip():
         raise HTTPException(400, "message is required")
 
+    # Session persistence: create or reuse conversation
+    db = _get_structured_db(novel_id)
+    session_id = req.session_id
+    if not session_id:
+        title = req.message[:20].strip() + ("..." if len(req.message) > 20 else "")
+        conv = db.create_conversation(novel_id, title=title)
+        session_id = conv["session_id"]
+
+    # Save user message immediately
+    db.add_message(session_id, "user", req.message.strip())
+
     task_id = submit_to_queue("novel_agent_chat", {
         "workspace": get_workspace(),
         "project_path": _project_path(novel_id),
         "message": req.message.strip(),
         "context_chapters": req.context_chapters,
         "history": req.history,
+        "session_id": session_id,
     }, keys=keys)
-    return {"task_id": task_id}
+    return {"task_id": task_id, "session_id": session_id}
 
 
 @router.get("/{novel_id}/chapters/{chapter_num}")

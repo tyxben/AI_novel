@@ -11,10 +11,10 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from src.api.helpers import validate_id, get_workspace
+from src.api.helpers import validate_id, get_workspace, submit_to_queue, extract_api_keys
 
 log = logging.getLogger("api.narrative")
 
@@ -409,3 +409,20 @@ def get_knowledge_graph(novel_id: str):
     project = _project_path(novel_id)
     graph_data = _load_knowledge_graph(project)
     return graph_data
+
+
+@router.post("/rebuild", status_code=201)
+def rebuild_narrative(novel_id: str, request: Request):
+    """Rebuild narrative control data from existing chapters.
+
+    Scans all chapters, extracts debts, detects fulfilled debts,
+    and optionally analyzes story arcs.  Submitted as an async task.
+    """
+    project = _project_path(novel_id)  # validates novel exists
+    keys = extract_api_keys(request)
+    task_id = submit_to_queue("novel_narrative_rebuild", {
+        "workspace": get_workspace(),
+        "project_path": str(project),
+        "method": "hybrid",
+    }, keys=keys)
+    return {"task_id": task_id}

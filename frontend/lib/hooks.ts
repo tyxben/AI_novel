@@ -172,8 +172,8 @@ export function usePublishChapters(novelId: string) {
 export function useAgentChat(novelId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ message, contextChapters, history }: { message: string; contextChapters?: number[]; history?: Array<{role: string; content: string}> }) =>
-      api.agentChat(novelId, message, contextChapters, history),
+    mutationFn: ({ message, contextChapters, history, sessionId }: { message: string; contextChapters?: number[]; history?: Array<{role: string; content: string}>; sessionId?: string }) =>
+      api.agentChat(novelId, message, contextChapters, history, sessionId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["tasks"] });
     },
@@ -288,6 +288,52 @@ export function useDeleteNovel() {
     mutationFn: (id: string) => api.deleteNovel(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["novels"] });
+    },
+  });
+}
+
+// ─── Conversations ────────────────────────────────────────────────────
+export function useConversations(novelId: string) {
+  return useQuery({
+    queryKey: ["conversations", novelId],
+    queryFn: () => api.getConversations(novelId),
+    enabled: !!novelId,
+  });
+}
+
+export function useConversationMessages(novelId: string, sessionId: string | null) {
+  return useQuery({
+    queryKey: ["conversation-messages", novelId, sessionId],
+    queryFn: () => api.getConversationMessages(novelId, sessionId!),
+    enabled: !!novelId && !!sessionId,
+  });
+}
+
+export function useCreateConversation(novelId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (title?: string) => api.createConversation(novelId, title),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["conversations", novelId] }),
+  });
+}
+
+export function useDeleteConversation(novelId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) => api.deleteConversation(novelId, sessionId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["conversations", novelId] }),
+  });
+}
+
+// ─── Narrative Rebuild ────────────────────────────────────────────────
+export function useRebuildNarrative(novelId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.rebuildNarrative(novelId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["narrative-overview", novelId] });
+      qc.invalidateQueries({ queryKey: ["narrative-debts", novelId] });
+      qc.invalidateQueries({ queryKey: ["story-arcs", novelId] });
     },
   });
 }
