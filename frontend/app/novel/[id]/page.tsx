@@ -3583,58 +3583,64 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
         ) : (() => {
           const debtList = debts?.debts ?? debts ?? [];
           return (
-            <div className="overflow-hidden rounded-xl border border-slate-200">
+            <div className="rounded-xl border border-slate-200">
+              {/* Fixed header */}
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-400">
                   <tr>
-                    <th className="px-3 py-2">状态</th>
-                    <th className="px-3 py-2">类型</th>
-                    <th className="px-3 py-2">来源</th>
-                    <th className="px-3 py-2 w-full">描述</th>
-                    <th className="px-3 py-2">操作</th>
+                    <th className="px-3 py-2 w-8">状态</th>
+                    <th className="px-3 py-2 w-16">类型</th>
+                    <th className="px-3 py-2 w-14">来源</th>
+                    <th className="px-3 py-2">描述</th>
+                    <th className="px-3 py-2 w-14">操作</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {debtList.map((debt: any, idx: number) => {
-                    const typeStyle = DEBT_TYPE_STYLES[debt.debt_type] ?? DEBT_TYPE_STYLES.long_tail;
-                    return (
-                      <tr key={debt.id ?? idx} className="hover:bg-slate-50 transition-colors">
-                        <td className="px-3 py-2 whitespace-nowrap">
-                          <span className={`inline-block h-2 w-2 rounded-full ${
-                            debt.status === "fulfilled" ? "bg-emerald-500" :
-                            debt.status === "overdue" ? "bg-rose-500" :
-                            "bg-amber-400"
-                          }`} title={debt.status === "fulfilled" ? "已兑现" : debt.status === "overdue" ? "已逾期" : "待处理"} />
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap">
-                          <span className={`inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${typeStyle.bg} ${typeStyle.text}`}>
-                            {typeStyle.label}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-slate-500">第{debt.source_chapter}章</td>
-                        <td className="px-3 py-2 text-slate-700 max-w-0">
-                          <p className="truncate" title={debt.description}>{debt.description}</p>
-                          {debt.fulfillment_note && (
-                            <p className="truncate text-[10px] text-emerald-600 mt-0.5" title={debt.fulfillment_note}>{debt.fulfillment_note}</p>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap">
-                          {debt.status !== "fulfilled" && (
-                            <button
-                              onClick={() => fulfillDebt.mutate(debt.id)}
-                              disabled={fulfillDebt.isPending}
-                              className="rounded px-2 py-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition disabled:opacity-50"
-                            >
-                              <Check className="mr-0.5 inline h-2.5 w-2.5" />兑现
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
               </table>
-              <div className="bg-slate-50 px-3 py-1.5 text-[10px] text-slate-400 text-right">
+              {/* Scrollable body */}
+              <div className="max-h-[280px] overflow-y-auto">
+                <table className="w-full text-left text-xs">
+                  <tbody className="divide-y divide-slate-100">
+                    {debtList.map((debt: any, idx: number) => {
+                      const typeStyle = DEBT_TYPE_STYLES[debt.debt_type] ?? DEBT_TYPE_STYLES.long_tail;
+                      return (
+                        <tr key={debt.id ?? idx} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-3 py-1.5 w-8">
+                            <span className={`inline-block h-2 w-2 rounded-full ${
+                              debt.status === "fulfilled" ? "bg-emerald-500" :
+                              debt.status === "overdue" ? "bg-rose-500" :
+                              "bg-amber-400"
+                            }`} title={debt.status === "fulfilled" ? "已兑现" : debt.status === "overdue" ? "已逾期" : "待处理"} />
+                          </td>
+                          <td className="px-3 py-1.5 w-16">
+                            <span className={`inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${typeStyle.bg} ${typeStyle.text}`}>
+                              {typeStyle.label}
+                            </span>
+                          </td>
+                          <td className="px-3 py-1.5 w-14 text-slate-500">第{debt.source_chapter}章</td>
+                          <td className="px-3 py-1.5 text-slate-700 max-w-0">
+                            <p className="truncate" title={debt.description}>{debt.description}</p>
+                            {debt.fulfillment_note && (
+                              <p className="truncate text-[10px] text-emerald-600 mt-0.5" title={debt.fulfillment_note}>{debt.fulfillment_note}</p>
+                            )}
+                          </td>
+                          <td className="px-3 py-1.5 w-14">
+                            {debt.status !== "fulfilled" && (
+                              <button
+                                onClick={() => fulfillDebt.mutate(debt.id)}
+                                disabled={fulfillDebt.isPending}
+                                className="rounded px-2 py-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition disabled:opacity-50"
+                              >
+                                <Check className="mr-0.5 inline h-2.5 w-2.5" />兑现
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="bg-slate-50 px-3 py-1.5 text-[10px] text-slate-400 text-right border-t border-slate-100">
                 共 {debtList.length} 条
               </div>
             </div>
