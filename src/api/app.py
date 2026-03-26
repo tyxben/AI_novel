@@ -84,6 +84,7 @@ def create_app() -> FastAPI:
     from src.api.project_routes import router as project_router
     from src.api.settings_routes import router as settings_router
     from src.api.prompts_routes import router as prompts_router
+    from src.api.narrative_routes import router as narrative_router
 
     app.include_router(novel_router)
     app.include_router(video_router)
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(project_router)
     app.include_router(settings_router)
     app.include_router(prompts_router)
+    app.include_router(narrative_router)
 
     return app
 

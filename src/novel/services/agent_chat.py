@@ -87,6 +87,51 @@ TOOLS = [
             "message": {"type": "string", "description": "回复内容"},
         },
     },
+    {
+        "name": "get_narrative_debts",
+        "description": "查看叙事债务（未兑现的承诺、悬念、伏笔等），可按状态筛选",
+        "parameters": {
+            "status": {"type": "string", "description": "筛选状态: all/pending/overdue/fulfilled（默认 all）", "optional": True},
+            "chapter": {"type": "integer", "description": "查看特定章节相关的债务（可选）", "optional": True},
+        },
+    },
+    {
+        "name": "manage_debt",
+        "description": "管理叙事债务：标记为已兑现、调整优先级、添加新债务",
+        "parameters": {
+            "action": {"type": "string", "description": "操作: fulfill/add/escalate"},
+            "debt_id": {"type": "string", "description": "债务ID（fulfill/escalate时需要）", "optional": True},
+            "description": {"type": "string", "description": "债务描述（add时需要）", "optional": True},
+            "source_chapter": {"type": "integer", "description": "来源章节号（add时需要）", "optional": True},
+            "debt_type": {"type": "string", "description": "债务类型: must_pay_next/pay_within_3/long_tail_payoff（add时需要）", "optional": True},
+        },
+    },
+    {
+        "name": "get_story_arcs",
+        "description": "查看故事弧线（StoryUnit），了解每个弧线的起止章节、阶段和状态",
+        "parameters": {
+            "volume": {"type": "integer", "description": "查看特定卷的弧线（可选）", "optional": True},
+        },
+    },
+    {
+        "name": "get_chapter_brief",
+        "description": "查看章节任务书和完成度验证",
+        "parameters": {
+            "chapter_number": {"type": "integer", "description": "章节号"},
+        },
+    },
+    {
+        "name": "get_knowledge_graph",
+        "description": "查看知识图谱中的角色关系网络",
+        "parameters": {
+            "character": {"type": "string", "description": "查看特定角色的关系（可选，不填返回全部）", "optional": True},
+        },
+    },
+    {
+        "name": "get_narrative_overview",
+        "description": "获取叙事控制总览：待处理债务数、弧线进度、最近章节质量",
+        "parameters": {},
+    },
 ]
 
 
@@ -256,6 +301,428 @@ class AgentToolExecutor:
     def _tool_reply_to_user(self, message: str) -> dict:
         return {"reply": message}
 
+    # ------------------------------------------------------------------
+    # Narrative control helpers
+    # ------------------------------------------------------------------
+
+    def _get_obligation_tracker(self):
+        """Load or create an ObligationTracker for the current novel.
+
+        Returns ObligationTracker instance, or None if the database
+        cannot be initialized.
+        """
+        try:
+            from src.novel.services.obligation_tracker import ObligationTracker
+            from src.novel.storage.structured_db import StructuredDB
+
+            db_path = Path(self._project_path) / "memory.db"
+            if not db_path.exists():
+                # Novel created before narrative features — use in-memory
+                return ObligationTracker(db=None)
+            db = StructuredDB(db_path)
+            return ObligationTracker(db=db)
+        except Exception as exc:
+            log.warning("Failed to load ObligationTracker: %s", exc)
+            return None
+
+    def _get_structured_db(self):
+        """Load StructuredDB for the current novel, or None."""
+        try:
+            from src.novel.storage.structured_db import StructuredDB
+
+            db_path = Path(self._project_path) / "memory.db"
+            if not db_path.exists():
+                return None
+            return StructuredDB(db_path)
+        except Exception as exc:
+            log.warning("Failed to load StructuredDB: %s", exc)
+            return None
+
+    def _get_knowledge_graph(self):
+        """Load KnowledgeGraph for the current novel, or empty one."""
+        try:
+            from src.novel.storage.knowledge_graph import KnowledgeGraph
+
+            graph_json = Path(self._project_path) / "graph.json"
+            graph_pkl = Path(self._project_path) / "graph.pkl"
+            if graph_json.exists():
+                return KnowledgeGraph.load(str(graph_json))
+            elif graph_pkl.exists():
+                return KnowledgeGraph.load(str(graph_pkl))
+            return KnowledgeGraph()
+        except Exception as exc:
+            log.warning("Failed to load KnowledgeGraph: %s", exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Narrative control tools
+    # ------------------------------------------------------------------
+
+    def _tool_get_narrative_debts(self, status: str = "all", chapter: int | None = None) -> dict:
+        tracker = self._get_obligation_tracker()
+        if tracker is None:
+            return {"error": "叙事债务系统未初始化", "debts": []}
+
+        # Get all debts — use query_debts on DB, or iterate mem store
+        if tracker._mem_store is not None:
+            all_debts = list(tracker._mem_store.values())
+        elif tracker.db is not None:
+            all_debts = tracker.db.query_debts()
+        else:
+            all_debts = []
+
+        # Filter by status
+        if status != "all":
+            all_debts = [d for d in all_debts if d.get("status") == status]
+
+        # Filter by chapter (source or target)
+        if chapter is not None:
+            filtered = []
+            for d in all_debts:
+                if d.get("source_chapter") == chapter:
+                    filtered.append(d)
+                elif d.get("target_chapter") == chapter:
+                    filtered.append(d)
+            all_debts = filtered
+
+        stats = tracker.get_debt_statistics()
+
+        # Truncate for LLM context — serialize-safe copy
+        safe_debts = []
+        for d in all_debts[:20]:
+            safe_debts.append({
+                "debt_id": d.get("debt_id", ""),
+                "source_chapter": d.get("source_chapter"),
+                "type": d.get("type", ""),
+                "description": str(d.get("description", ""))[:200],
+                "status": d.get("status", ""),
+                "urgency_level": d.get("urgency_level", "normal"),
+                "target_chapter": d.get("target_chapter"),
+            })
+
+        return {
+            "total": len(all_debts),
+            "statistics": stats,
+            "debts": safe_debts,
+        }
+
+    def _tool_manage_debt(
+        self,
+        action: str,
+        debt_id: str | None = None,
+        description: str | None = None,
+        source_chapter: int | None = None,
+        debt_type: str | None = None,
+    ) -> dict:
+        tracker = self._get_obligation_tracker()
+        if tracker is None:
+            return {"error": "叙事债务系统未初始化"}
+
+        if action == "fulfill":
+            if not debt_id:
+                return {"error": "fulfill 操作需要 debt_id"}
+            tracker.mark_debt_fulfilled(debt_id, chapter_num=0, note="Agent Chat 手动标记")
+            return {"status": "fulfilled", "debt_id": debt_id}
+
+        elif action == "add":
+            if not description or source_chapter is None:
+                return {"error": "add 操作需要 description 和 source_chapter"}
+            import uuid
+            new_id = f"debt_{source_chapter}_chat_{uuid.uuid4().hex[:8]}"
+            tracker.add_debt(
+                debt_id=new_id,
+                source_chapter=source_chapter,
+                debt_type=debt_type or "pay_within_3",
+                description=description,
+            )
+            return {"status": "added", "debt_id": new_id, "description": description}
+
+        elif action == "escalate":
+            if not debt_id:
+                return {"error": "escalate 操作需要 debt_id"}
+            # Escalate by re-running escalation for a high chapter number
+            # to trigger overdue detection
+            escalated = tracker.escalate_debts(current_chapter=9999)
+            return {"status": "escalated", "total_escalated": escalated}
+
+        else:
+            return {"error": f"未知操作: {action}，支持: fulfill/add/escalate"}
+
+    def _tool_get_story_arcs(self, volume: int | None = None) -> dict:
+        db = self._get_structured_db()
+
+        arcs: list[dict] = []
+
+        # Try DB first
+        if db is not None:
+            try:
+                volume_id = str(volume) if volume is not None else None
+                rows = db.query_story_units(volume_id=volume_id)
+                for row in rows:
+                    chapters_raw = row.get("chapters", "[]")
+                    if isinstance(chapters_raw, str):
+                        try:
+                            chapters_list = json.loads(chapters_raw)
+                        except (json.JSONDecodeError, TypeError):
+                            chapters_list = []
+                    else:
+                        chapters_list = chapters_raw
+                    arcs.append({
+                        "arc_id": row.get("arc_id", ""),
+                        "volume_id": row.get("volume_id", ""),
+                        "name": row.get("name", ""),
+                        "chapters": chapters_list,
+                        "phase": row.get("phase", ""),
+                        "status": row.get("status", ""),
+                        "completion_rate": row.get("completion_rate", 0.0),
+                        "hook": str(row.get("hook", ""))[:100],
+                        "residual_question": str(row.get("residual_question", ""))[:100],
+                    })
+            except Exception as exc:
+                log.warning("Failed to query story_units from DB: %s", exc)
+
+        # Also try arcs.json file
+        if not arcs:
+            arcs_path = Path(self._project_path) / "arcs.json"
+            if arcs_path.exists():
+                try:
+                    with open(arcs_path, encoding="utf-8") as f:
+                        file_arcs = json.load(f)
+                    if isinstance(file_arcs, list):
+                        for arc in file_arcs:
+                            if volume is not None:
+                                vol_id = arc.get("volume_id")
+                                if vol_id is not None and int(vol_id) != volume:
+                                    continue
+                            arcs.append({
+                                "arc_id": arc.get("arc_id", ""),
+                                "volume_id": arc.get("volume_id", ""),
+                                "name": arc.get("name", ""),
+                                "chapters": arc.get("chapters", []),
+                                "phase": arc.get("phase", ""),
+                                "status": arc.get("status", ""),
+                                "completion_rate": arc.get("completion_rate", 0.0),
+                                "hook": str(arc.get("hook", ""))[:100],
+                                "residual_question": str(arc.get("residual_question", ""))[:100],
+                            })
+                except Exception as exc:
+                    log.warning("Failed to load arcs.json: %s", exc)
+
+        # Also check novel outline for story_units
+        if not arcs:
+            from src.novel.storage.file_manager import FileManager
+            fm = FileManager(self.workspace)
+            novel_data = fm.load_novel(self.novel_id)
+            if novel_data:
+                outline = novel_data.get("outline", {})
+                story_units = outline.get("story_units", [])
+                for su in story_units:
+                    if volume is not None:
+                        vol = su.get("volume_id")
+                        if vol is not None and int(vol) != volume:
+                            continue
+                    arcs.append({
+                        "arc_id": su.get("arc_id", ""),
+                        "volume_id": su.get("volume_id", ""),
+                        "name": su.get("name", ""),
+                        "chapters": su.get("chapters", []),
+                        "phase": su.get("phase", ""),
+                        "status": su.get("status", "planning"),
+                        "completion_rate": su.get("completion_rate", 0.0),
+                        "hook": str(su.get("hook", ""))[:100],
+                        "residual_question": str(su.get("residual_question", ""))[:100],
+                    })
+
+        return {
+            "total": len(arcs),
+            "arcs": arcs[:20],  # Limit for context
+        }
+
+    def _tool_get_chapter_brief(self, chapter_number: int) -> dict:
+        from src.novel.storage.file_manager import FileManager
+        fm = FileManager(self.workspace)
+        novel_data = fm.load_novel(self.novel_id)
+        if not novel_data:
+            return {"error": "小说不存在"}
+
+        outline = novel_data.get("outline", {})
+        chapters_outline = outline.get("chapters", [])
+
+        # Find chapter brief in outline
+        chapter_brief = None
+        chapter_outline = None
+        for ch in chapters_outline:
+            if ch.get("chapter_number") == chapter_number:
+                chapter_outline = ch
+                chapter_brief = ch.get("chapter_brief", {})
+                break
+
+        if chapter_outline is None:
+            return {"error": f"章节 {chapter_number} 不在大纲中"}
+
+        result: dict = {
+            "chapter_number": chapter_number,
+            "title": chapter_outline.get("title", ""),
+            "chapter_brief": chapter_brief or {},
+        }
+
+        # If chapter text exists, try to validate
+        ch_data = fm.load_chapter(self.novel_id, chapter_number)
+        if ch_data and chapter_brief:
+            text = ch_data.get("full_text", "")
+            if not text:
+                text = fm.load_chapter_text(self.novel_id, chapter_number) or ""
+            if text:
+                result["has_text"] = True
+                result["word_count"] = len(text)
+                # Simple check without LLM — just report brief items
+                brief_items = []
+                for key, val in chapter_brief.items():
+                    if val:
+                        brief_items.append({"item": key, "expected": str(val)[:200]})
+                result["brief_items"] = brief_items
+            else:
+                result["has_text"] = False
+        else:
+            result["has_text"] = ch_data is not None
+
+        return result
+
+    def _tool_get_knowledge_graph(self, character: str | None = None) -> dict:
+        kg = self._get_knowledge_graph()
+        if kg is None:
+            return {"error": "知识图谱未初始化", "nodes": [], "edges": []}
+
+        if character:
+            # Find the character node by name
+            char_id = None
+            for node_id, attrs in kg.graph.nodes(data=True):
+                if attrs.get("name") == character or node_id == character:
+                    char_id = node_id
+                    break
+
+            if char_id is None:
+                return {
+                    "error": f"未找到角色: {character}",
+                    "nodes": [],
+                    "edges": [],
+                }
+
+            # Get relationships for this character
+            rels = kg.get_relationships(char_id)
+            node_attrs = kg.get_node(char_id) or {}
+
+            # Collect related nodes
+            related_ids = set()
+            for r in rels:
+                related_ids.add(r.get("source", ""))
+                related_ids.add(r.get("target", ""))
+            related_ids.discard(char_id)
+
+            nodes = [{"id": char_id, **node_attrs}]
+            for rid in list(related_ids)[:20]:
+                n = kg.get_node(rid)
+                if n:
+                    nodes.append({"id": rid, **n})
+
+            edges = []
+            for r in rels[:20]:
+                edges.append({
+                    "source": r.get("source", ""),
+                    "target": r.get("target", ""),
+                    "type": r.get("type", ""),
+                    "intensity": r.get("intensity", 0),
+                    "chapter": r.get("chapter", 0),
+                })
+
+            return {
+                "character": character,
+                "nodes": nodes,
+                "edges": edges,
+            }
+
+        # Return full graph summary
+        all_characters = kg.get_nodes_by_type("character")
+        all_factions = kg.get_nodes_by_type("faction")
+        all_locations = kg.get_nodes_by_type("location")
+
+        # Collect all edges
+        edges = []
+        for u, v, _key, data in kg.graph.edges(data=True, keys=True):
+            edges.append({
+                "source": u,
+                "target": v,
+                "type": data.get("type", data.get("edge_type", "")),
+                "chapter": data.get("chapter", 0),
+            })
+
+        return {
+            "characters": [{"id": c["id"], "name": c.get("name", "")} for c in all_characters[:30]],
+            "factions": [{"id": f["id"], "name": f.get("name", "")} for f in all_factions[:10]],
+            "locations": [{"id": loc["id"], "name": loc.get("name", "")} for loc in all_locations[:10]],
+            "total_edges": len(edges),
+            "edges": edges[:30],
+        }
+
+    def _tool_get_narrative_overview(self) -> dict:
+        overview: dict = {}
+
+        # 1. Debt statistics
+        tracker = self._get_obligation_tracker()
+        if tracker is not None:
+            stats = tracker.get_debt_statistics()
+            overview["debt_statistics"] = stats
+        else:
+            overview["debt_statistics"] = {
+                "pending_count": 0, "fulfilled_count": 0,
+                "overdue_count": 0, "abandoned_count": 0,
+            }
+
+        # 2. Arc progress
+        arcs_result = self._tool_get_story_arcs()
+        arcs = arcs_result.get("arcs", [])
+        if arcs:
+            completed = sum(1 for a in arcs if a.get("status") == "completed")
+            in_progress = sum(1 for a in arcs if a.get("status") in ("active", "in_progress"))
+            planning = sum(1 for a in arcs if a.get("status") == "planning")
+            overview["arc_progress"] = {
+                "total": len(arcs),
+                "completed": completed,
+                "in_progress": in_progress,
+                "planning": planning,
+            }
+        else:
+            overview["arc_progress"] = {"total": 0, "completed": 0, "in_progress": 0, "planning": 0}
+
+        # 3. Novel basic info
+        from src.novel.storage.file_manager import FileManager
+        fm = FileManager(self.workspace)
+        novel_data = fm.load_novel(self.novel_id)
+        if novel_data:
+            outline = novel_data.get("outline", {})
+            total_chapters = len(outline.get("chapters", []))
+            current_chapter = novel_data.get("current_chapter", 0)
+            overview["novel_progress"] = {
+                "current_chapter": current_chapter,
+                "total_chapters": total_chapters,
+                "completion_pct": round(current_chapter / total_chapters * 100, 1) if total_chapters else 0,
+            }
+        else:
+            overview["novel_progress"] = {"current_chapter": 0, "total_chapters": 0, "completion_pct": 0}
+
+        # 4. Knowledge graph summary
+        kg = self._get_knowledge_graph()
+        if kg is not None:
+            overview["knowledge_graph"] = {
+                "total_nodes": kg.graph.number_of_nodes(),
+                "total_edges": kg.graph.number_of_edges(),
+                "characters": len(kg.get_nodes_by_type("character")),
+            }
+        else:
+            overview["knowledge_graph"] = {"total_nodes": 0, "total_edges": 0, "characters": 0}
+
+        return overview
+
 
 # ---------------------------------------------------------------------------
 # Agent loop
@@ -387,6 +854,12 @@ def run_agent_chat(
                 "get_novel_info": "获取信息",
                 "search_chapters": "搜索内容",
                 "reply_to_user": "回复用户",
+                "get_narrative_debts": "查看叙事债务",
+                "manage_debt": "管理债务",
+                "get_story_arcs": "查看故事弧线",
+                "get_chapter_brief": "查看章节任务书",
+                "get_knowledge_graph": "查看知识图谱",
+                "get_narrative_overview": "叙事总览",
             }.get(tool_name, tool_name)
             progress_callback(
                 0.1 + (i / MAX_ITERATIONS) * 0.8,

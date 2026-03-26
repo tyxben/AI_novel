@@ -191,6 +191,20 @@ export const api = {
   deleteNovel: (id: string) =>
     request<void>(`/api/novels/${id}`, { method: "DELETE" }),
 
+  // Narrative Control
+  getNarrativeOverview: (id: string) => request<any>(`/api/novels/${id}/narrative/overview`),
+  getNarrativeDebts: (id: string, status?: string) => {
+    const q = status && status !== "all" ? `?status=${status}` : "";
+    return request<any>(`/api/novels/${id}/narrative/debts${q}`);
+  },
+  addNarrativeDebt: (id: string, data: { description: string; source_chapter: number; debt_type: string }) =>
+    request<any>(`/api/novels/${id}/narrative/debts`, { method: "POST", body: JSON.stringify(data) }),
+  fulfillDebt: (id: string, debtId: string) =>
+    request<any>(`/api/novels/${id}/narrative/debts/${debtId}/fulfill`, { method: "POST" }),
+  getStoryArcs: (id: string) => request<any>(`/api/novels/${id}/narrative/arcs`),
+  getChapterBrief: (id: string, chNum: number) => request<any>(`/api/novels/${id}/narrative/briefs/${chNum}`),
+  getKnowledgeGraph: (id: string) => request<any>(`/api/novels/${id}/narrative/graph`),
+
   // Videos
   listVideos: () => request<ProjectSummary[]>("/api/videos"),
   getVideo: (id: string) => request<any>(`/api/videos/${id}`),

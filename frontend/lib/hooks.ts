@@ -292,6 +292,58 @@ export function useDeleteNovel() {
   });
 }
 
+// ─── Narrative Control ─────────────────────────────────────────────────
+export function useNarrativeOverview(novelId: string) {
+  return useQuery({
+    queryKey: ["narrative-overview", novelId],
+    queryFn: () => api.getNarrativeOverview(novelId),
+    enabled: !!novelId,
+  });
+}
+
+export function useNarrativeDebts(novelId: string, status?: string) {
+  return useQuery({
+    queryKey: ["narrative-debts", novelId, status],
+    queryFn: () => api.getNarrativeDebts(novelId, status),
+    enabled: !!novelId,
+  });
+}
+
+export function useStoryArcs(novelId: string) {
+  return useQuery({
+    queryKey: ["story-arcs", novelId],
+    queryFn: () => api.getStoryArcs(novelId),
+    enabled: !!novelId,
+  });
+}
+
+export function useChapterBrief(novelId: string, chapterNumber: number | null) {
+  return useQuery({
+    queryKey: ["chapter-brief", novelId, chapterNumber],
+    queryFn: () => api.getChapterBrief(novelId, chapterNumber!),
+    enabled: !!novelId && chapterNumber !== null,
+  });
+}
+
+export function useKnowledgeGraph(novelId: string) {
+  return useQuery({
+    queryKey: ["knowledge-graph", novelId],
+    queryFn: () => api.getKnowledgeGraph(novelId),
+    enabled: !!novelId,
+  });
+}
+
+export function useFulfillDebt(novelId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (debtId: string) => api.fulfillDebt(novelId, debtId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["narrative-debts", novelId] });
+      qc.invalidateQueries({ queryKey: ["narrative-overview", novelId] });
+    },
+  });
+}
+
 // ─── Videos ──────────────────────────────────────────────────────────
 export function useVideos() {
   return useQuery({

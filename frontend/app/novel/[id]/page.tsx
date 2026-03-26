@@ -25,6 +25,12 @@ import {
   useTask,
   useResizeNovel,
   usePublishChapters,
+  useNarrativeOverview,
+  useNarrativeDebts,
+  useStoryArcs,
+  useKnowledgeGraph,
+  useChapterBrief,
+  useFulfillDebt,
 } from "@/lib/hooks";
 import { PageHeader } from "@/components/layout/page-header";
 import { Panel } from "@/components/ui/panel";
@@ -58,6 +64,8 @@ import {
   Scaling,
   CheckCircle2,
   Circle,
+  GitBranch,
+  ChevronUp,
 } from "lucide-react";
 
 const btnCls =
@@ -84,7 +92,7 @@ export default function NovelDetailPage({
   const { id } = use(params);
   const { data: novel, isLoading, isError, error } = useNovel(id);
   const [activeTab, setActiveTab] = useState<
-    "overview" | "chapters" | "settings" | "feedback" | "edit" | "agent"
+    "overview" | "chapters" | "settings" | "feedback" | "edit" | "agent" | "narrative"
   >("overview");
 
   if (isLoading) {
@@ -138,6 +146,7 @@ export default function NovelDetailPage({
           { key: "feedback" as const, label: "反馈", icon: MessageSquare },
           { key: "edit" as const, label: "AI编辑", icon: Pencil },
           { key: "agent" as const, label: "Agent 对话", icon: Bot },
+          { key: "narrative" as const, label: "叙事控制", icon: GitBranch },
         ].map((tab) => (
           <button
             key={tab.key}
@@ -179,6 +188,9 @@ export default function NovelDetailPage({
           )}
           {activeTab === "agent" && (
             <AgentChatSection novelId={id} />
+          )}
+          {activeTab === "narrative" && (
+            <NarrativeControlSection novelId={id} />
           )}
         </div>
 
@@ -2997,6 +3009,367 @@ function ImpactReport({ impact }: { impact: any }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ─── Narrative Control Section ─────────────────────────────────────────
+const DEBT_TYPE_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  must_pay_next: { bg: "bg-rose-100", text: "text-rose-700", label: "下章必还" },
+  pay_within_3: { bg: "bg-amber-100", text: "text-amber-700", label: "3章内还" },
+  long_tail: { bg: "bg-sky-100", text: "text-sky-700", label: "长线伏笔" },
+};
+
+const DEBT_STATUS_STYLES: Record<string, { bg: string; border: string }> = {
+  pending: { bg: "bg-amber-50", border: "border-amber-200" },
+  overdue: { bg: "bg-rose-50", border: "border-rose-200" },
+  fulfilled: { bg: "bg-emerald-50", border: "border-emerald-200" },
+};
+
+const ARC_PHASE_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  setup: { bg: "bg-sky-100", text: "text-sky-700", label: "铺垫" },
+  escalation: { bg: "bg-amber-100", text: "text-amber-700", label: "升级" },
+  climax: { bg: "bg-rose-100", text: "text-rose-700", label: "高潮" },
+  resolution: { bg: "bg-emerald-100", text: "text-emerald-700", label: "收束" },
+};
+
+function NarrativeControlSection({ novelId }: { novelId: string }) {
+  const [debtFilter, setDebtFilter] = useState("all");
+  const [graphOpen, setGraphOpen] = useState(false);
+  const [selectedBriefChapter, setSelectedBriefChapter] = useState<number | null>(null);
+
+  const { data: overview, isLoading: overviewLoading } = useNarrativeOverview(novelId);
+  const { data: debts, isLoading: debtsLoading } = useNarrativeDebts(novelId, debtFilter);
+  const { data: arcs, isLoading: arcsLoading } = useStoryArcs(novelId);
+  const { data: graph, isLoading: graphLoading } = useKnowledgeGraph(novelId);
+  const { data: brief } = useChapterBrief(novelId, selectedBriefChapter);
+  const fulfillDebt = useFulfillDebt(novelId);
+
+  const debtFilterTabs = [
+    { key: "all", label: "全部" },
+    { key: "pending", label: "待处理" },
+    { key: "overdue", label: "逾期" },
+    { key: "fulfilled", label: "已兑现" },
+  ];
+
+  return (
+    <div className="space-y-5">
+      {/* A. Overview Panel */}
+      <Panel title="叙事概览">
+        {overviewLoading ? (
+          <div className="flex items-center justify-center py-8 text-slate-400">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            加载中...
+          </div>
+        ) : overview ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-center">
+              <p className="text-2xl font-bold text-amber-700">{overview.pending_debts ?? 0}</p>
+              <p className="mt-1 text-xs font-semibold text-amber-600">待处理债务</p>
+            </div>
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-center">
+              <p className="text-2xl font-bold text-rose-700">{overview.overdue_debts ?? 0}</p>
+              <p className="mt-1 text-xs font-semibold text-rose-600">逾期债务</p>
+            </div>
+            <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-center">
+              <p className="text-2xl font-bold text-sky-700">{overview.active_arcs ?? 0}</p>
+              <p className="mt-1 text-xs font-semibold text-sky-600">活跃弧线</p>
+            </div>
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-center">
+              <p className="text-2xl font-bold text-emerald-700">
+                {overview.arc_completion != null ? `${Math.round(overview.arc_completion)}%` : "-"}
+              </p>
+              <p className="mt-1 text-xs font-semibold text-emerald-600">弧线完成度</p>
+            </div>
+          </div>
+        ) : (
+          <p className="py-4 text-center text-sm text-slate-400">暂无叙事数据</p>
+        )}
+      </Panel>
+
+      {/* B. Debts Panel */}
+      <Panel title="叙事债务">
+        {/* Filter tabs */}
+        <div className="mb-4 flex gap-2">
+          {debtFilterTabs.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setDebtFilter(tab.key)}
+              className={debtFilter === tab.key ? tabActive : tabInactive}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {debtsLoading ? (
+          <div className="flex items-center justify-center py-8 text-slate-400">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            加载中...
+          </div>
+        ) : (debts?.debts ?? debts ?? []).length === 0 ? (
+          <p className="py-6 text-center text-sm text-slate-400">暂无叙事债务</p>
+        ) : (
+          <div className="space-y-3">
+            {(debts?.debts ?? debts ?? []).map((debt: any, idx: number) => {
+              const typeStyle = DEBT_TYPE_STYLES[debt.debt_type] ?? DEBT_TYPE_STYLES.long_tail;
+              const statusStyle = DEBT_STATUS_STYLES[debt.status] ?? DEBT_STATUS_STYLES.pending;
+              return (
+                <div
+                  key={debt.id ?? idx}
+                  className={`rounded-xl border p-4 ${statusStyle.bg} ${statusStyle.border}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-ink">{debt.description}</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${typeStyle.bg} ${typeStyle.text}`}>
+                          {typeStyle.label}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          来源: 第{debt.source_chapter}章
+                        </span>
+                        {debt.target_chapter && (
+                          <span className="text-xs text-slate-500">
+                            目标: 第{debt.target_chapter}章
+                          </span>
+                        )}
+                        <span className={`text-xs font-semibold ${
+                          debt.status === "overdue" ? "text-rose-600" :
+                          debt.status === "fulfilled" ? "text-emerald-600" :
+                          "text-amber-600"
+                        }`}>
+                          {debt.status === "overdue" ? "已逾期" :
+                           debt.status === "fulfilled" ? "已兑现" :
+                           "待处理"}
+                        </span>
+                      </div>
+                    </div>
+                    {debt.status !== "fulfilled" && (
+                      <button
+                        onClick={() => fulfillDebt.mutate(debt.id)}
+                        disabled={fulfillDebt.isPending}
+                        className="shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-50"
+                      >
+                        {fulfillDebt.isPending ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Check className="mr-1 inline h-3 w-3" />
+                        )}
+                        标记已兑现
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Panel>
+
+      {/* C. Story Arcs Panel */}
+      <Panel title="故事弧线">
+        {arcsLoading ? (
+          <div className="flex items-center justify-center py-8 text-slate-400">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            加载中...
+          </div>
+        ) : (arcs?.arcs ?? arcs ?? []).length === 0 ? (
+          <p className="py-6 text-center text-sm text-slate-400">暂无故事弧线</p>
+        ) : (
+          <div className="space-y-4">
+            {(arcs?.arcs ?? arcs ?? []).map((arc: any, idx: number) => {
+              const phaseStyle = ARC_PHASE_STYLES[arc.current_phase] ?? ARC_PHASE_STYLES.setup;
+              const startCh = arc.start_chapter ?? 1;
+              const endCh = arc.end_chapter ?? startCh;
+              const currentCh = arc.current_chapter ?? startCh;
+              const totalSpan = Math.max(endCh - startCh, 1);
+              const progress = Math.min(
+                Math.round(((currentCh - startCh) / totalSpan) * 100),
+                100
+              );
+              return (
+                <div key={arc.id ?? idx} className="rounded-xl border border-slate-200 bg-white p-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-ink">{arc.title || `弧线 ${idx + 1}`}</h4>
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${phaseStyle.bg} ${phaseStyle.text}`}>
+                      {phaseStyle.label}
+                    </span>
+                  </div>
+                  {arc.description && (
+                    <p className="mt-1 text-xs text-slate-500">{arc.description}</p>
+                  )}
+                  <div className="mt-3 flex items-center gap-3 text-xs text-slate-500">
+                    <span>第{startCh}章 - 第{endCh}章</span>
+                    <span className={`font-semibold ${
+                      arc.status === "completed" ? "text-emerald-600" :
+                      arc.status === "active" ? "text-sky-600" :
+                      "text-slate-500"
+                    }`}>
+                      {arc.status === "completed" ? "已完结" :
+                       arc.status === "active" ? "进行中" :
+                       arc.status ?? "计划中"}
+                    </span>
+                  </div>
+                  <div className="mt-2 h-2 rounded-full bg-slate-100">
+                    <div
+                      className={`h-2 rounded-full transition-all ${
+                        arc.status === "completed" ? "bg-emerald-500" : "bg-accent"
+                      }`}
+                      style={{ width: `${arc.status === "completed" ? 100 : progress}%` }}
+                    />
+                  </div>
+                  <p className="mt-1 text-right text-xs text-slate-400">
+                    {arc.status === "completed" ? "100" : progress}%
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Panel>
+
+      {/* Chapter Brief Lookup */}
+      <Panel title="章节纲要查询">
+        <div className="flex items-center gap-3">
+          <input
+            type="number"
+            min={1}
+            placeholder="输入章节号..."
+            className={inputCls + " max-w-[180px]"}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const val = parseInt((e.target as HTMLInputElement).value);
+                if (!isNaN(val) && val > 0) setSelectedBriefChapter(val);
+              }
+            }}
+          />
+          <button
+            onClick={() => {
+              const input = document.querySelector<HTMLInputElement>(
+                'input[type="number"][placeholder="输入章节号..."]'
+              );
+              if (input) {
+                const val = parseInt(input.value);
+                if (!isNaN(val) && val > 0) setSelectedBriefChapter(val);
+              }
+            }}
+            className={btnSecondary}
+          >
+            <Search className="h-4 w-4" />
+            查询
+          </button>
+        </div>
+        {selectedBriefChapter !== null && brief && (
+          <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm">
+            <h4 className="font-semibold text-ink">第{selectedBriefChapter}章纲要</h4>
+            {brief.title && <p className="mt-1 text-slate-600">标题: {brief.title}</p>}
+            {brief.summary && <p className="mt-2 text-slate-600">{brief.summary}</p>}
+            {brief.key_events && (
+              <div className="mt-2">
+                <p className="text-xs font-semibold text-slate-500">关键事件:</p>
+                <ul className="mt-1 list-inside list-disc text-slate-600">
+                  {(Array.isArray(brief.key_events) ? brief.key_events : []).map((ev: string, i: number) => (
+                    <li key={i}>{ev}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {brief.debts_introduced && brief.debts_introduced.length > 0 && (
+              <div className="mt-2">
+                <p className="text-xs font-semibold text-slate-500">引入的债务:</p>
+                <ul className="mt-1 list-inside list-disc text-slate-600">
+                  {brief.debts_introduced.map((d: string, i: number) => (
+                    <li key={i}>{d}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {brief.debts_resolved && brief.debts_resolved.length > 0 && (
+              <div className="mt-2">
+                <p className="text-xs font-semibold text-slate-500">解决的债务:</p>
+                <ul className="mt-1 list-inside list-disc text-slate-600">
+                  {brief.debts_resolved.map((d: string, i: number) => (
+                    <li key={i}>{d}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </Panel>
+
+      {/* D. Knowledge Graph Panel (collapsible) */}
+      <Panel title="知识图谱" className={graphOpen ? "" : ""}>
+        <button
+          onClick={() => setGraphOpen(!graphOpen)}
+          className="flex w-full items-center justify-between rounded-xl px-1 py-1 text-sm font-semibold text-slate-600 transition hover:text-ink"
+        >
+          <span>{graphOpen ? "收起" : "展开"} 角色关系图</span>
+          {graphOpen ? (
+            <ChevronUp className="h-4 w-4" />
+          ) : (
+            <ChevronDown className="h-4 w-4" />
+          )}
+        </button>
+
+        {graphOpen && (
+          <>
+            {graphLoading ? (
+              <div className="flex items-center justify-center py-8 text-slate-400">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                加载中...
+              </div>
+            ) : (() => {
+              const nodes = graph?.nodes ?? [];
+              const edges = graph?.edges ?? graph?.relationships ?? [];
+              if (nodes.length === 0 && edges.length === 0) {
+                return <p className="py-6 text-center text-sm text-slate-400">暂无知识图谱数据</p>;
+              }
+
+              // Group edges by source character
+              const grouped: Record<string, Array<{ target: string; relation: string }>> = {};
+              for (const edge of edges) {
+                const src = edge.source ?? edge.from ?? "";
+                const tgt = edge.target ?? edge.to ?? "";
+                const rel = edge.relation ?? edge.label ?? edge.type ?? "关联";
+                if (!grouped[src]) grouped[src] = [];
+                grouped[src].push({ target: tgt, relation: rel });
+              }
+
+              return (
+                <div className="mt-3 space-y-3">
+                  {Object.entries(grouped).map(([character, relations]) => (
+                    <div key={character} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <h5 className="text-sm font-semibold text-ink">{character}</h5>
+                      <div className="mt-2 space-y-1">
+                        {relations.map((r, i) => (
+                          <div key={i} className="flex items-center gap-2 text-xs text-slate-600">
+                            <span className="rounded-full bg-sky-100 px-2 py-0.5 text-sky-700 font-medium">
+                              {r.relation}
+                            </span>
+                            <span className="text-slate-400">&rarr;</span>
+                            <span className="font-medium text-ink">{r.target}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {nodes.length > 0 && Object.keys(grouped).length === 0 && (
+                    <div className="space-y-2">
+                      {nodes.map((node: any, i: number) => (
+                        <div key={i} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-ink">
+                          {node.name ?? node.label ?? node.id ?? JSON.stringify(node)}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </>
+        )}
+      </Panel>
     </div>
   );
 }
