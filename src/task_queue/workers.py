@@ -584,7 +584,9 @@ def _run_novel_narrative_rebuild(params: dict, progress_cb) -> dict:
 
     progress_cb(0.1, "扫描章节...")
 
-    service = NarrativeRebuildService(project_path, llm_client=llm)
+    service = NarrativeRebuildService(
+        project_path, llm_client=llm, progress_cb=progress_cb
+    )
     try:
         result = service.rebuild_all(method=method)
     finally:

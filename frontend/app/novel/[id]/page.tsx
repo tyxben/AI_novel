@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, use, useEffect, useRef, useCallback } from "react";
+import { useState, use, useEffect, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -3200,6 +3200,210 @@ const ARC_PHASE_STYLES: Record<string, { bg: string; text: string; label: string
   resolution: { bg: "bg-emerald-100", text: "text-emerald-700", label: "收束" },
 };
 
+// ─── Knowledge Graph SVG Visualization ──────────────────────────────────
+function KnowledgeGraphVisualization({
+  nodes,
+  edges,
+}: {
+  nodes: any[];
+  edges: any[];
+}) {
+  const [positions, setPositions] = useState<
+    Record<string, { x: number; y: number }>
+  >({});
+
+  const nodeList = useMemo(() => {
+    if (nodes.length) return nodes;
+    const names = new Set<string>();
+    for (const e of edges) {
+      const s = e.source ?? e.from ?? "";
+      const t = e.target ?? e.to ?? "";
+      if (s) names.add(s);
+      if (t) names.add(t);
+    }
+    return [...names].map((n) => ({ id: n, name: n }));
+  }, [nodes, edges]);
+
+  // Initialize positions in a circle then run force simulation
+  useEffect(() => {
+    if (nodeList.length === 0) return;
+
+    const cx = 300,
+      cy = 200,
+      radius = Math.min(150, 30 + nodeList.length * 10);
+    const pos: Record<string, { x: number; y: number }> = {};
+
+    nodeList.forEach((node: any, i: number) => {
+      const angle = (2 * Math.PI * i) / nodeList.length;
+      const name = node.name ?? node.id ?? String(node);
+      pos[name] = {
+        x: cx + radius * Math.cos(angle),
+        y: cy + radius * Math.sin(angle),
+      };
+    });
+
+    // Run 50 iterations of simple force layout
+    let current = { ...pos };
+    const nodeNames = Object.keys(current);
+
+    for (let iter = 0; iter < 50; iter++) {
+      const forces: Record<string, { fx: number; fy: number }> = {};
+      nodeNames.forEach((n) => (forces[n] = { fx: 0, fy: 0 }));
+
+      // Repulsion between all nodes
+      for (let i = 0; i < nodeNames.length; i++) {
+        for (let j = i + 1; j < nodeNames.length; j++) {
+          const a = nodeNames[i],
+            b = nodeNames[j];
+          const dx = current[a].x - current[b].x;
+          const dy = current[a].y - current[b].y;
+          const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+          const force = 5000 / (dist * dist);
+          forces[a].fx += (dx / dist) * force;
+          forces[a].fy += (dy / dist) * force;
+          forces[b].fx -= (dx / dist) * force;
+          forces[b].fy -= (dy / dist) * force;
+        }
+      }
+
+      // Attraction along edges
+      for (const edge of edges) {
+        const src = edge.source ?? edge.from ?? "";
+        const tgt = edge.target ?? edge.to ?? "";
+        if (!current[src] || !current[tgt]) continue;
+        const dx = current[tgt].x - current[src].x;
+        const dy = current[tgt].y - current[src].y;
+        const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+        const force = dist * 0.01;
+        if (forces[src]) {
+          forces[src].fx += (dx / dist) * force;
+          forces[src].fy += (dy / dist) * force;
+        }
+        if (forces[tgt]) {
+          forces[tgt].fx -= (dx / dist) * force;
+          forces[tgt].fy -= (dy / dist) * force;
+        }
+      }
+
+      // Center gravity
+      nodeNames.forEach((n) => {
+        forces[n].fx += (300 - current[n].x) * 0.01;
+        forces[n].fy += (200 - current[n].y) * 0.01;
+      });
+
+      // Apply forces
+      const next: Record<string, { x: number; y: number }> = {};
+      nodeNames.forEach((n) => {
+        next[n] = {
+          x: Math.max(40, Math.min(560, current[n].x + forces[n].fx * 0.3)),
+          y: Math.max(40, Math.min(360, current[n].y + forces[n].fy * 0.3)),
+        };
+      });
+      current = next;
+    }
+
+    setPositions(current);
+  }, [nodeList, edges]);
+
+  const roleColors: Record<string, string> = {
+    protagonist: "#6366f1",
+    antagonist: "#ef4444",
+    supporting: "#0ea5e9",
+    mentor: "#f59e0b",
+  };
+
+  const edgeElements = edges.map((edge: any, i: number) => {
+    const src = edge.source ?? edge.from ?? "";
+    const tgt = edge.target ?? edge.to ?? "";
+    const rel = edge.relation ?? edge.label ?? edge.type ?? "关联";
+    const p1 = positions[src];
+    const p2 = positions[tgt];
+    if (!p1 || !p2) return null;
+    const mx = (p1.x + p2.x) / 2;
+    const my = (p1.y + p2.y) / 2;
+    return (
+      <g key={`edge-${i}`}>
+        <line
+          x1={p1.x}
+          y1={p1.y}
+          x2={p2.x}
+          y2={p2.y}
+          stroke="#cbd5e1"
+          strokeWidth={1.5}
+        />
+        <text
+          x={mx}
+          y={my - 4}
+          textAnchor="middle"
+          className="text-[9px]"
+          fill="#94a3b8"
+        >
+          {rel}
+        </text>
+      </g>
+    );
+  });
+
+  const nodeElements = nodeList.map((node: any, i: number) => {
+    const name = node.name ?? node.id ?? String(node);
+    const role = node.role ?? "";
+    const pos = positions[name];
+    if (!pos) return null;
+    const color = roleColors[role] ?? "#64748b";
+    return (
+      <g key={`node-${i}`}>
+        <circle
+          cx={pos.x}
+          cy={pos.y}
+          r={20}
+          fill={color}
+          opacity={0.15}
+          stroke={color}
+          strokeWidth={2}
+        />
+        <text
+          x={pos.x}
+          y={pos.y + 4}
+          textAnchor="middle"
+          className="text-xs font-semibold"
+          fill={color}
+        >
+          {name}
+        </text>
+      </g>
+    );
+  });
+
+  return (
+    <div>
+      <svg
+        viewBox="0 0 600 400"
+        className="w-full rounded-xl border border-slate-200 bg-white"
+      >
+        {edgeElements}
+        {nodeElements}
+      </svg>
+      {/* Role legend */}
+      <div className="mt-2 flex gap-4 justify-center">
+        {Object.entries({
+          protagonist: "主角",
+          antagonist: "反派",
+          supporting: "配角",
+          mentor: "导师",
+        }).map(([k, v]) => (
+          <div key={k} className="flex items-center gap-1 text-xs text-slate-500">
+            <div
+              className="h-2.5 w-2.5 rounded-full border-2"
+              style={{ borderColor: roleColors[k], backgroundColor: roleColors[k] + "26" }}
+            />
+            {v}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function NarrativeControlSection({ novelId }: { novelId: string }) {
   const [debtFilter, setDebtFilter] = useState("all");
   const [graphOpen, setGraphOpen] = useState(false);
@@ -3296,10 +3500,10 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
               "text-purple-600"
             }`}>
               {rebuildTask.status === "completed"
-                ? "重建完成！"
+                ? (() => { try { const r = JSON.parse(typeof rebuildTask.result === 'string' ? rebuildTask.result : '{}'); return `重建完成！${r.chapters_scanned ?? 0}章扫描, ${r.debts_extracted ?? 0}个债务, ${r.arcs_detected ?? 0}个弧线`; } catch { return "重建完成！"; } })()
                 : rebuildTask.status === "failed"
                 ? `重建失败: ${rebuildTask.error || "未知错误"}`
-                : rebuildTask.progress_msg || "正在分析所有章节..."}
+                : `${rebuildTask.progress_msg || "正在分析..."} (${Math.round((rebuildTask.progress ?? 0) * 100)}%)`}
             </span>
           )}
         </div>
@@ -3394,57 +3598,180 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
           </div>
         ) : (arcs?.arcs ?? arcs ?? []).length === 0 ? (
           <p className="py-6 text-center text-sm text-slate-400">暂无故事弧线</p>
-        ) : (
-          <div className="space-y-4">
-            {(arcs?.arcs ?? arcs ?? []).map((arc: any, idx: number) => {
-              const phaseStyle = ARC_PHASE_STYLES[arc.current_phase] ?? ARC_PHASE_STYLES.setup;
-              const startCh = arc.start_chapter ?? 1;
-              const endCh = arc.end_chapter ?? startCh;
-              const currentCh = arc.current_chapter ?? startCh;
-              const totalSpan = Math.max(endCh - startCh, 1);
-              const progress = Math.min(
-                Math.round(((currentCh - startCh) / totalSpan) * 100),
-                100
-              );
-              return (
-                <div key={arc.id ?? idx} className="rounded-xl border border-slate-200 bg-white p-4">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-sm font-semibold text-ink">{arc.title || `弧线 ${idx + 1}`}</h4>
-                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${phaseStyle.bg} ${phaseStyle.text}`}>
-                      {phaseStyle.label}
-                    </span>
-                  </div>
-                  {arc.description && (
-                    <p className="mt-1 text-xs text-slate-500">{arc.description}</p>
-                  )}
-                  <div className="mt-3 flex items-center gap-3 text-xs text-slate-500">
-                    <span>第{startCh}章 - 第{endCh}章</span>
-                    <span className={`font-semibold ${
-                      arc.status === "completed" ? "text-emerald-600" :
-                      arc.status === "active" ? "text-sky-600" :
-                      "text-slate-500"
-                    }`}>
-                      {arc.status === "completed" ? "已完结" :
-                       arc.status === "active" ? "进行中" :
-                       arc.status ?? "计划中"}
-                    </span>
-                  </div>
-                  <div className="mt-2 h-2 rounded-full bg-slate-100">
+        ) : (() => {
+          const arcList: any[] = arcs?.arcs ?? arcs ?? [];
+          const timelinePhaseColors: Record<string, string> = {
+            setup: "bg-sky-400",
+            escalation: "bg-amber-400",
+            climax: "bg-rose-500",
+            resolution: "bg-emerald-500",
+          };
+
+          // Compute chapter range across all arcs
+          const allChapterNums = arcList.flatMap((arc: any) => {
+            const chs = arc.chapters ?? [];
+            if (chs.length) return chs;
+            const s = arc.start_chapter ?? 1;
+            const e = arc.end_chapter ?? s;
+            return Array.from({ length: e - s + 1 }, (_, i) => s + i);
+          });
+          const minCh = allChapterNums.length ? Math.min(...allChapterNums) : 1;
+          const maxCh = allChapterNums.length ? Math.max(...allChapterNums) : 1;
+          const totalRange = Math.max(maxCh - minCh + 1, 1);
+
+          return (
+            <div>
+              {/* Timeline visualization */}
+              <div className="mt-2">
+                {/* Chapter number ruler */}
+                <div className="flex items-end mb-2 pl-[140px]">
+                  {Array.from({ length: totalRange }, (_, i) => minCh + i).map((ch) => (
                     <div
-                      className={`h-2 rounded-full transition-all ${
-                        arc.status === "completed" ? "bg-emerald-500" : "bg-accent"
-                      }`}
-                      style={{ width: `${arc.status === "completed" ? 100 : progress}%` }}
-                    />
-                  </div>
-                  <p className="mt-1 text-right text-xs text-slate-400">
-                    {arc.status === "completed" ? "100" : progress}%
-                  </p>
+                      key={ch}
+                      className="text-[10px] text-slate-400 text-center"
+                      style={{ width: `${100 / totalRange}%` }}
+                    >
+                      {ch}
+                    </div>
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-        )}
+
+                {/* Arc bars */}
+                <div className="space-y-2">
+                  {arcList.map((arc: any, idx: number) => {
+                    const chapters = arc.chapters ?? [];
+                    const startCh = chapters.length
+                      ? Math.min(...chapters)
+                      : (arc.start_chapter ?? 1);
+                    const endCh = chapters.length
+                      ? Math.max(...chapters)
+                      : (arc.end_chapter ?? startCh);
+                    const phase = arc.current_phase ?? arc.phase ?? "setup";
+                    const leftPct = ((startCh - minCh) / totalRange) * 100;
+                    const widthPct = ((endCh - startCh + 1) / totalRange) * 100;
+                    const color = timelinePhaseColors[phase] ?? "bg-slate-400";
+
+                    return (
+                      <div key={arc.id ?? idx} className="flex items-center gap-2">
+                        <div className="w-[130px] truncate text-right text-xs text-slate-600 font-medium">
+                          {arc.title ?? arc.name ?? `弧线${idx + 1}`}
+                        </div>
+                        <div className="relative flex-1 h-7 bg-slate-50 rounded">
+                          <div
+                            className={`absolute h-7 rounded ${color} opacity-80 flex items-center justify-center`}
+                            style={{
+                              left: `${leftPct}%`,
+                              width: `${Math.max(widthPct, 3)}%`,
+                            }}
+                            title={`${arc.title ?? arc.name ?? ""}: 第${startCh}-${endCh}章 (${phase})`}
+                          >
+                            <span className="text-[10px] text-white font-semibold truncate px-1">
+                              {arc.hook ?? arc.description ?? ""}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Phase legend */}
+                <div className="mt-3 flex gap-4 justify-center">
+                  {Object.entries({
+                    setup: "铺垫",
+                    escalation: "升级",
+                    climax: "高潮",
+                    resolution: "收束",
+                  }).map(([k, v]) => (
+                    <div key={k} className="flex items-center gap-1 text-xs text-slate-500">
+                      <div className={`h-2.5 w-2.5 rounded-sm ${timelinePhaseColors[k]}`} />
+                      {v}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Detail cards (below timeline) */}
+              <div className="mt-6 space-y-4">
+                {arcList.map((arc: any, idx: number) => {
+                  const phaseStyle =
+                    ARC_PHASE_STYLES[arc.current_phase ?? arc.phase] ??
+                    ARC_PHASE_STYLES.setup;
+                  const chapters = arc.chapters ?? [];
+                  const startCh = chapters.length
+                    ? Math.min(...chapters)
+                    : (arc.start_chapter ?? 1);
+                  const endCh = chapters.length
+                    ? Math.max(...chapters)
+                    : (arc.end_chapter ?? startCh);
+                  const currentCh = arc.current_chapter ?? startCh;
+                  const totalSpan = Math.max(endCh - startCh, 1);
+                  const progress = Math.min(
+                    Math.round(((currentCh - startCh) / totalSpan) * 100),
+                    100
+                  );
+                  return (
+                    <div
+                      key={arc.id ?? `detail-${idx}`}
+                      className="rounded-xl border border-slate-200 bg-white p-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-sm font-semibold text-ink">
+                          {arc.title ?? arc.name ?? `弧线 ${idx + 1}`}
+                        </h4>
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${phaseStyle.bg} ${phaseStyle.text}`}
+                        >
+                          {phaseStyle.label}
+                        </span>
+                      </div>
+                      {(arc.description ?? arc.hook) && (
+                        <p className="mt-1 text-xs text-slate-500">
+                          {arc.description ?? arc.hook}
+                        </p>
+                      )}
+                      <div className="mt-3 flex items-center gap-3 text-xs text-slate-500">
+                        <span>
+                          第{startCh}章 - 第{endCh}章
+                        </span>
+                        <span
+                          className={`font-semibold ${
+                            arc.status === "completed"
+                              ? "text-emerald-600"
+                              : arc.status === "active"
+                                ? "text-sky-600"
+                                : "text-slate-500"
+                          }`}
+                        >
+                          {arc.status === "completed"
+                            ? "已完结"
+                            : arc.status === "active"
+                              ? "进行中"
+                              : (arc.status ?? "计划中")}
+                        </span>
+                      </div>
+                      <div className="mt-2 h-2 rounded-full bg-slate-100">
+                        <div
+                          className={`h-2 rounded-full transition-all ${
+                            arc.status === "completed"
+                              ? "bg-emerald-500"
+                              : "bg-accent"
+                          }`}
+                          style={{
+                            width: `${arc.status === "completed" ? 100 : progress}%`,
+                          }}
+                        />
+                      </div>
+                      <p className="mt-1 text-right text-xs text-slate-400">
+                        {arc.status === "completed" ? "100" : progress}%
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
       </Panel>
 
       {/* Chapter Brief Lookup */}
@@ -3539,49 +3866,21 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
                 加载中...
               </div>
             ) : (() => {
-              const nodes = graph?.nodes ?? [];
-              const edges = graph?.edges ?? graph?.relationships ?? [];
-              if (nodes.length === 0 && edges.length === 0) {
-                return <p className="py-6 text-center text-sm text-slate-400">暂无知识图谱数据</p>;
+              const graphNodes = graph?.nodes ?? [];
+              const graphEdges = graph?.edges ?? graph?.relationships ?? [];
+              if (graphNodes.length === 0 && graphEdges.length === 0) {
+                return (
+                  <p className="py-6 text-center text-sm text-slate-400">
+                    暂无知识图谱数据
+                  </p>
+                );
               }
-
-              // Group edges by source character
-              const grouped: Record<string, Array<{ target: string; relation: string }>> = {};
-              for (const edge of edges) {
-                const src = edge.source ?? edge.from ?? "";
-                const tgt = edge.target ?? edge.to ?? "";
-                const rel = edge.relation ?? edge.label ?? edge.type ?? "关联";
-                if (!grouped[src]) grouped[src] = [];
-                grouped[src].push({ target: tgt, relation: rel });
-              }
-
               return (
-                <div className="mt-3 space-y-3">
-                  {Object.entries(grouped).map(([character, relations]) => (
-                    <div key={character} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <h5 className="text-sm font-semibold text-ink">{character}</h5>
-                      <div className="mt-2 space-y-1">
-                        {relations.map((r, i) => (
-                          <div key={i} className="flex items-center gap-2 text-xs text-slate-600">
-                            <span className="rounded-full bg-sky-100 px-2 py-0.5 text-sky-700 font-medium">
-                              {r.relation}
-                            </span>
-                            <span className="text-slate-400">&rarr;</span>
-                            <span className="font-medium text-ink">{r.target}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                  {nodes.length > 0 && Object.keys(grouped).length === 0 && (
-                    <div className="space-y-2">
-                      {nodes.map((node: any, i: number) => (
-                        <div key={i} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-ink">
-                          {node.name ?? node.label ?? node.id ?? JSON.stringify(node)}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                <div className="mt-3">
+                  <KnowledgeGraphVisualization
+                    nodes={graphNodes}
+                    edges={graphEdges}
+                  />
                 </div>
               );
             })()}
@@ -3649,62 +3948,40 @@ function ActiveTaskPanel({ novelId }: { novelId: string }) {
     novel_edit: "AI 编辑",
   };
 
+  // Hide entire panel when no active tasks
+  if (!novelTasks || novelTasks.length === 0) return null;
+
   return (
     <Panel title="任务进度">
-      {!novelTasks || novelTasks.length === 0 ? (
-        <p className="text-sm text-slate-500">暂无运行中的任务</p>
-      ) : (
-        <div className="space-y-3">
-          {novelTasks.map((task: TaskDetail) => (
-            <div
-              key={task.task_id}
-              className="rounded-[20px] border border-emerald-100 bg-emerald-50 p-3"
-            >
-              <div className="flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />
-                <p className="text-sm font-semibold text-emerald-800">
-                  {taskTypeLabels[task.task_type] ?? task.task_type}
-                </p>
-              </div>
-              <p className="mt-1 text-xs text-emerald-700">
-                {task.progress_msg || "处理中..."}
-              </p>
-              <div className="mt-2 h-1.5 rounded-full bg-emerald-200">
-                <div
-                  className="h-1.5 rounded-full bg-emerald-500 transition-all"
-                  style={{
-                    width: `${Math.round(task.progress * 100)}%`,
-                  }}
-                />
-              </div>
-              <p className="mt-1 text-right text-xs text-emerald-600">
-                {Math.round(task.progress * 100)}%
+      <div className="space-y-3">
+        {novelTasks.map((task: TaskDetail) => (
+          <div
+            key={task.task_id}
+            className="rounded-[20px] border border-emerald-100 bg-emerald-50 p-3"
+          >
+            <div className="flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />
+              <p className="text-sm font-semibold text-emerald-800">
+                {taskTypeLabels[task.task_type] ?? task.task_type}
               </p>
             </div>
-          ))}
-        </div>
-      )}
-
-      {recentTasks && recentTasks.length > 0 && (
-        <div className="mt-4 border-t border-slate-100 pt-4">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
-            最近任务
-          </p>
-          <div className="space-y-2">
-            {recentTasks.map((task: TaskDetail) => (
+            <p className="mt-1 text-xs text-emerald-700">
+              {task.progress_msg || "处理中..."}
+            </p>
+            <div className="mt-2 h-1.5 rounded-full bg-emerald-200">
               <div
-                key={task.task_id}
-                className="flex items-center justify-between text-xs"
-              >
-                <span className="text-slate-600">
-                  {taskTypeLabels[task.task_type] ?? task.task_type}
-                </span>
-                <StatusBadge status={task.status} />
-              </div>
-            ))}
+                className="h-1.5 rounded-full bg-emerald-500 transition-all"
+                style={{
+                  width: `${Math.round(task.progress * 100)}%`,
+                }}
+              />
+            </div>
+            <p className="mt-1 text-right text-xs text-emerald-600">
+              {Math.round(task.progress * 100)}%
+            </p>
           </div>
-        </div>
-      )}
+        ))}
+      </div>
     </Panel>
   );
 }
