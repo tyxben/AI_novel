@@ -561,6 +561,15 @@ class NovelPipeline:
             state["brief_validator"] = brief_validator
             state["debt_extractor"] = debt_extractor
 
+            # --- Narrative Control: generate debt summary for Writer ---
+            if obligation_tracker:
+                try:
+                    state["debt_summary"] = obligation_tracker.get_summary_for_writer(ch_num)
+                except Exception:
+                    state["debt_summary"] = ""
+            else:
+                state["debt_summary"] = ""
+
             # --- Narrative Control: add chapter_brief to state (Task 6.3) ---
             if ch_outline:
                 state["current_chapter_brief"] = ch_outline.get("chapter_brief", {})
