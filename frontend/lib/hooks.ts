@@ -379,6 +379,22 @@ export function useKnowledgeGraph(novelId: string) {
   });
 }
 
+export function useVolumesSummary(novelId: string) {
+  return useQuery({
+    queryKey: ["volumes-summary", novelId],
+    queryFn: () => api.getVolumesSummary(novelId),
+    enabled: !!novelId,
+  });
+}
+
+export function useSettlementBrief(novelId: string, chapter: number | null) {
+  return useQuery({
+    queryKey: ["settlement-brief", novelId, chapter],
+    queryFn: () => api.getSettlementBrief(novelId, chapter!),
+    enabled: !!novelId && chapter !== null,
+  });
+}
+
 export function useFulfillDebt(novelId: string) {
   const qc = useQueryClient();
   return useMutation({

@@ -252,6 +252,9 @@ export const api = {
   getStoryArcs: (id: string) => request<any>(`/api/novels/${id}/narrative/arcs`),
   getChapterBrief: (id: string, chNum: number) => request<any>(`/api/novels/${id}/narrative/briefs/${chNum}`),
   getKnowledgeGraph: (id: string) => request<any>(`/api/novels/${id}/narrative/graph`),
+  getVolumesSummary: (id: string) => request<any[]>(`/api/novels/${id}/narrative/volumes`),
+  getSettlementBrief: (id: string, chapter: number) =>
+    request<any>(`/api/novels/${id}/narrative/settlement?chapter=${chapter}`),
 
   // Videos
   listVideos: () => request<ProjectSummary[]>("/api/videos"),

@@ -36,6 +36,7 @@ import {
   useCreateConversation,
   useDeleteConversation,
   useRebuildNarrative,
+  useVolumesSummary,
 } from "@/lib/hooks";
 import { PageHeader } from "@/components/layout/page-header";
 import { Panel } from "@/components/ui/panel";
@@ -3414,6 +3415,7 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
   const { data: debts, isLoading: debtsLoading } = useNarrativeDebts(novelId, debtFilter);
   const { data: arcs, isLoading: arcsLoading } = useStoryArcs(novelId);
   const { data: graph, isLoading: graphLoading } = useKnowledgeGraph(novelId);
+  const { data: volumes, isLoading: volumesLoading } = useVolumesSummary(novelId);
   const { data: brief } = useChapterBrief(novelId, selectedBriefChapter);
   const fulfillDebt = useFulfillDebt(novelId);
   const rebuildMut = useRebuildNarrative(novelId);
@@ -3507,6 +3509,53 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
             </span>
           )}
         </div>
+      </Panel>
+
+      {/* A2. Volume Settlement Panel */}
+      <Panel title="分卷收束">
+        {volumesLoading ? (
+          <div className="flex items-center justify-center py-6 text-slate-400">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" /> 加载中...
+          </div>
+        ) : !volumes || volumes.length === 0 ? (
+          <p className="py-4 text-center text-sm text-slate-400">暂无分卷数据</p>
+        ) : (
+          <div className="space-y-3">
+            {volumes.map((vol: any) => {
+              const rate = Math.round((vol.settlement_rate ?? 0) * 100);
+              const isComplete = rate >= 80;
+              return (
+                <div key={vol.volume_number} className="rounded-xl border border-slate-200 p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-sm font-semibold text-ink">
+                        第{vol.volume_number}卷: {vol.title || '未命名'}
+                      </span>
+                      <span className="ml-2 text-xs text-slate-400">
+                        第{vol.start_chapter}-{vol.end_chapter}章
+                      </span>
+                    </div>
+                    <span className={`text-xs font-semibold ${isComplete ? 'text-emerald-600' : 'text-amber-600'}`}>
+                      {rate}% 收束
+                    </span>
+                  </div>
+                  {/* Settlement progress bar */}
+                  <div className="mt-2 h-2 rounded-full bg-slate-100">
+                    <div
+                      className={`h-2 rounded-full transition-all ${isComplete ? 'bg-emerald-500' : 'bg-amber-400'}`}
+                      style={{ width: `${rate}%` }}
+                    />
+                  </div>
+                  <div className="mt-1 flex justify-between text-[10px] text-slate-400">
+                    <span>{vol.debts_fulfilled ?? 0} 已兑现</span>
+                    <span>{vol.debts_pending ?? 0} 待处理</span>
+                    <span>共 {vol.debts_total ?? 0} 债务</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </Panel>
 
       {/* B. Debts Panel */}
@@ -3697,10 +3746,18 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
 
               {/* Detail cards (below timeline) */}
               <div className="mt-6 space-y-4">
-                {arcList.map((arc: any, idx: number) => {
+                {(() => {
+                  const phaseGuidance: Record<string, string> = {
+                    setup: "建立情境，引入冲突种子",
+                    escalation: "加剧矛盾，提高stakes",
+                    climax: "主要冲突爆发，转折点",
+                    resolution: "解决冲突，揭示后果",
+                  };
+                  return arcList.map((arc: any, idx: number) => {
                   const phaseStyle =
                     ARC_PHASE_STYLES[arc.current_phase ?? arc.phase] ??
                     ARC_PHASE_STYLES.setup;
+                  const phaseKey = arc.current_phase ?? arc.phase ?? "setup";
                   const chapters = arc.chapters ?? [];
                   const startCh = chapters.length
                     ? Math.min(...chapters)
@@ -3723,11 +3780,18 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
                         <h4 className="text-sm font-semibold text-ink">
                           {arc.title ?? arc.name ?? `弧线 ${idx + 1}`}
                         </h4>
-                        <span
-                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${phaseStyle.bg} ${phaseStyle.text}`}
-                        >
-                          {phaseStyle.label}
-                        </span>
+                        <div className="text-right">
+                          <span
+                            className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${phaseStyle.bg} ${phaseStyle.text}`}
+                          >
+                            {phaseStyle.label}
+                          </span>
+                          {phaseGuidance[phaseKey] && (
+                            <p className="mt-0.5 text-[10px] text-slate-400">
+                              {phaseGuidance[phaseKey]}
+                            </p>
+                          )}
+                        </div>
                       </div>
                       {(arc.description ?? arc.hook) && (
                         <p className="mt-1 text-xs text-slate-500">
@@ -3771,7 +3835,8 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
                       </p>
                     </div>
                   );
-                })}
+                });
+                })()}
               </div>
             </div>
           );

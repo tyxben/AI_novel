@@ -65,6 +65,12 @@ def _load_novel_json(project: Path) -> dict[str, Any]:
         return json.load(f)
 
 
+def _get_outline(project: Path) -> dict[str, Any]:
+    """Load outline dict from novel.json."""
+    data = _load_novel_json(project)
+    return data.get("outline", {})
+
+
 def _load_debts_from_db(project: Path) -> list[dict[str, Any]]:
     """Load debts from the SQLite structured DB (memory.db)."""
     db_path = project / "memory.db"
@@ -426,3 +432,49 @@ def rebuild_narrative(novel_id: str, request: Request):
         "method": "hybrid",
     }, keys=keys)
     return {"task_id": task_id}
+
+
+@router.get("/settlement")
+def get_settlement(novel_id: str, chapter: int = 1):
+    """Get volume settlement status for a chapter."""
+    project = _project_path(novel_id)
+    db_path = project / "memory.db"
+
+    db = None
+    try:
+        if db_path.exists():
+            from src.novel.storage.structured_db import StructuredDB
+
+            db = StructuredDB(db_path)
+
+        from src.novel.services.volume_settlement import VolumeSettlement
+
+        outline = _get_outline(project)
+        vs = VolumeSettlement(db=db, outline=outline)
+        return vs.get_settlement_brief(chapter)
+    finally:
+        if db is not None:
+            db.close()
+
+
+@router.get("/volumes")
+def get_volumes(novel_id: str):
+    """Get all volumes with settlement statistics."""
+    project = _project_path(novel_id)
+    db_path = project / "memory.db"
+
+    db = None
+    try:
+        if db_path.exists():
+            from src.novel.storage.structured_db import StructuredDB
+
+            db = StructuredDB(db_path)
+
+        from src.novel.services.volume_settlement import VolumeSettlement
+
+        outline = _get_outline(project)
+        vs = VolumeSettlement(db=db, outline=outline)
+        return vs.get_volume_summary()
+    finally:
+        if db is not None:
+            db.close()

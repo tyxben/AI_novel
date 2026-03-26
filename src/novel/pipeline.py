@@ -570,6 +570,50 @@ class NovelPipeline:
             else:
                 state["debt_summary"] = ""
 
+            # --- Narrative Control: volume settlement + arc progression ---
+            if obligation_tracker:
+                try:
+                    from src.novel.services.volume_settlement import VolumeSettlement
+
+                    outline_data = state.get("outline", {})
+                    vs = VolumeSettlement(
+                        db=self.memory.structured_db if hasattr(self, "memory") and self.memory and hasattr(self.memory, "structured_db") else None,
+                        outline=outline_data if isinstance(outline_data, dict) else {},
+                    )
+
+                    # Advance arc phases
+                    arc_changes = vs.advance_arc_phases(ch_num)
+                    if arc_changes:
+                        log.info(
+                            "弧线推进: %s",
+                            [f"{a['name']}: {a['old_phase']}→{a['new_phase']}" for a in arc_changes],
+                        )
+
+                    # Check volume settlement
+                    settlement = vs.get_settlement_brief(ch_num)
+                    if settlement.get("is_settlement_zone"):
+                        # Append settlement prompt to debt_summary
+                        existing_debt = state.get("debt_summary", "")
+                        arc_prompt = vs.get_arc_prompt(ch_num)
+                        state["debt_summary"] = "\n\n".join(
+                            filter(None, [existing_debt, settlement["settlement_prompt"], arc_prompt])
+                        )
+                        log.info(
+                            "卷末收束模式: %d个必须解决, %d个建议解决",
+                            len(settlement.get("must_resolve", [])),
+                            len(settlement.get("should_resolve", [])),
+                        )
+                    else:
+                        # Still add arc prompt even outside settlement zone
+                        arc_prompt = vs.get_arc_prompt(ch_num)
+                        if arc_prompt:
+                            existing_debt = state.get("debt_summary", "")
+                            state["debt_summary"] = "\n\n".join(
+                                filter(None, [existing_debt, arc_prompt])
+                            )
+                except Exception as exc:
+                    log.warning("叙事控制扩展失败: %s", exc)
+
             # --- Narrative Control: add chapter_brief to state (Task 6.3) ---
             if ch_outline:
                 state["current_chapter_brief"] = ch_outline.get("chapter_brief", {})

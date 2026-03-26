@@ -144,6 +144,18 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "get_volume_settlement",
+        "description": "查看当前卷的收束状态 — 哪些债务必须在本卷解决，哪些可延续",
+        "parameters": {
+            "chapter_number": {"type": "integer", "description": "当前章节号"},
+        },
+    },
+    {
+        "name": "get_arc_status",
+        "description": "查看所有故事弧线的当前阶段和推进状态",
+        "parameters": {},
+    },
 ]
 
 
@@ -349,6 +361,17 @@ class AgentToolExecutor:
         except Exception as exc:
             log.warning("Failed to load StructuredDB: %s", exc)
             return None
+
+    def _get_outline(self) -> dict:
+        """Load outline dict from novel.json."""
+        try:
+            novel_json = Path(self._project_path) / "novel.json"
+            if novel_json.exists():
+                data = json.loads(novel_json.read_text("utf-8"))
+                return data.get("outline", {})
+        except Exception as exc:
+            log.warning("Failed to load outline: %s", exc)
+        return {}
 
     def _get_knowledge_graph(self):
         """Load KnowledgeGraph for the current novel, or empty one."""
@@ -757,6 +780,32 @@ class AgentToolExecutor:
             service.close()
         return result
 
+    def _tool_get_volume_settlement(self, chapter_number: int = 1) -> dict:
+        from src.novel.services.volume_settlement import VolumeSettlement
+
+        db = self._get_structured_db()
+        outline = self._get_outline()
+        vs = VolumeSettlement(db=db, outline=outline)
+        result = vs.get_settlement_brief(chapter_number)
+        # Ensure JSON-serializable
+        return json.loads(json.dumps(result, ensure_ascii=False, default=str))
+
+    def _tool_get_arc_status(self) -> dict:
+        from src.novel.services.volume_settlement import VolumeSettlement
+
+        db = self._get_structured_db()
+        outline = self._get_outline()
+        vs = VolumeSettlement(db=db, outline=outline)
+        arcs = vs._get_active_arcs()
+        # Parse chapters JSON for display
+        for arc in arcs:
+            if isinstance(arc.get("chapters"), str):
+                try:
+                    arc["chapters"] = json.loads(arc["chapters"])
+                except (json.JSONDecodeError, TypeError):
+                    arc["chapters"] = []
+        return {"total": len(arcs), "arcs": arcs[:20]}
+
 
 # ---------------------------------------------------------------------------
 # Agent loop
@@ -895,6 +944,8 @@ def run_agent_chat(
                 "get_knowledge_graph": "查看知识图谱",
                 "get_narrative_overview": "叙事总览",
                 "rebuild_narrative": "重建叙事数据",
+                "get_volume_settlement": "查看卷末收束",
+                "get_arc_status": "查看弧线状态",
             }.get(tool_name, tool_name)
             progress_callback(
                 0.1 + (i / MAX_ITERATIONS) * 0.8,
