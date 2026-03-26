@@ -98,10 +98,36 @@ class Writer:
         self._main_storyline: dict[str, Any] | None = None
         self._story_position: dict[str, Any] | None = None
         self._chapter_brief: dict[str, Any] | None = None
+        self._registry: Any | None = None
+        self._novel_id: str | None = None
 
     def set_chapter_brief(self, chapter_brief: dict[str, Any] | None) -> None:
         """设置章节任务书，让场景生成时具有明确的叙事目标。"""
         self._chapter_brief = chapter_brief if chapter_brief else None
+
+    def enable_prompt_registry(self, registry: "PromptRegistry", novel_id: str | None = None) -> None:  # noqa: F821
+        """Enable dynamic prompts from Prompt Registry."""
+        self._registry = registry
+        self._novel_id = novel_id
+
+    # ------------------------------------------------------------------
+    # 场景类型检测（用于 Prompt Registry 模板匹配）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_scenario(scene_plan: dict) -> str:
+        """Detect scene scenario from plan for template matching."""
+        goal = (scene_plan.get("goal", "") + " " + scene_plan.get("summary", "")).lower()
+        keywords = {
+            "battle": ["战斗", "打斗", "攻击", "战争", "拳", "剑", "杀"],
+            "dialogue": ["对话", "交谈", "说服", "谈判", "争论"],
+            "emotional": ["感情", "离别", "重逢", "告白", "悲伤", "感动"],
+            "strategy": ["谋略", "计划", "布局", "阴谋", "策略"],
+        }
+        for scenario, kws in keywords.items():
+            if any(kw in goal for kw in kws):
+                return scenario
+        return "default"
 
     # ------------------------------------------------------------------
     # 续写辅助：检测截断并自动续写
@@ -308,6 +334,34 @@ class Writer:
             if len(brief_lines) > 1:
                 chapter_brief_prompt = "\n".join(brief_lines) + "\n"
 
+        # Determine craft/anti-pattern prompt blocks: use registry if enabled, else hardcoded
+        scenario = self._detect_scenario(scene_plan)
+        if self._registry is not None:
+            # Extract genre from style_name for registry lookup (e.g. "webnovel.shuangwen" -> "webnovel")
+            _genre_for_registry = style_name.split(".")[0] if "." in style_name else style_name
+            registry_prompt = self._registry.build_prompt(
+                agent_name="writer",
+                scenario=scenario,
+                genre=_genre_for_registry,
+            )
+            if registry_prompt:
+                craft_blocks = registry_prompt
+            else:
+                # Registry returned empty -- fall back to hardcoded
+                craft_blocks = (
+                    f"{_ANTI_AI_FLAVOR}\n"
+                    f"{_ANTI_REPETITION}\n"
+                    f"{_NARRATIVE_LOGIC}\n"
+                    f"{_CHARACTER_NAME_LOCK}"
+                )
+        else:
+            craft_blocks = (
+                f"{_ANTI_AI_FLAVOR}\n"
+                f"{_ANTI_REPETITION}\n"
+                f"{_NARRATIVE_LOGIC}\n"
+                f"{_CHARACTER_NAME_LOCK}"
+            )
+
         system_prompt = (
             f"{style}\n\n"
             f"你是一位专业小说写手，正在创作第{chapter_outline.chapter_number}章"
@@ -322,10 +376,7 @@ class Writer:
             f"写到接近目标字数时，必须在一个完整的句子处自然收束，不要强行展开新情节。\n\n"
             f"【世界观设定】\n{world_desc}\n\n"
             f"【角色档案】\n{char_desc}\n\n"
-            f"{_ANTI_AI_FLAVOR}\n"
-            f"{_ANTI_REPETITION}\n"
-            f"{_NARRATIVE_LOGIC}\n"
-            f"{_CHARACTER_NAME_LOCK}"
+            f"{craft_blocks}"
         )
 
         # 构建角色说话方式提醒 + 外貌锁定
@@ -441,7 +492,7 @@ class Writer:
         scene_text = self._check_character_names(scene_text, characters)
 
         scene_chars = scene_plan.get("characters_involved", scene_plan.get("characters", []))
-        return Scene(
+        result_scene = Scene(
             scene_number=scene_plan.get("scene_number", 1),
             location=scene_plan.get("location", "未指定"),
             time=scene_plan.get("time", "未指定"),
@@ -451,6 +502,25 @@ class Writer:
             word_count=count_words(scene_text),
             narrative_modes=scene_plan.get("narrative_modes", []),
         )
+
+        # Record usage for quality tracking (fire-and-forget, don't block generation)
+        if self._registry is not None:
+            try:
+                _genre_for_usage = style_name.split(".")[0] if "." in style_name else style_name
+                template = self._registry.get_template_for("writer", scenario, _genre_for_usage)
+                if template:
+                    self._registry.record_usage(
+                        template_id=template.template_id,
+                        block_ids=[],
+                        agent_name="writer",
+                        scenario=scenario,
+                        novel_id=self._novel_id,
+                        chapter_number=chapter_outline.chapter_number,
+                    )
+            except Exception:
+                log.debug("Failed to record prompt usage", exc_info=True)
+
+        return result_scene
 
     # ------------------------------------------------------------------
     # 章节生成（顺序生成多个场景）
@@ -1200,6 +1270,24 @@ def writer_node(state: dict) -> dict:
     scene_plans = state.get("current_scenes") or []
     style_name = state.get("style_name", "webnovel.shuangwen")
 
+    # Read react/budget mode from state
+    react_mode = state.get("react_mode", False)
+    budget_mode_writer = state.get("budget_mode", False)
+    feedback_prompt = state.get("feedback_prompt", "")
+    debt_summary = state.get("debt_summary", "")
+
+    # Get feedback from previous chapter via FeedbackInjector if not already set
+    if not feedback_prompt:
+        feedback_injector = state.get("feedback_injector")
+        novel_id = state.get("novel_id", "")
+        if feedback_injector and novel_id:
+            try:
+                feedback_prompt = feedback_injector.get_feedback_prompt(
+                    novel_id, current_chapter
+                )
+            except Exception:
+                log.debug("Failed to get feedback prompt", exc_info=True)
+
     # 设置主线上下文和故事位置
     outline_data = state.get("outline")
     main_storyline = {}
@@ -1297,6 +1385,10 @@ def writer_node(state: dict) -> dict:
             world_setting=world_setting,
             context=context,
             style_name=style_name,
+            debt_summary=debt_summary,
+            react_mode=react_mode,
+            budget_mode=budget_mode_writer,
+            feedback_prompt=feedback_prompt,
         )
 
         decisions.append({

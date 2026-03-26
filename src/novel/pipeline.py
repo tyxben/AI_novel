@@ -437,6 +437,8 @@ class NovelPipeline:
         end_chapter: int | None = None,
         silent: bool = False,
         progress_callback: Callable[[float, str], None] | None = None,
+        react_mode: bool = False,
+        budget_mode: bool = False,
     ) -> dict:
         """Generate chapters for an existing project.
 
@@ -489,6 +491,10 @@ class NovelPipeline:
                 state["main_storyline"] = outline_data.get("main_storyline", {})
             else:
                 state["main_storyline"] = {}
+
+        # Pass writer mode flags into state
+        state["react_mode"] = react_mode
+        state["budget_mode"] = budget_mode
 
         chapters_generated = []
         consecutive_failures = 0

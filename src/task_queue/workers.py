@@ -126,6 +126,8 @@ def _run_novel_generate(params: dict, progress_cb) -> dict:
         end_chapter=end_ch,
         silent=params.get("silent", False),
         progress_callback=progress_cb,
+        react_mode=params.get("react_mode", False),
+        budget_mode=params.get("budget_mode", False),
     )
 
 

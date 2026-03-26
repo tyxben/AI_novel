@@ -323,6 +323,19 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         "completed_nodes": ["quality_reviewer"],
     }
 
+    # Save feedback if registry available
+    feedback_injector = state.get("feedback_injector")
+    novel_id = state.get("novel_id", "")
+    if feedback_injector and novel_id:
+        try:
+            feedback_injector.save_chapter_feedback(
+                novel_id=novel_id,
+                chapter_number=current_chapter,
+                quality_report=report,
+            )
+        except Exception as e:
+            log.debug("Failed to save chapter feedback: %s", e)
+
     # 更新重试计数
     if need_rewrite:
         current_chapter = state.get("current_chapter", 1)

@@ -8,7 +8,7 @@ LangGraph 会自动合并各节点返回的列表。
 from __future__ import annotations
 
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 
 class Decision(TypedDict, total=False):
@@ -85,3 +85,12 @@ class NovelState(TypedDict, total=False):
     # === 断点续传 ===
     completed_nodes: Annotated[list[str], operator.add]
     resume: bool
+
+    # === Writer 模式控制 ===
+    react_mode: bool  # Enable ReAct writer mode
+    budget_mode: bool  # Budget mode for writer
+    feedback_prompt: str  # Feedback injection prompt
+    debt_summary: str  # Debt summary for writer
+
+    # === 质量反馈注入 ===
+    feedback_injector: Any  # FeedbackInjector instance (bridges QualityReviewer → Writer)
