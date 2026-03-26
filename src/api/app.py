@@ -25,7 +25,7 @@ from src.task_queue.models import TaskType, TaskStatus
 from src.task_queue.workers import run_task
 from src.api.helpers import configure_task_queue
 
-MAX_WORKERS = int(os.environ.get("TASK_QUEUE_WORKERS", "1"))
+MAX_WORKERS = int(os.environ.get("TASK_QUEUE_WORKERS", "3"))
 
 
 # ---------------------------------------------------------------------------

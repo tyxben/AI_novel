@@ -73,6 +73,7 @@ import {
   Circle,
   GitBranch,
   ChevronUp,
+  Copy,
 } from "lucide-react";
 
 const btnCls =
@@ -166,46 +167,47 @@ export default function NovelDetailPage({
         ))}
       </div>
 
-      <div className="grid gap-5 px-6 py-4 md:px-8 xl:grid-cols-[minmax(0,1.45fr)_360px]">
-        {/* Left column */}
+      <div className={`grid gap-5 px-6 py-4 md:px-8 ${activeTab === "agent" ? "" : "xl:grid-cols-[minmax(0,1.45fr)_360px]"}`}>
+        {/* Left column — CSS display toggle keeps components mounted across tab switches */}
         <div className="space-y-5">
-          {activeTab === "overview" && (
-            <>
+          <div style={{ display: activeTab === "overview" ? "block" : "none" }}>
+            <div className="space-y-5">
               <ProjectOverview novel={novel} id={id} />
               <ActionButtons novel={novel} id={id} />
               <OutlineSection outline={novel.outline} />
               <CharactersSection characters={novel.characters ?? []} />
               <WorldSection worldSetting={novel.world_setting} />
-            </>
-          )}
-          {activeTab === "chapters" && (
+            </div>
+          </div>
+          <div style={{ display: activeTab === "chapters" ? "block" : "none" }}>
             <ChaptersSection
               chapters={novel.chapters ?? []}
               novelId={id}
             />
-          )}
-          {activeTab === "settings" && (
+          </div>
+          <div style={{ display: activeTab === "settings" ? "block" : "none" }}>
             <SettingsEditorSection novelId={id} />
-          )}
-          {activeTab === "feedback" && (
+          </div>
+          <div style={{ display: activeTab === "feedback" ? "block" : "none" }}>
             <FeedbackSection novelId={id} totalChapters={novel.total_chapters ?? 0} />
-          )}
-          {activeTab === "edit" && (
+          </div>
+          <div style={{ display: activeTab === "edit" ? "block" : "none" }}>
             <EditSection novelId={id} />
-          )}
-          {activeTab === "agent" && (
+          </div>
+          <div style={{ display: activeTab === "agent" ? "block" : "none" }}>
             <AgentChatSection novelId={id} />
-          )}
-          {activeTab === "narrative" && (
+          </div>
+          <div style={{ display: activeTab === "narrative" ? "block" : "none" }}>
             <NarrativeControlSection novelId={id} />
-          )}
+          </div>
         </div>
 
-        {/* Right column */}
-        <div className="space-y-5">
-          <ActiveTaskPanel novelId={id} />
-          <QuickStats novel={novel} />
-        </div>
+        {/* Right column — hidden on agent tab to give chat full width */}
+        {activeTab !== "agent" && (
+          <div className="space-y-5">
+            <ActiveTaskPanel novelId={id} />
+          </div>
+        )}
       </div>
     </>
   );
@@ -1997,7 +1999,9 @@ function AgentChatSection({ novelId }: { novelId: string }) {
       setActiveTaskId(null);
       // Invalidate caches — agent may have modified chapters, settings, etc.
       qc.invalidateQueries({ queryKey: ["novel", novelId] });
-      qc.invalidateQueries({ queryKey: ["chapter"] });
+      // Remove stale chapter cache so re-opening a chapter fetches fresh data
+      // (invalidate alone only refetches active queries; unmounted chapters stay stale)
+      qc.removeQueries({ queryKey: ["chapter", novelId] });
       qc.invalidateQueries({ queryKey: ["novel-settings", novelId] });
       qc.invalidateQueries({ queryKey: ["tasks"] });
       qc.invalidateQueries({ queryKey: ["conversations", novelId] });
@@ -2217,8 +2221,15 @@ function AgentChatSection({ novelId }: { novelId: string }) {
             {displayMessages.map((msg, idx) =>
               msg.role === "user" ? (
                 <div key={idx} className="flex justify-end">
-                  <div className="max-w-[80%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-sm text-white">
+                  <div className="group relative max-w-[80%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-sm text-white select-text">
                     <p className="whitespace-pre-wrap">{msg.content}</p>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(msg.content)}
+                      className="absolute -left-8 top-1 rounded p-1 text-slate-300 opacity-0 transition hover:bg-slate-100 hover:text-slate-600 group-hover:opacity-100"
+                      title="复制"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
               ) : (
@@ -2231,13 +2242,20 @@ function AgentChatSection({ novelId }: { novelId: string }) {
                         ))}
                       </div>
                     )}
-                    <div className="rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink">
+                    <div className="group relative rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink select-text">
                       <p className="whitespace-pre-wrap">{msg.content}</p>
                       {msg.model && (
                         <p className="mt-1.5 text-[10px] text-slate-400">
                           model: {msg.model}
                         </p>
                       )}
+                      <button
+                        onClick={() => navigator.clipboard.writeText(msg.content)}
+                        className="absolute -right-8 top-1 rounded p-1 text-slate-300 opacity-0 transition hover:bg-slate-100 hover:text-slate-600 group-hover:opacity-100"
+                        title="复制"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -3992,7 +4010,7 @@ function ActiveTaskPanel({ novelId }: { novelId: string }) {
     );
     if (justCompleted.length > 0) {
       qc.invalidateQueries({ queryKey: ["novel", novelId] });
-      qc.invalidateQueries({ queryKey: ["chapter"] });
+      qc.removeQueries({ queryKey: ["chapter", novelId] });
       qc.invalidateQueries({ queryKey: ["novel-settings", novelId] });
     }
     prevRunningRef.current = currentRunning;
@@ -4021,15 +4039,24 @@ function ActiveTaskPanel({ novelId }: { novelId: string }) {
     novel_polish: "精修润色",
     novel_feedback: "反馈重写",
     novel_edit: "AI 编辑",
+    novel_agent_chat: "Agent 对话",
+    novel_narrative_rebuild: "叙事重建",
+    novel_resize: "调整章节数",
+    novel_rewrite_affected: "设定影响重写",
   };
 
-  // Hide entire panel when no active tasks
-  if (!novelTasks || novelTasks.length === 0) return null;
+  const statusLabel = (s: string) =>
+    s === "completed" ? "完成" : s === "failed" ? "失败" : s === "cancelled" ? "已取消" : s;
+  const statusColor = (s: string) =>
+    s === "completed" ? "text-emerald-600" : s === "failed" ? "text-rose-600" : "text-slate-500";
+
+  // Hide entire panel when no active tasks AND no recent tasks
+  if ((!novelTasks || novelTasks.length === 0) && (!recentTasks || recentTasks.length === 0)) return null;
 
   return (
     <Panel title="任务进度">
       <div className="space-y-3">
-        {novelTasks.map((task: TaskDetail) => (
+        {novelTasks && novelTasks.length > 0 && novelTasks.map((task: TaskDetail) => (
           <div
             key={task.task_id}
             className="rounded-[20px] border border-emerald-100 bg-emerald-50 p-3"
@@ -4056,6 +4083,23 @@ function ActiveTaskPanel({ novelId }: { novelId: string }) {
             </p>
           </div>
         ))}
+
+        {/* Recent task history (collapsed) */}
+        {recentTasks && recentTasks.length > 0 && (
+          <details className="mt-2">
+            <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-slate-700">
+              最近任务 ({recentTasks.length})
+            </summary>
+            <div className="mt-2 space-y-1.5">
+              {recentTasks.map((t: TaskDetail) => (
+                <div key={t.task_id} className="flex items-center justify-between rounded-lg bg-shell px-2.5 py-1.5 text-xs">
+                  <span className="text-slate-700">{taskTypeLabels[t.task_type] ?? t.task_type}</span>
+                  <span className={statusColor(t.status)}>{statusLabel(t.status)}</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
       </div>
     </Panel>
   );

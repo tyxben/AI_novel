@@ -10,7 +10,7 @@ from .models import TaskType, TaskStatus, TaskRecord
 from .db import TaskDB
 from .workers import run_task
 
-MAX_WORKERS = int(os.environ.get("TASK_QUEUE_WORKERS", "1"))
+MAX_WORKERS = int(os.environ.get("TASK_QUEUE_WORKERS", "3"))
 
 db = TaskDB()
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)

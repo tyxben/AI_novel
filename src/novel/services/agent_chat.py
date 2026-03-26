@@ -237,10 +237,11 @@ class AgentToolExecutor:
             chapter_number=chapter_number,
             dry_run=False,
         )
+        analysis = result.get("analysis", {})
         return {
             "status": "completed",
-            "chapters_rewritten": result.get("chapters_rewritten", []),
-            "feedback_type": result.get("feedback_type", ""),
+            "chapters_rewritten": result.get("rewritten_chapters", []),
+            "feedback_type": analysis.get("feedback_type", ""),
         }
 
     def _tool_resize_novel(self, new_total: int) -> dict:
