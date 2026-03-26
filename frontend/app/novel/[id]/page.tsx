@@ -2,6 +2,7 @@
 
 import { useState, use, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useNovel,
   useGenerateChapters,
@@ -1916,6 +1917,7 @@ function AgentChatSection({ novelId }: { novelId: string }) {
   const [contextChapters, setContextChapters] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const qc = useQueryClient();
 
   const agentChatMut = useAgentChat(novelId);
   const { data: taskData } = useTask(activeTaskId);
@@ -1954,6 +1956,11 @@ function AgentChatSection({ novelId }: { novelId: string }) {
         { role: "agent", content: reply, steps, model },
       ]);
       setActiveTaskId(null);
+      // Invalidate all novel-related caches — agent may have modified chapters, settings, etc.
+      qc.invalidateQueries({ queryKey: ["novel", novelId] });
+      qc.invalidateQueries({ queryKey: ["chapter"] });
+      qc.invalidateQueries({ queryKey: ["novel-settings", novelId] });
+      qc.invalidateQueries({ queryKey: ["tasks"] });
     } else if (taskData.status === "failed") {
       const errMsg = taskData.error || "Agent 处理失败，请稍后重试。";
       setChatHistory((prev) => [
@@ -2996,7 +3003,35 @@ function ImpactReport({ impact }: { impact: any }) {
 
 // ─── Active Task Panel (Sidebar) ──────────────────────────────────────
 function ActiveTaskPanel({ novelId }: { novelId: string }) {
+  const qc = useQueryClient();
   const { data: tasks } = useTasks(20);
+  const prevRunningRef = useRef<Set<string>>(new Set());
+
+  // Invalidate chapter/novel caches when any novel task transitions to completed
+  useEffect(() => {
+    if (!tasks) return;
+    const myTasks = tasks.filter(
+      (t: TaskDetail) =>
+        t.task_type.startsWith("novel_") &&
+        (t.params?.project_path?.includes(novelId) ||
+          t.params?.novel_id === novelId)
+    );
+    const currentRunning = new Set(
+      myTasks
+        .filter((t: TaskDetail) => t.status === "running" || t.status === "pending")
+        .map((t: TaskDetail) => t.task_id)
+    );
+    const justCompleted = myTasks.filter(
+      (t: TaskDetail) =>
+        t.status === "completed" && prevRunningRef.current.has(t.task_id)
+    );
+    if (justCompleted.length > 0) {
+      qc.invalidateQueries({ queryKey: ["novel", novelId] });
+      qc.invalidateQueries({ queryKey: ["chapter"] });
+      qc.invalidateQueries({ queryKey: ["novel-settings", novelId] });
+    }
+    prevRunningRef.current = currentRunning;
+  }, [tasks, novelId, qc]);
 
   const novelTasks = tasks?.filter(
     (t: TaskDetail) =>
