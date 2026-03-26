@@ -10,6 +10,7 @@ import {
   ListTodo,
   Settings2,
   Sparkles,
+  Wand2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -19,6 +20,7 @@ const navItems = [
   { href: "/video", label: "视频", icon: Clapperboard },
   { href: "/ppt", label: "PPT", icon: FileStack },
   { href: "/tasks", label: "任务", icon: ListTodo },
+  { href: "/prompts", label: "Prompt", icon: Wand2 },
   { href: "/settings", label: "设置", icon: Settings2 },
 ];
 

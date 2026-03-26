@@ -410,3 +410,78 @@ export function useExportPPT(projectId: string) {
     },
   });
 }
+
+// ─── Prompts ──────────────────────────────────────────────────────────
+export function usePromptBlocks(params?: { agent?: string; block_type?: string }) {
+  return useQuery({
+    queryKey: ["prompt-blocks", params],
+    queryFn: () => api.listBlocks(params),
+  });
+}
+
+export function usePromptBlock(baseId: string | null) {
+  return useQuery({
+    queryKey: ["prompt-block", baseId],
+    queryFn: () => api.getBlock(baseId!),
+    enabled: !!baseId,
+  });
+}
+
+export function useBlockVersions(baseId: string | null) {
+  return useQuery({
+    queryKey: ["block-versions", baseId],
+    queryFn: () => api.getBlockVersions(baseId!),
+    enabled: !!baseId,
+  });
+}
+
+export function usePromptTemplates(agentName?: string) {
+  return useQuery({
+    queryKey: ["prompt-templates", agentName],
+    queryFn: () => api.listTemplates(agentName),
+  });
+}
+
+export function useUpdateBlock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ baseId, content }: { baseId: string; content: string }) =>
+      api.updateBlock(baseId, content),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["prompt-blocks"] });
+      qc.invalidateQueries({ queryKey: ["prompt-block", variables.baseId] });
+      qc.invalidateQueries({ queryKey: ["block-versions", variables.baseId] });
+    },
+  });
+}
+
+export function useRollbackBlock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ baseId, version }: { baseId: string; version: number }) =>
+      api.rollbackBlock(baseId, version),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["prompt-blocks"] });
+      qc.invalidateQueries({ queryKey: ["prompt-block"] });
+      qc.invalidateQueries({ queryKey: ["block-versions"] });
+    },
+  });
+}
+
+export function useBuildPrompt() {
+  return useMutation({
+    mutationFn: (data: { agent_name: string; scenario?: string; genre?: string }) =>
+      api.buildPrompt(data),
+  });
+}
+
+export function useSeedPrompts() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.seedPrompts(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["prompt-blocks"] });
+      qc.invalidateQueries({ queryKey: ["prompt-templates"] });
+    },
+  });
+}

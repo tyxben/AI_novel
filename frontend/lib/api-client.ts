@@ -235,4 +235,33 @@ export const api = {
       method: "POST",
       body: JSON.stringify(params),
     }),
+
+  // Prompts
+  listBlocks: (params?: { agent?: string; block_type?: string; active_only?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (params?.agent) qs.set("agent", params.agent);
+    if (params?.block_type) qs.set("block_type", params.block_type);
+    if (params?.active_only !== undefined) qs.set("active_only", String(params.active_only));
+    const q = qs.toString();
+    return request<any[]>(`/api/prompts/blocks${q ? "?" + q : ""}`);
+  },
+  getBlock: (baseId: string) => request<any>(`/api/prompts/blocks/${baseId}`),
+  getBlockVersions: (baseId: string) => request<any[]>(`/api/prompts/blocks/${baseId}/versions`),
+  createBlock: (data: { base_id: string; block_type: string; content: string; agent?: string; genre?: string; scene_type?: string }) =>
+    request<any>("/api/prompts/blocks", { method: "POST", body: JSON.stringify(data) }),
+  updateBlock: (baseId: string, content: string) =>
+    request<any>(`/api/prompts/blocks/${baseId}`, { method: "PUT", body: JSON.stringify({ content }) }),
+  rollbackBlock: (baseId: string, version: number) =>
+    request<any>(`/api/prompts/blocks/${baseId}/rollback`, { method: "POST", body: JSON.stringify({ version }) }),
+  listTemplates: (agentName?: string) => {
+    const q = agentName ? `?agent_name=${agentName}` : "";
+    return request<any[]>(`/api/prompts/templates${q}`);
+  },
+  getTemplate: (templateId: string) => request<any>(`/api/prompts/templates/${templateId}`),
+  createTemplate: (data: { template_id: string; agent_name: string; block_refs: string[]; scenario?: string; genre?: string }) =>
+    request<any>("/api/prompts/templates", { method: "POST", body: JSON.stringify(data) }),
+  buildPrompt: (data: { agent_name: string; scenario?: string; genre?: string; context?: any }) =>
+    request<{ prompt: string; length: number }>("/api/prompts/build", { method: "POST", body: JSON.stringify(data) }),
+  getBlockStats: (baseId: string) => request<any>(`/api/prompts/stats/${baseId}`),
+  seedPrompts: () => request<{ blocks_count: number; templates_count: number }>("/api/prompts/seed", { method: "POST" }),
 };
