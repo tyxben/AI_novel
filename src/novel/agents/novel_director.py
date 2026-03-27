@@ -18,6 +18,7 @@ from typing import Any
 
 from src.llm.llm_client import create_llm_client
 from src.novel.agents.state import Decision, NovelState
+from src.novel.llm_utils import get_stage_llm_config
 from src.novel.models.novel import (
     Act,
     ChapterOutline,
@@ -988,7 +989,7 @@ def novel_director_node(state: NovelState) -> dict[str, Any]:
     errors: list[dict] = []
 
     # 获取 LLM 客户端
-    llm_config = state.get("config", {}).get("llm", {})
+    llm_config = get_stage_llm_config(state, "outline_generation")
     try:
         llm = create_llm_client(llm_config)
     except Exception as exc:

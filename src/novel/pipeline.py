@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from src.novel.agents.graph import build_chapter_graph, _merge_state
 from src.novel.config import NovelConfig, load_novel_config
+from src.novel.llm_utils import get_stage_llm_config
 from src.novel.storage.file_manager import FileManager
 
 log = logging.getLogger("novel")
@@ -333,7 +334,7 @@ class NovelPipeline:
             from src.novel.agents.novel_director import NovelDirector
             from src.llm.llm_client import create_llm_client as _create_llm
 
-            _llm_config = state.get("config", {}).get("llm", {})
+            _llm_config = get_stage_llm_config(state, "outline_generation")
             _llm = _create_llm(_llm_config)
             director = NovelDirector(_llm)
 
@@ -510,7 +511,7 @@ class NovelPipeline:
             from src.novel.tools.brief_validator import BriefValidator
             from src.llm.llm_client import create_llm_client
 
-            llm_config = state.get("config", {}).get("llm", {})
+            llm_config = get_stage_llm_config(state, "quality_review")
             llm = create_llm_client(llm_config)
 
             # Use memory's structured_db if available
@@ -549,6 +550,16 @@ class NovelPipeline:
             if ch_outline is None:
                 log.warning("第%d章大纲不存在，跳过", ch_num)
                 continue
+
+            # Detect placeholder outline and fill it via LLM before proceeding
+            if self._is_placeholder_outline(ch_outline):
+                log.info("第%d章大纲为占位符，自动补全中...", ch_num)
+                ch_outline = self._fill_placeholder_outline(state, ch_outline, ch_num)
+                # Update outline in state so downstream nodes see the filled version
+                for i, ch in enumerate(outline.get("chapters", [])):
+                    if ch.get("chapter_number") == ch_num:
+                        outline["chapters"][i] = ch_outline
+                        break
 
             state["current_chapter"] = ch_num
             state["current_chapter_outline"] = ch_outline
@@ -841,7 +852,7 @@ class NovelPipeline:
             end_chapter = total_chapters
 
         # Initialize LLM + Writer
-        llm_config = state.get("config", {}).get("llm", {})
+        llm_config = get_stage_llm_config(state, "scene_writing")
         llm = create_llm_client(llm_config)
         writer = Writer(llm)
 
@@ -1090,8 +1101,8 @@ class NovelPipeline:
         # ★ Refresh settings from novel.json (edit_service writes there)
         self._refresh_state_from_novel(state, fm.load_novel(novel_id))
 
-        # Initialize LLM
-        llm_config = state.get("config", {}).get("llm", {})
+        # Initialize LLM (quality_review for analysis, scene_writing for rewrite)
+        llm_config = get_stage_llm_config(state, "quality_review")
         llm = create_llm_client(llm_config)
 
         # Analyze feedback (or use pre-computed instructions)
@@ -1142,8 +1153,10 @@ class NovelPipeline:
                 progress_callback(1.0, "分析完成!")
             return result
 
-        # Prepare writer
-        writer = Writer(llm)
+        # Prepare writer (with scene_writing model)
+        writer_llm_config = get_stage_llm_config(state, "scene_writing")
+        writer_llm = create_llm_client(writer_llm_config)
+        writer = Writer(writer_llm)
 
         # Restore models
         char_profiles: list[CharacterProfile] = []
@@ -1241,6 +1254,18 @@ class NovelPipeline:
                 + analysis.get("propagation_chapters", [])
             )
         )
+
+        # Filter out published chapters — they must not be auto-rewritten
+        _novel_data = fm.load_novel(novel_id) or {}
+        published_chapters = set(_novel_data.get("published_chapters", []))
+        skipped_published = [ch for ch in rewrite_queue if ch in published_chapters]
+        if skipped_published:
+            log.warning(
+                "跳过已发布章节的重写: %s（如需修改请先取消发布）",
+                skipped_published,
+            )
+            result.setdefault("skipped_published", skipped_published)
+            rewrite_queue = [ch for ch in rewrite_queue if ch not in published_chapters]
 
         rewrite_instructions = analysis.get("rewrite_instructions", {})
 
@@ -1369,7 +1394,7 @@ class NovelPipeline:
         # 从 checkpoint 获取 LLM 配置，fallback 到 auto
         state = self._load_checkpoint(novel_id)
         llm_config = (
-            state.get("config", {}).get("llm", {}) if state else {}
+            get_stage_llm_config(state, "quality_review") if state else {}
         )
         llm = create_llm_client(llm_config)
 
@@ -1519,7 +1544,7 @@ class NovelPipeline:
         # 从 checkpoint 获取 LLM 配置，fallback 到 auto
         state = self._load_checkpoint(novel_id)
         llm_config = (
-            state.get("config", {}).get("llm", {}) if state else {}
+            get_stage_llm_config(state, "consistency_check") if state else {}
         )
         llm = create_llm_client(llm_config)
 
@@ -1611,7 +1636,7 @@ class NovelPipeline:
         # 从 checkpoint 获取 LLM 配置
         state = self._load_checkpoint(novel_id)
         llm_config = (
-            state.get("config", {}).get("llm", {}) if state else {}
+            get_stage_llm_config(state, "scene_writing") if state else {}
         )
         llm = create_llm_client(llm_config)
         writer = Writer(llm)
@@ -1739,6 +1764,106 @@ class NovelPipeline:
                 return ch
         return None
 
+    @staticmethod
+    def _is_placeholder_outline(ch_outline: dict) -> bool:
+        """Check if a chapter outline is a placeholder (not yet planned)."""
+        goal = ch_outline.get("goal", "")
+        key_events = ch_outline.get("key_events", [])
+        title = ch_outline.get("title", "")
+        # Placeholder patterns: goal is "待规划", key_events is ["待规划"], or title is just "第N章"
+        if goal == "待规划":
+            return True
+        if key_events == ["待规划"]:
+            return True
+        if not goal and not key_events:
+            return True
+        return False
+
+    def _fill_placeholder_outline(self, state: dict, ch_outline: dict, ch_num: int) -> dict:
+        """Use LLM to fill in a placeholder chapter outline with proper details.
+
+        Generates title, goal, key_events, mood based on the overall story arc,
+        previous chapters, and main storyline.
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.novel.llm_utils import get_stage_llm_config
+
+        try:
+            llm_config = get_stage_llm_config(state, "outline_generation")
+            llm = create_llm_client(llm_config)
+        except Exception as exc:
+            log.warning("LLM 不可用，无法补全大纲: %s", exc)
+            return ch_outline
+
+        outline_data = state.get("outline", {})
+        main_storyline = outline_data.get("main_storyline", {}) or state.get("main_storyline", {})
+        total_chapters = len(outline_data.get("chapters", []))
+
+        # Gather previous chapter summaries for context
+        prev_summaries = []
+        for ch in outline_data.get("chapters", []):
+            if ch.get("chapter_number", 0) < ch_num and ch.get("goal") != "待规划":
+                prev_summaries.append(
+                    f"第{ch['chapter_number']}章「{ch.get('title', '')}」: {ch.get('goal', '')}"
+                )
+        # Keep last 5 for context
+        recent_context = "\n".join(prev_summaries[-5:]) if prev_summaries else "暂无前文"
+
+        # Volume info
+        volume_info = ""
+        for vol in outline_data.get("volumes", []):
+            vol_chapters = vol.get("chapters", [])
+            if ch_num in vol_chapters:
+                volume_info = (
+                    f"当前卷: {vol.get('title', '')} "
+                    f"(核心冲突: {vol.get('core_conflict', '')})"
+                )
+                break
+
+        prompt = f"""请为第{ch_num}章（共{total_chapters}章）补全详细大纲。
+
+{f"主线信息: 主角目标={main_storyline.get('protagonist_goal', '')}, 核心冲突={main_storyline.get('core_conflict', '')}" if main_storyline else ""}
+{volume_info}
+
+前文概要:
+{recent_context}
+
+请严格按 JSON 格式返回:
+{{
+  "title": "具体的章节标题（不要用'第N章'这种格式）",
+  "goal": "本章要推进的核心目标（一句话）",
+  "key_events": ["关键事件1", "关键事件2", "关键事件3"],
+  "mood": "蓄力/小爽/大爽/过渡/虐心/反转/日常（选一个）",
+  "chapter_summary": "本章概要（2-3句话）"
+}}"""
+
+        try:
+            response = llm.chat(
+                messages=[
+                    {"role": "system", "content": "你是一位专业的网文大纲规划师。根据前文和主线信息，为指定章节补全详细大纲。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                json_mode=True,
+                max_tokens=1024,
+            )
+
+            from src.novel.agents.utils import extract_json_obj
+            result = extract_json_obj(response.content)
+            if result:
+                ch_outline["title"] = result.get("title", ch_outline.get("title", f"第{ch_num}章"))
+                ch_outline["goal"] = result.get("goal", "")
+                ch_outline["key_events"] = result.get("key_events", [])
+                ch_outline["mood"] = result.get("mood", "蓄力")
+                ch_outline["chapter_summary"] = result.get("chapter_summary", "")
+                log.info("第%d章大纲补全成功: 「%s」", ch_num, ch_outline["title"])
+            else:
+                log.warning("第%d章大纲补全失败: LLM 返回无法解析", ch_num)
+        except Exception as exc:
+            log.warning("第%d章大纲补全异常: %s", ch_num, exc)
+
+        return ch_outline
+
     # ------------------------------------------------------------------
     # resize_novel — change total chapter count
     # ------------------------------------------------------------------
@@ -1830,7 +1955,7 @@ class NovelPipeline:
         from src.novel.agents.novel_director import NovelDirector, _CHAPTERS_PER_VOLUME
         from src.llm.llm_client import create_llm_client
 
-        llm_config = state.get("config", {}).get("llm", {})
+        llm_config = get_stage_llm_config(state, "outline_generation")
         llm = create_llm_client(llm_config)
         director = NovelDirector(llm)
         fm = self._get_file_manager()

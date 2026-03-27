@@ -121,6 +121,7 @@ class QualityCheckTool:
         self,
         chapter_text: str,
         characters: list[dict] | None = None,
+        blacklist_overrides: dict[str, int] | None = None,
     ) -> RuleCheckResult:
         """规则硬指标检查。
 
@@ -134,6 +135,8 @@ class QualityCheckTool:
         Args:
             chapter_text: 章节文本
             characters: 角色列表（可选，用于对话标签检查）
+            blacklist_overrides: AI 味短语阈值覆盖，格式为 {短语: 单章允许次数}。
+                会与模板默认黑名单合并，覆盖项优先。
 
         Returns:
             RuleCheckResult 实例
@@ -162,8 +165,25 @@ class QualityCheckTool:
                     f"第{i}段过短（{len(para)}字）: '{para[:20]}'"
                 )
 
-        # 4. AI 味短语
+        # 4. AI 味短语（支持 config 覆盖阈值）
         ai_hits = check_ai_flavor(chapter_text)
+        if blacklist_overrides:
+            # Filter out hits that are within the per-phrase threshold
+            filtered_hits: list[tuple[str, int]] = []
+            # Count occurrences of each phrase
+            phrase_counts: dict[str, int] = {}
+            for phrase, pos in ai_hits:
+                phrase_counts[phrase] = phrase_counts.get(phrase, 0) + 1
+            # Re-scan: only flag phrases exceeding their threshold
+            seen_counts: dict[str, int] = {}
+            for phrase, pos in ai_hits:
+                threshold = blacklist_overrides.get(phrase)
+                if threshold is not None:
+                    seen_counts[phrase] = seen_counts.get(phrase, 0) + 1
+                    if seen_counts[phrase] <= threshold:
+                        continue  # Within allowed limit
+                filtered_hits.append((phrase, pos))
+            ai_hits = filtered_hits
         ai_flavor_issues = [f"AI味短语: '{phrase}'（位置{pos}）" for phrase, pos in ai_hits]
 
         # 5. 对话区分度
@@ -172,7 +192,6 @@ class QualityCheckTool:
         # 综合判定：只有严重问题触发失败
         # 重复句 >= 3 或 AI味短语 >= 5 才算失败
         # 段落长度和对话区分度仅作为建议，不影响 passed
-        critical_issues = repetition_issues + ai_flavor_issues
         passed = len(repetition_issues) < 3 and len(ai_flavor_issues) < 5
 
         return RuleCheckResult(

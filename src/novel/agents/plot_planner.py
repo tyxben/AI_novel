@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.llm.llm_client import LLMClient, LLMResponse, create_llm_client
+from src.novel.llm_utils import get_stage_llm_config
 from src.novel.models.chapter import MoodTag
 from src.novel.models.character import CharacterProfile
 from src.novel.models.novel import ChapterOutline, VolumeOutline
@@ -166,6 +167,7 @@ class PlotPlanner:
         characters: list[CharacterProfile],
         foreshadowing_hints: list[dict] | None = None,
         outline: dict | None = None,
+        generation_config: dict | None = None,
     ) -> list[dict]:
         """将章大纲分解为场景计划列表。
 
@@ -174,7 +176,32 @@ class PlotPlanner:
         outline:
             完整大纲字典，可选。用于提取 ``main_storyline`` 信息
             以便场景分解时注入主线推进要求。
+        generation_config:
+            生成策略配置字典，可选。支持的键：
+            - ``scene_per_chapter``: 每章最大场景数（用作上限）
+            - ``words_per_scene``: 场景字数范围 [min, max]
+            - ``words_per_chapter``: 章节字数范围 [min, max]（用于 clamp 目标字数）
         """
+        gen_cfg = generation_config or {}
+
+        # Clamp chapter target words using config range
+        effective_estimated_words = chapter_outline.estimated_words
+        wpc = gen_cfg.get("words_per_chapter")
+        if wpc and isinstance(wpc, list) and len(wpc) >= 2:
+            wpc_min, wpc_max = int(wpc[0]), int(wpc[1])
+            if effective_estimated_words < wpc_min:
+                log.info(
+                    "章节目标字数 %d 低于 config 下限 %d，调整为 %d",
+                    effective_estimated_words, wpc_min, wpc_min,
+                )
+                effective_estimated_words = wpc_min
+            elif effective_estimated_words > wpc_max:
+                log.info(
+                    "章节目标字数 %d 超过 config 上限 %d，调整为 %d",
+                    effective_estimated_words, wpc_max, wpc_max,
+                )
+                effective_estimated_words = wpc_max
+
         target_scenes = _SCENE_COUNT_MAP.get(chapter_outline.mood, 3)
 
         char_lines = []
@@ -249,6 +276,14 @@ class PlotPlanner:
             if len(lines) > 1:
                 chapter_brief_section = "\n".join(lines)
 
+        # Build words_per_scene guidance for the prompt
+        words_per_scene_section = ""
+        wps = gen_cfg.get("words_per_scene")
+        if wps and isinstance(wps, list) and len(wps) >= 2:
+            words_per_scene_section = (
+                f"\n场景字数范围：{int(wps[0])}-{int(wps[1])}字"
+            )
+
         user_msg = _DECOMPOSE_USER.format(
             chapter_number=chapter_outline.chapter_number,
             title=chapter_outline.title,
@@ -260,7 +295,7 @@ class PlotPlanner:
             if chapter_outline.involved_characters
             else "未指定",
             mood=chapter_outline.mood,
-            estimated_words=chapter_outline.estimated_words,
+            estimated_words=effective_estimated_words,
             chapter_brief_section=chapter_brief_section,
             main_storyline_section=main_storyline_section,
             volume_context=volume_ctx_str,
@@ -268,6 +303,10 @@ class PlotPlanner:
             foreshadowing_info=foreshadowing_info,
             target_scenes=target_scenes,
         )
+
+        # Append words_per_scene guidance if available
+        if words_per_scene_section:
+            user_msg += words_per_scene_section
 
         messages = [
             {"role": "system", "content": _DECOMPOSE_SYSTEM},
@@ -287,8 +326,18 @@ class PlotPlanner:
             )
 
         scenes = self._validate_scenes(
-            scenes_raw, chapter_outline.estimated_words
+            scenes_raw, effective_estimated_words
         )
+
+        # Cap scene count using config upper bound
+        max_scenes = gen_cfg.get("scene_per_chapter", 10)
+        if len(scenes) > max_scenes:
+            log.warning(
+                "生成了 %d 个场景，超过 config 上限 %d，截断",
+                len(scenes), max_scenes,
+            )
+            scenes = scenes[:max_scenes]
+
         return scenes
 
     # ------------------------------------------------------------------
@@ -418,7 +467,7 @@ def plot_planner_node(state: dict) -> dict:
     errors: list[dict] = []
 
     # 创建 LLM 客户端
-    llm_config = state.get("config", {}).get("llm", {})
+    llm_config = get_stage_llm_config(state, "outline_generation")
     try:
         llm = create_llm_client(llm_config)
     except Exception as exc:
@@ -453,6 +502,9 @@ def plot_planner_node(state: dict) -> dict:
         except Exception:
             pass
 
+    # Extract generation config from state
+    generation_cfg = state.get("config", {}).get("generation", {})
+
     try:
         scene_plans = planner.decompose_chapter(
             chapter_outline=chapter_outline,
@@ -460,6 +512,7 @@ def plot_planner_node(state: dict) -> dict:
             characters=characters,
             foreshadowing_hints=None,
             outline=state.get("outline"),
+            generation_config=generation_cfg,
         )
 
         decisions.append({

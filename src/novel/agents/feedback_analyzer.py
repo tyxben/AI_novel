@@ -627,6 +627,8 @@ def feedback_analyzer_node(state: dict) -> dict:
     """
     from src.llm.llm_client import create_llm_client
 
+    from src.novel.llm_utils import get_stage_llm_config
+
     decisions: list[Decision] = []
     errors: list[dict] = []
 
@@ -641,7 +643,7 @@ def feedback_analyzer_node(state: dict) -> dict:
             "completed_nodes": ["feedback_analyzer"],
         }
 
-    llm_config = state.get("config", {}).get("llm", {})
+    llm_config = get_stage_llm_config(state, "quality_review")
     try:
         llm = create_llm_client(llm_config)
     except Exception as exc:

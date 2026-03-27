@@ -15,6 +15,7 @@ from typing import Any
 
 from src.llm.llm_client import create_llm_client
 from src.novel.agents.state import Decision, NovelState
+from src.novel.llm_utils import get_stage_llm_config
 from src.novel.models.quality import StyleMetrics
 from src.novel.templates.style_presets import get_style
 from src.novel.tools.style_analysis_tool import StyleAnalysisTool
@@ -208,7 +209,7 @@ def style_keeper_node(state: NovelState) -> dict[str, Any]:
     style_name = state.get("style_name")
 
     # 创建 StyleKeeper（LLM 可选，当前主要做规则检查）
-    llm_config = state.get("config", {}).get("llm", {})
+    llm_config = get_stage_llm_config(state, "style_rewrite")
     try:
         llm = create_llm_client(llm_config)
     except Exception:

@@ -41,12 +41,12 @@ class StyleConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM 模型分工配置"""
 
-    outline_generation: str = Field("gpt-4o-mini", description="大纲生成模型")
-    character_design: str = Field("gpt-4o-mini", description="角色设计模型")
-    scene_writing: str = Field("gpt-4o-mini", description="场景写作模型")
-    quality_review: str = Field("gpt-4o-mini", description="质量评审模型")
+    outline_generation: str = Field("gpt-5.4", description="大纲生成模型")
+    character_design: str = Field("gpt-5.4", description="角色设计模型")
+    scene_writing: str = Field("gpt-5.4", description="场景写作模型")
+    quality_review: str = Field("gpt-5.4", description="质量评审模型")
     consistency_check: str = Field(
-        "gemini-1.5-pro", description="一致性检查模型（长上下文）"
+        "gemini-3.1-pro", description="一致性检查模型（长上下文）"
     )
     style_rewrite: str = Field("deepseek-chat", description="风格改写模型（省钱）")
 

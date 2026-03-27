@@ -270,6 +270,8 @@ def consistency_checker_node(state: NovelState) -> dict[str, Any]:
     """
     from src.llm.llm_client import create_llm_client
 
+    from src.novel.llm_utils import get_stage_llm_config
+
     decisions: list[Decision] = []
     errors: list[dict] = []
 
@@ -357,7 +359,7 @@ def consistency_checker_node(state: NovelState) -> dict[str, Any]:
     # ---- Full LLM check (every 9th chapter) ----
 
     # 初始化 LLM
-    llm_config = state.get("config", {}).get("llm", {})
+    llm_config = get_stage_llm_config(state, "consistency_check")
     try:
         llm = create_llm_client(llm_config)
     except Exception as exc:
@@ -530,7 +532,9 @@ def _run_narrative_logic_check(
     if checker is None:
         from src.llm.llm_client import create_llm_client
 
-        llm_config = state.get("config", {}).get("llm", {})
+        from src.novel.llm_utils import get_stage_llm_config
+
+        llm_config = get_stage_llm_config(state, "consistency_check")
         try:
             llm = create_llm_client(llm_config)
         except Exception as exc:

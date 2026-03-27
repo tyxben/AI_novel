@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from src.llm.llm_client import create_llm_client
 from src.novel.agents.state import Decision, NovelState
+from src.novel.llm_utils import get_stage_llm_config
 from src.novel.tools.quality_check_tool import QualityCheckTool
 from src.novel.tools.style_analysis_tool import StyleAnalysisTool
 
@@ -74,6 +75,8 @@ class QualityReviewer:
         debt_extractor: Any | None = None,
         obligation_tracker: Any | None = None,
         chapter_number: int = 0,
+        enable_rule_check: bool = True,
+        blacklist_overrides: dict[str, int] | None = None,
     ) -> dict:
         """完整质量审查流程。
 
@@ -88,6 +91,8 @@ class QualityReviewer:
             debt_extractor: DebtExtractor 实例（可选，用于提取叙事债务）
             obligation_tracker: ObligationTracker 实例（可选，用于管理叙事债务）
             chapter_number: 当前章节号（默认 0）
+            enable_rule_check: 是否执行规则硬指标检查（默认 True）
+            blacklist_overrides: AI 味短语阈值覆盖（可选，来自 config）
 
         Returns:
             综合质量报告字典，包含：
@@ -107,8 +112,15 @@ class QualityReviewer:
             "suggestions": [],
         }
 
-        # --- 1. 规则硬指标检查（总是执行） ---
-        rule_result = self.quality_tool.rule_check(chapter_text, characters)
+        # --- 1. 规则硬指标检查（可通过 config 禁用） ---
+        if enable_rule_check:
+            rule_result = self.quality_tool.rule_check(
+                chapter_text, characters, blacklist_overrides=blacklist_overrides
+            )
+        else:
+            from src.novel.models.quality import RuleCheckResult as _RCR
+            rule_result = _RCR(passed=True)
+            log.info("规则检查已通过 config 禁用，跳过")
         report["rule_check"] = rule_result.model_dump()
 
         if not rule_result.passed:
@@ -260,7 +272,7 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         }
 
     # 获取 LLM 客户端
-    llm_config = state.get("config", {}).get("llm", {})
+    llm_config = get_stage_llm_config(state, "quality_review")
     llm = None
     try:
         llm = create_llm_client(llm_config)
@@ -275,7 +287,12 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
 
     # 省 token 策略：只在关键章节做 LLM 打分
     # 规则检查每章都做（零成本），LLM 打分仅在卷末/每5章做一次
-    budget_mode = current_chapter % 5 != 0 and current_chapter != total_chapters
+    quality_cfg = state.get("config", {}).get("quality", {})
+    enable_llm_scoring = quality_cfg.get("enable_llm_scoring", True)
+    if not enable_llm_scoring:
+        budget_mode = True  # Skip LLM scoring entirely when disabled
+    else:
+        budget_mode = current_chapter % 5 != 0 and current_chapter != total_chapters
 
     # 尝试从 state 中获取章节任务书（chapter_brief）
     chapter_brief = state.get("current_chapter_brief") or None
@@ -284,6 +301,9 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
     obligation_tracker = state.get("obligation_tracker")
     brief_validator = state.get("brief_validator")
     debt_extractor = state.get("debt_extractor")
+
+    enable_rule_check = quality_cfg.get("enable_rule_check", True)
+    blacklist_overrides = quality_cfg.get("ai_flavor_blacklist") or None
 
     report = reviewer.review_chapter(
         chapter_text=chapter_text,
@@ -296,6 +316,8 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         debt_extractor=debt_extractor,
         obligation_tracker=obligation_tracker,
         chapter_number=current_chapter,
+        enable_rule_check=enable_rule_check,
+        blacklist_overrides=blacklist_overrides,
     )
 
     need_rewrite = reviewer.should_rewrite(

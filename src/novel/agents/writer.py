@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.llm.llm_client import LLMClient, LLMResponse, create_llm_client
+from src.novel.llm_utils import get_stage_llm_config
 from src.novel.models.chapter import Chapter, Scene
 from src.novel.models.character import CharacterProfile
 from src.novel.models.novel import ChapterOutline
@@ -67,6 +68,38 @@ _CHARACTER_NAME_LOCK = (
     "2. 禁止使用占位符称呼：禁止写「角色A」「女学生B」「老人C」「男子D」「路人甲」等编号式称呼\n"
     "3. 如果需要引入新的路人/NPC，可以用职业/特征称呼（如「收银员」「保安」），但同一个NPC前后称呼必须一致\n"
     "4. 角色名字一旦出现在前文中，后续必须使用完全相同的名字，不能缩写或扩展（如「小玲」不能变成「李小玲」）\n"
+)
+
+# ---------------------------------------------------------------------------
+# 正面写作指导（提升文笔质量、细节和逻辑）
+# ---------------------------------------------------------------------------
+
+_CRAFT_QUALITY = (
+    "【写作质量要求 — 必须遵守】\n"
+    "1. **展示而非陈述（Show Don't Tell）**：\n"
+    "   - 错误示范：「他很害怕」 → 正确：「他的手指不受控制地颤抖，嘴唇咬出了血痕」\n"
+    "   - 错误示范：「她很生气」 → 正确：「她把茶杯重重搁在桌上，杯底在桃木面上磕出一道白印」\n"
+    "   - 情绪必须通过具体的身体反应、微表情、小动作来传达，禁止直接写情绪词\n"
+    "2. **感官细节**：每个场景至少调动2种以上感官（视觉+听觉/嗅觉/触觉/味觉）\n"
+    "   - 室内场景写出光线质感、温度变化、物品触感\n"
+    "   - 室外场景写出天气体感、地面质地、远近声音层次\n"
+    "   - 战斗场面写出冲击力的物理反馈（地面震颤、气流扰动、关节酸麻）\n"
+    "3. **因果逻辑链 — 每个行为必须有动机，每个结果必须有原因**：\n"
+    "   - 角色做出决定前，必须交代他的顾虑、信息和权衡过程\n"
+    "   - 角色改变态度，必须有具体的触发事件（一句话、一个发现、一次冲突）\n"
+    "   - 战斗/冲突中的胜负翻转必须有铺垫：利用环境、对手的弱点、之前埋下的伏笔\n"
+    "   - 禁止「突然」「忽然」解决问题（deus ex machina），所有转折必须可追溯\n"
+    "4. **对话要有潜台词**：\n"
+    "   - 人物不会直接说出自己的真实意图。想要求助的人会绕弯子，心虚的人会岔开话题\n"
+    "   - 每句对话至少承担两个功能：推进剧情+揭示性格 / 传递信息+暗示情绪\n"
+    "   - 对话间插入微动作（搅咖啡、整理衣角、回避视线）来表达言外之意\n"
+    "5. **场景节奏**：\n"
+    "   - 紧张场景用短句、快节奏：「他转身。刀光闪过。血珠溅落。」\n"
+    "   - 舒缓场景用长句、细描写，让读者放慢呼吸\n"
+    "   - 一个场景内必须有至少一次节奏变化（从快到慢、或从慢到快）\n"
+    "6. **环境不是背景板**：\n"
+    "   - 环境描写必须与人物情绪或剧情走向呼应\n"
+    "   - 角色与环境要有互动（踩到碎石、拂过树枝、被雨淋湿），而不是人物在真空中行动\n"
 )
 
 # ---------------------------------------------------------------------------
@@ -345,10 +378,11 @@ class Writer:
                 genre=_genre_for_registry,
             )
             if registry_prompt:
-                craft_blocks = registry_prompt
+                craft_blocks = f"{registry_prompt}\n{_CRAFT_QUALITY}"
             else:
                 # Registry returned empty -- fall back to hardcoded
                 craft_blocks = (
+                    f"{_CRAFT_QUALITY}\n"
                     f"{_ANTI_AI_FLAVOR}\n"
                     f"{_ANTI_REPETITION}\n"
                     f"{_NARRATIVE_LOGIC}\n"
@@ -356,6 +390,7 @@ class Writer:
                 )
         else:
             craft_blocks = (
+                f"{_CRAFT_QUALITY}\n"
                 f"{_ANTI_AI_FLAVOR}\n"
                 f"{_ANTI_REPETITION}\n"
                 f"{_NARRATIVE_LOGIC}\n"
@@ -759,6 +794,7 @@ class Writer:
                 f"本章目标：{chapter_outline.goal}\n"
                 f"本章情绪基调：{chapter_outline.mood}\n\n"
                 f"【角色档案】\n{char_desc}\n\n"
+                f"{_CRAFT_QUALITY}\n"
                 f"{_ANTI_AI_FLAVOR}"
             )
             user_prompt = (
@@ -901,6 +937,7 @@ class Writer:
             f"5. 修改后的文字要自然融入原文，不能有拼接感\n\n"
             f"【世界观设定】\n{world_desc}\n\n"
             f"【角色档案】\n{char_desc}\n\n"
+            f"{_CRAFT_QUALITY}\n"
             f"{_ANTI_AI_FLAVOR}\n"
             f"{_ANTI_REPETITION}\n"
             f"{_NARRATIVE_LOGIC}"
@@ -1254,7 +1291,7 @@ def writer_node(state: dict) -> dict:
     errors: list[dict] = []
 
     # 创建 LLM 客户端
-    llm_config = state.get("config", {}).get("llm", {})
+    llm_config = get_stage_llm_config(state, "scene_writing")
     try:
         llm = create_llm_client(llm_config)
     except Exception as exc:
