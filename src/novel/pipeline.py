@@ -1851,14 +1851,32 @@ class NovelPipeline:
             from src.novel.agents.utils import extract_json_obj
             result = extract_json_obj(response.content)
             if result:
-                ch_outline["title"] = result.get("title", ch_outline.get("title", f"第{ch_num}章"))
-                ch_outline["goal"] = result.get("goal", "")
-                ch_outline["key_events"] = result.get("key_events", [])
-                ch_outline["mood"] = result.get("mood", "蓄力")
+                title = result.get("title") or ch_outline.get("title") or f"第{ch_num}章"
+                goal = result.get("goal") or ch_outline.get("goal") or "承接前文，推进主线"
+                key_events = result.get("key_events") or ch_outline.get("key_events") or ["承接前文"]
+                mood = result.get("mood") or ch_outline.get("mood") or "蓄力"
+                # Validate: ChapterOutline requires min_length=1 for title/goal, and key_events non-empty
+                if not title or title == f"第{ch_num}章":
+                    title = goal[:20] if goal else f"第{ch_num}章·续"
+                if isinstance(key_events, list) and len(key_events) == 0:
+                    key_events = [goal or "推进主线"]
+                # Validate mood is a valid literal
+                valid_moods = {"蓄力", "小爽", "大爽", "过渡", "虐心", "反转", "日常"}
+                if mood not in valid_moods:
+                    mood = "蓄力"
+                ch_outline["title"] = title
+                ch_outline["goal"] = goal
+                ch_outline["key_events"] = key_events
+                ch_outline["mood"] = mood
                 ch_outline["chapter_summary"] = result.get("chapter_summary", "")
                 log.info("第%d章大纲补全成功: 「%s」", ch_num, ch_outline["title"])
             else:
                 log.warning("第%d章大纲补全失败: LLM 返回无法解析", ch_num)
+                # Set safe defaults so pipeline can still proceed
+                if not ch_outline.get("goal") or ch_outline["goal"] == "待规划":
+                    ch_outline["goal"] = "承接前文，推进主线"
+                if not ch_outline.get("key_events") or ch_outline["key_events"] == ["待规划"]:
+                    ch_outline["key_events"] = ["承接前文"]
         except Exception as exc:
             log.warning("第%d章大纲补全异常: %s", ch_num, exc)
 
@@ -2080,5 +2098,9 @@ class NovelPipeline:
             preview = chapter_text.replace("\n", " ").strip()[:100]
             ch["goal"] = preview + ("..." if len(chapter_text) > 100 else "")
             ch["chapter_summary"] = preview + ("..." if len(chapter_text) > 100 else "")
-            ch["key_events"] = []
+            # Keep existing key_events if valid, otherwise set a non-empty fallback
+            # ChapterOutline requires key_events min_length=1
+            existing_events = ch.get("key_events", [])
+            if not existing_events or existing_events == ["待规划"]:
+                ch["key_events"] = [ch["goal"][:50]]
             return
