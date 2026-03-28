@@ -1333,8 +1333,12 @@ def writer_node(state: dict) -> dict:
     debt_summary = state.get("debt_summary", "")
     continuity_brief = state.get("continuity_brief", "")
 
-    # Get feedback from previous chapter via FeedbackInjector if not already set
-    if not feedback_prompt:
+    # Priority: current chapter rewrite feedback > previous chapter feedback
+    current_rewrite = state.get("current_chapter_rewrite_prompt", "")
+    if current_rewrite:
+        feedback_prompt = current_rewrite  # Override with rewrite-specific feedback
+    elif not feedback_prompt:
+        # Get feedback from previous chapter via FeedbackInjector if not already set
         feedback_injector = state.get("feedback_injector")
         novel_id = state.get("novel_id", "")
         if feedback_injector and novel_id:

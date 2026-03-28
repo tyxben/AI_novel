@@ -94,3 +94,6 @@ class NovelState(TypedDict, total=False):
 
     # === 质量反馈注入 ===
     feedback_injector: Any  # FeedbackInjector instance (bridges QualityReviewer → Writer)
+
+    # === 当前章重写反馈 ===
+    current_chapter_rewrite_prompt: str  # Rewrite-specific feedback from QualityReviewer

@@ -77,6 +77,7 @@ class QualityReviewer:
         chapter_number: int = 0,
         enable_rule_check: bool = True,
         blacklist_overrides: dict[str, int] | None = None,
+        existing_style_check: dict | None = None,
     ) -> dict:
         """完整质量审查流程。
 
@@ -93,6 +94,9 @@ class QualityReviewer:
             chapter_number: 当前章节号（默认 0）
             enable_rule_check: 是否执行规则硬指标检查（默认 True）
             blacklist_overrides: AI 味短语阈值覆盖（可选，来自 config）
+            existing_style_check: 已有的风格检查结果（来自 style_keeper 节点），
+                提供时跳过内部 StyleKeeper 调用以避免重复执行。
+                期望格式: {"similarity": float, "deviations": list, "suggestions": list}
 
         Returns:
             综合质量报告字典，包含：
@@ -141,10 +145,26 @@ class QualityReviewer:
             if rule_result.dialogue_distinction_issues:
                 report["suggestions"].append("增加不同角色对话的区分度")
 
-        # --- 2. 风格检查（如有目标风格） ---
-        if style_name:
+        # --- 2. 风格检查 ---
+        if existing_style_check:
+            # Read from style_keeper node output (avoid duplicate execution)
+            report["style_check"] = {
+                "similarity": existing_style_check.get("similarity"),
+                "deviations": existing_style_check.get("deviations", []),
+            }
+            deviations = existing_style_check.get("deviations", [])
+            if deviations:
+                style_suggestions = existing_style_check.get("suggestions", [])
+                if style_suggestions:
+                    report["suggestions"].extend(style_suggestions)
+                else:
+                    for dev in deviations[:3]:
+                        desc = dev.get("description", str(dev)) if isinstance(dev, dict) else str(dev)
+                        report["suggestions"].append(f"风格偏差：{desc}")
+        elif style_name:
+            # Fallback: run style check ourselves (e.g., when called outside the graph)
             try:
-                from src.novel.templates.style_presets import get_style
+                from src.novel.templates.style_presets import get_style  # noqa: F401
                 from src.novel.agents.style_keeper import StyleKeeper
 
                 keeper = StyleKeeper(self.llm)
@@ -305,6 +325,17 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
     enable_rule_check = quality_cfg.get("enable_rule_check", True)
     blacklist_overrides = quality_cfg.get("ai_flavor_blacklist") or None
 
+    # Read style check results produced by the style_keeper node (already executed
+    # in parallel before quality_reviewer) to avoid duplicate StyleKeeper calls.
+    existing_quality = state.get("current_chapter_quality") or {}
+    existing_style_check = None
+    if existing_quality.get("style_similarity") is not None:
+        existing_style_check = {
+            "similarity": existing_quality["style_similarity"],
+            "deviations": existing_quality.get("style_deviations", []),
+            "suggestions": existing_quality.get("style_suggestions", []),
+        }
+
     report = reviewer.review_chapter(
         chapter_text=chapter_text,
         chapter_outline=state.get("current_chapter_outline"),
@@ -318,6 +349,7 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         chapter_number=current_chapter,
         enable_rule_check=enable_rule_check,
         blacklist_overrides=blacklist_overrides,
+        existing_style_check=existing_style_check,
     )
 
     need_rewrite = reviewer.should_rewrite(
@@ -365,6 +397,56 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         retry_counts[current_chapter] = retry_counts.get(current_chapter, 0) + 1
         result["retry_counts"] = retry_counts
 
+        # Build rewrite prompt from review findings
+        rewrite_parts: list[str] = []
+        if report.get("rewrite_reason"):
+            rewrite_parts.append(f"重写原因：{report['rewrite_reason']}")
+
+        # Rule check failures
+        rule_check = report.get("rule_check", {})
+        if not rule_check.get("passed", True):
+            if rule_check.get("ai_flavor_issues"):
+                phrases = []
+                for issue in rule_check["ai_flavor_issues"][:5]:
+                    if isinstance(issue, dict):
+                        phrases.append(issue.get("phrase", str(issue)))
+                    else:
+                        phrases.append(str(issue))
+                rewrite_parts.append(f"必须消除以下 AI 味短语：{'、'.join(phrases)}")
+            if rule_check.get("repetition_issues"):
+                rewrite_parts.append(f"修复 {len(rule_check['repetition_issues'])} 处重复句")
+            if rule_check.get("dialogue_distinction_issues"):
+                rewrite_parts.append("增加不同角色对话的区分度，每个角色必须有独特口吻")
+            if rule_check.get("paragraph_length_issues"):
+                rewrite_parts.append("调整段落长度，避免过长或过短的段落")
+
+        # Style deviations
+        style_check = report.get("style_check", {})
+        if style_check.get("deviations"):
+            for dev in style_check["deviations"][:3]:
+                if isinstance(dev, dict):
+                    rewrite_parts.append(f"风格偏差：{dev.get('description', dev)}")
+                else:
+                    rewrite_parts.append(f"风格偏差：{dev}")
+
+        # Suggestions
+        suggestions = report.get("suggestions", [])
+        if suggestions:
+            rewrite_parts.append("改进建议：" + "；".join(suggestions[:5]))
+
+        # Brief fulfillment failures
+        brief_report = report.get("brief_fulfillment", {})
+        if brief_report and not brief_report.get("overall_pass", True):
+            unfulfilled = brief_report.get("unfulfilled_items", [])
+            if unfulfilled:
+                rewrite_parts.append("任务书未完成项：" + "；".join(str(u) for u in unfulfilled[:3]))
+
+        if rewrite_parts:
+            result["current_chapter_rewrite_prompt"] = (
+                "【当前章质量审查反馈 — 重写时必须针对性修正以下问题】\n"
+                + "\n".join(f"- {p}" for p in rewrite_parts)
+            )
+
         max_retries = state.get("max_retries", 3)
         if retry_counts[current_chapter] >= max_retries:
             decisions.append(
@@ -376,6 +458,10 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
             )
             # 强制通过
             report["need_rewrite"] = False
+            result["current_chapter_rewrite_prompt"] = ""  # Clear on force pass
             result["current_chapter_quality"] = report
+    else:
+        # Chapter passed — clear rewrite prompt for next chapter
+        result["current_chapter_rewrite_prompt"] = ""
 
     return result

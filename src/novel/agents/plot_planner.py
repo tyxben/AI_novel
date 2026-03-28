@@ -73,6 +73,7 @@ _DECOMPOSE_SYSTEM = """\
 8. 如果有主线信息，场景必须体现主角朝目标靠近或遭遇新障碍
 9. 如果上一章有未解决的悬念或任务（角色去执行某事），本章必须有场景交代其结果
 10. 每个场景引入的问题/方案必须在本章或明确标注在后续章节中解决，不能悬而不决
+11. 如果提供了"连续性约束"，第一个场景必须承接上章遗留事项。场景规划中不能出现连续性约束中"禁止违反"的项目
 
 返回严格的 JSON 格式（不要添加任何额外文字）：
 {
@@ -168,6 +169,8 @@ class PlotPlanner:
         foreshadowing_hints: list[dict] | None = None,
         outline: dict | None = None,
         generation_config: dict | None = None,
+        continuity_brief: str = "",
+        debt_summary: str = "",
     ) -> list[dict]:
         """将章大纲分解为场景计划列表。
 
@@ -181,6 +184,12 @@ class PlotPlanner:
             - ``scene_per_chapter``: 每章最大场景数（用作上限）
             - ``words_per_scene``: 场景字数范围 [min, max]
             - ``words_per_chapter``: 章节字数范围 [min, max]（用于 clamp 目标字数）
+        continuity_brief:
+            连续性约束，可选。来自上章的遗留事项、角色状态等，
+            用于指导场景规划承接上文。
+        debt_summary:
+            未了结叙事义务，可选。来自叙事债务追踪器的摘要，
+            用于提醒场景规划需要解决的遗留问题。
         """
         gen_cfg = generation_config or {}
 
@@ -276,6 +285,15 @@ class PlotPlanner:
             if len(lines) > 1:
                 chapter_brief_section = "\n".join(lines)
 
+        # 构建连续性约束 section
+        continuity_section = ""
+        if continuity_brief:
+            continuity_section = f"\n## 连续性约束（场景规划必须遵守）\n{continuity_brief}\n"
+
+        debt_section = ""
+        if debt_summary:
+            debt_section = f"\n## 未了结叙事义务\n{debt_summary}\n"
+
         # Build words_per_scene guidance for the prompt
         words_per_scene_section = ""
         wps = gen_cfg.get("words_per_scene")
@@ -307,6 +325,12 @@ class PlotPlanner:
         # Append words_per_scene guidance if available
         if words_per_scene_section:
             user_msg += words_per_scene_section
+
+        # Append continuity constraints
+        if continuity_section:
+            user_msg += continuity_section
+        if debt_section:
+            user_msg += debt_section
 
         messages = [
             {"role": "system", "content": _DECOMPOSE_SYSTEM},
@@ -505,6 +529,10 @@ def plot_planner_node(state: dict) -> dict:
     # Extract generation config from state
     generation_cfg = state.get("config", {}).get("generation", {})
 
+    # Read continuity constraints from state
+    continuity_brief = state.get("continuity_brief", "")
+    debt_summary = state.get("debt_summary", "")
+
     try:
         scene_plans = planner.decompose_chapter(
             chapter_outline=chapter_outline,
@@ -513,6 +541,8 @@ def plot_planner_node(state: dict) -> dict:
             foreshadowing_hints=None,
             outline=state.get("outline"),
             generation_config=generation_cfg,
+            continuity_brief=continuity_brief,
+            debt_summary=debt_summary,
         )
 
         decisions.append({
