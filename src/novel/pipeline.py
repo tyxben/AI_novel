@@ -481,6 +481,51 @@ class NovelPipeline:
             outline = state.get("outline", {})
             total_chapters = len(outline.get("chapters", []))
 
+        # --- Pre-check: ensure all target chapters have valid outlines ---
+        outline_chapters = outline.get("chapters", [])
+        outlined_nums = {ch.get("chapter_number") for ch in outline_chapters}
+        placeholder_nums = []
+
+        for ch_num in range(start_chapter, end_chapter + 1):
+            if ch_num not in outlined_nums:
+                placeholder_nums.append(ch_num)
+            else:
+                # Check if it's a placeholder
+                ch = self._get_chapter_outline(outline, ch_num)
+                if ch and self._is_placeholder_outline(ch):
+                    placeholder_nums.append(ch_num)
+
+        if placeholder_nums:
+            log.info(
+                "发现 %d 个占位符大纲 (章节 %s)，生成前先补全...",
+                len(placeholder_nums),
+                placeholder_nums[:5],
+            )
+            filled_count = 0
+            for ch_num in placeholder_nums:
+                ch = self._get_chapter_outline(outline, ch_num)
+                if ch is None:
+                    # Chapter doesn't exist in outline at all — need to extend
+                    continue
+                if self._is_placeholder_outline(ch):
+                    try:
+                        filled = self._fill_placeholder_outline(state, ch, ch_num)
+                        # Update outline in state
+                        for i, existing_ch in enumerate(outline.get("chapters", [])):
+                            if existing_ch.get("chapter_number") == ch_num:
+                                outline["chapters"][i] = filled
+                                break
+                        filled_count += 1
+                        log.info("第%d章大纲已补全: %s", ch_num, filled.get("title", "?"))
+                    except Exception as exc:
+                        log.warning("第%d章大纲补全失败: %s", ch_num, exc)
+
+            if filled_count > 0:
+                # Save the updated outline to checkpoint
+                state["outline"] = outline
+                self._save_checkpoint(novel_id, state)
+                log.info("已补全 %d/%d 个占位符大纲", filled_count, len(placeholder_nums))
+
         # Determine effective silent mode
         effective_silent = silent or state.get("silent_mode", False)
         review_interval = state.get("review_interval", self.config.human_in_loop.review_interval)
@@ -577,6 +622,18 @@ class NovelPipeline:
                     if ch.get("chapter_number") == ch_num:
                         outline["chapters"][i] = ch_outline
                         break
+
+            # After fill attempt, verify the outline is no longer a placeholder
+            if self._is_placeholder_outline(ch_outline):
+                log.error(
+                    "第%d章大纲补全失败且仍为占位符，跳过生成以避免低质量输出",
+                    ch_num,
+                )
+                state.setdefault("errors", []).append({
+                    "agent": "pipeline",
+                    "message": f"第{ch_num}章大纲为占位符且补全失败，已跳过",
+                })
+                continue
 
             state["current_chapter"] = ch_num
             state["current_chapter_outline"] = ch_outline

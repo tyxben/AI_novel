@@ -47,6 +47,14 @@ TOOLS = [
         },
     },
     {
+        "name": "generate_chapters",
+        "description": "生成新章节（调用完整 pipeline：情节规划→正文生成→一致性检查→质量审核）。生成需要一定时间，每章约30-60秒。",
+        "parameters": {
+            "num_chapters": {"type": "integer", "description": "要生成的章节数量（默认1）", "optional": True},
+            "start_chapter": {"type": "integer", "description": "起始章节号（默认从最后一章之后开始）", "optional": True},
+        },
+    },
+    {
         "name": "resize_novel",
         "description": "调整小说总章节数（扩容或缩减）",
         "parameters": {
@@ -257,6 +265,60 @@ class AgentToolExecutor:
             "chapters_rewritten": result.get("rewritten_chapters", []),
             "feedback_type": analysis.get("feedback_type", ""),
         }
+
+    def _tool_generate_chapters(self, num_chapters: int = 1, start_chapter: int | None = None) -> dict:
+        """Generate new chapters using the full pipeline."""
+        from src.novel.pipeline import NovelPipeline
+        from src.novel.storage.file_manager import FileManager
+
+        # Cap num_chapters to prevent very long runs
+        num_chapters = max(1, min(num_chapters, 10))
+
+        pipe = NovelPipeline(workspace=self.workspace)
+        fm = FileManager(self.workspace)
+
+        # Auto-detect start chapter
+        if start_chapter is None:
+            completed = fm.list_chapters(self.novel_id)
+            start_chapter = (max(completed) + 1) if completed else 1
+
+        end_chapter = start_chapter + num_chapters - 1
+
+        try:
+            result = pipe.generate_chapters(
+                project_path=self._project_path,
+                start_chapter=start_chapter,
+                end_chapter=end_chapter,
+                silent=True,
+            )
+
+            generated = result.get("chapters_generated", [])
+            errors = result.get("errors", [])
+
+            summary: dict[str, Any] = {
+                "success": True,
+                "chapters_generated": generated,
+                "total_generated": len(generated),
+                "start_chapter": start_chapter,
+                "end_chapter": end_chapter,
+            }
+
+            if errors:
+                summary["warnings"] = [e.get("message", str(e)) if isinstance(e, dict) else str(e) for e in errors[:3]]
+
+            # Include brief quality info if available
+            debt_stats = result.get("debt_statistics")
+            if debt_stats:
+                summary["debt_statistics"] = debt_stats
+
+            return summary
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"章节生成失败: {exc}",
+                "start_chapter": start_chapter,
+                "end_chapter": end_chapter,
+            }
 
     def _tool_resize_novel(self, new_total: int) -> dict:
         from src.novel.pipeline import NovelPipeline
@@ -1016,6 +1078,7 @@ def run_agent_chat(
                 "read_chapter": "读取章节",
                 "edit_setting": "修改设定",
                 "rewrite_chapter": "重写章节",
+                "generate_chapters": "生成章节",
                 "resize_novel": "调整章节数",
                 "publish_chapters": "标记发布",
                 "proofread_chapter": "校对章节",

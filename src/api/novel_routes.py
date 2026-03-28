@@ -40,6 +40,7 @@ class NovelGenerateRequest(BaseModel):
     batch_size: Optional[int] = None
     target_total: Optional[int] = None
     silent: bool = False
+    react_mode: bool = False
 
 
 class NovelPolishRequest(BaseModel):
@@ -287,6 +288,8 @@ def generate_chapters(novel_id: str, req: NovelGenerateRequest, request: Request
         params["batch_size"] = req.batch_size
     if req.target_total is not None:
         params["target_total"] = req.target_total
+    if req.react_mode:
+        params["react_mode"] = True
 
     task_id = submit_to_queue("novel_generate", params, keys=keys)
     return {"task_id": task_id}

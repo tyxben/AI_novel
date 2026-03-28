@@ -286,6 +286,7 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
   const [genStartCh, setGenStartCh] = useState<number | "">("");
   const [genEndCh, setGenEndCh] = useState<number | "">("");
   const [silentMode, setSilentMode] = useState(false);
+  const [reactMode, setReactMode] = useState(false);
 
   // Polish controls
   const [showPolishOptions, setShowPolishOptions] = useState(false);
@@ -293,7 +294,7 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
   const [polishEndCh, setPolishEndCh] = useState<number | "">("");
 
   const handleGenerate = () => {
-    const params: any = { batch_size: batchSize, silent: silentMode };
+    const params: any = { batch_size: batchSize, silent: silentMode, react_mode: reactMode };
     if (targetTotal) params.target_total_chapters = Number(targetTotal);
     if (genStartCh) params.start_chapter = Number(genStartCh);
     if (genEndCh) params.end_chapter = Number(genEndCh);
@@ -461,6 +462,16 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
                 className="accent-accent"
               />
               静默模式（跳过质量检查，加速生成）
+            </label>
+            <label className="mt-2 flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={reactMode}
+                onChange={(e) => setReactMode(e.target.checked)}
+                className="accent-accent"
+              />
+              智能质控模式
+              <span className="text-xs text-slate-400">（ReAct，较慢但质量更高）</span>
             </label>
             <button className={btnPrimary + " mt-3"} onClick={handleGenerate} disabled={genMut.isPending}>
               {genMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}

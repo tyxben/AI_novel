@@ -864,7 +864,8 @@ class TestPipelinePassesReactMode:
         # We need to mock the internals to verify state is set correctly
         mock_state = {
             "outline": {
-                "chapters": [{"chapter_number": 1, "title": "Ch1"}],
+                "chapters": [{"chapter_number": 1, "title": "Ch1",
+                              "goal": "test goal", "key_events": ["event1"]}],
             },
             "main_storyline": {},
         }

@@ -30,14 +30,16 @@ NEW_CHARACTERS = [
 OLD_OUTLINE = {
     "main_storyline": {"goal": "old goal"},
     "chapters": [
-        {"chapter_number": 1, "title": "Ch1", "summary": "old summary"},
+        {"chapter_number": 1, "title": "Ch1", "goal": "old goal 1",
+         "key_events": ["event1"], "summary": "old summary"},
     ],
 }
 
 NEW_OUTLINE = {
     "main_storyline": {"goal": "new goal"},
     "chapters": [
-        {"chapter_number": 1, "title": "Ch1 Revised", "summary": "new summary"},
+        {"chapter_number": 1, "title": "Ch1 Revised", "goal": "new goal 1",
+         "key_events": ["event1"], "summary": "new summary"},
     ],
 }
 
