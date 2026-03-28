@@ -2262,6 +2262,10 @@ class NovelPipeline:
         generation, missing slots are filled with placeholder data (title=
         "第N章", goal="待规划"). After a chapter is actually written, this
         method patches the outline entry so it reflects real content.
+
+        IMPORTANT: Only patches title and chapter_summary. Does NOT overwrite
+        goal or key_events with raw chapter text — doing so would pollute the
+        outline and cause subsequent chapters to repeat the same content.
         """
         outline = state.get("outline")
         if not outline or not isinstance(outline, dict):
@@ -2271,23 +2275,34 @@ class NovelPipeline:
             if ch.get("chapter_number") != ch_num:
                 continue
             # Only patch if it's still a placeholder
-            if ch.get("goal") != "待规划":
+            if ch.get("goal") not in ("待规划", ""):
                 return
-            # Extract a title from the first non-empty line of text
-            lines = [ln.strip() for ln in chapter_text.split("\n") if ln.strip()]
-            # Use current_chapter_outline title if the writer generated a better one
+
+            # Title: prefer current_chapter_outline's title (from PlotPlanner/Writer)
             cur_outline = state.get("current_chapter_outline", {})
             title = cur_outline.get("title", "")
             if not title or title == f"第{ch_num}章":
-                title = lines[0][:20] if lines else f"第{ch_num}章"
+                title = f"第{ch_num}章"
             ch["title"] = title
-            # Build a brief summary from the first ~100 chars
+
+            # chapter_summary: short preview for display purposes only
             preview = chapter_text.replace("\n", " ").strip()[:100]
-            ch["goal"] = preview + ("..." if len(chapter_text) > 100 else "")
             ch["chapter_summary"] = preview + ("..." if len(chapter_text) > 100 else "")
-            # Keep existing key_events if valid, otherwise set a non-empty fallback
-            # ChapterOutline requires key_events min_length=1
+
+            # goal: generate a functional goal, NOT raw text
+            # Use current_chapter_outline goal if available (from _fill_placeholder)
+            cur_goal = cur_outline.get("goal", "")
+            if cur_goal and cur_goal != "待规划":
+                ch["goal"] = cur_goal
+            else:
+                ch["goal"] = f"第{ch_num}章剧情推进"
+
+            # key_events: keep existing if valid, otherwise minimal fallback
             existing_events = ch.get("key_events", [])
             if not existing_events or existing_events == ["待规划"]:
-                ch["key_events"] = [ch["goal"][:50]]
+                cur_events = cur_outline.get("key_events", [])
+                if cur_events and cur_events != ["待规划"]:
+                    ch["key_events"] = cur_events
+                else:
+                    ch["key_events"] = [f"第{ch_num}章核心事件"]
             return
