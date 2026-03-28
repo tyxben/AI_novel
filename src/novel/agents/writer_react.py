@@ -195,6 +195,8 @@ class WriterReactAgent(ReactAgent):
                 style_name=style_name,
                 scenes_written_summary=scenes_written_summary,
                 debt_summary=debt_summary,
+                feedback_prompt=feedback_prompt,
+                continuity_brief=continuity_brief,
             )
 
         chars = scene_plan.get(

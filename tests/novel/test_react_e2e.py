@@ -726,6 +726,55 @@ class TestReactModeGeneratesScene:
         assert isinstance(scene, Scene)
         assert len(scene.text) > 50
 
+    def test_react_fallback_preserves_feedback_and_continuity(
+        self, chapter_outline, characters, world_setting, scene_plan
+    ):
+        """ReAct fallback to one-shot must still carry feedback_prompt
+        and continuity_brief so constraints are not silently dropped."""
+        mock_llm = MagicMock()
+
+        react_response = LLMResponse(
+            content=json.dumps({
+                "thinking": "直接提交",
+                "tool": "submit",
+                "args": {"text": ""},
+            }),
+            model="mock",
+            usage={"total_tokens": 50},
+            finish_reason="stop",
+        )
+
+        oneshot_text = "林风独立山巅，风吹衣袂。" * 30
+
+        mock_llm.chat.side_effect = [
+            react_response,
+            LLMResponse(content=oneshot_text, model="mock", usage={"total_tokens": 300}, finish_reason="stop"),
+        ]
+
+        test_feedback = "本场景必须减少重复回顾，对话要区分角色口吻"
+        test_continuity = "【连续性约束】上章结尾主角答应夜探仓库"
+
+        writer = Writer(mock_llm)
+        scene = writer.generate_scene(
+            scene_plan=scene_plan,
+            chapter_outline=chapter_outline,
+            characters=characters,
+            world_setting=world_setting,
+            context="",
+            style_name="wuxia.classical",
+            react_mode=True,
+            feedback_prompt=test_feedback,
+            continuity_brief=test_continuity,
+        )
+
+        assert isinstance(scene, Scene)
+        # The fallback one-shot call is the second chat call
+        fallback_call = mock_llm.chat.call_args_list[1]
+        messages = fallback_call.kwargs.get("messages") or fallback_call[0][0]
+        all_text = " ".join(m.get("content", "") for m in messages)
+        assert test_feedback in all_text, "feedback_prompt missing in fallback one-shot"
+        assert test_continuity in all_text, "continuity_brief missing in fallback one-shot"
+
 
 # ======================================================================
 # Test 8: Budget Mode Skips Checks
