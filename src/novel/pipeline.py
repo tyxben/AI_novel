@@ -506,6 +506,14 @@ class NovelPipeline:
                 if ch_n and ch_t:
                     state["chapters_text"][ch_n] = ch_t
 
+        # --- Initialize NovelMemory for vector indexing + character snapshots ---
+        try:
+            from src.novel.storage.novel_memory import NovelMemory
+            self.memory = NovelMemory(novel_id, self.workspace)
+        except Exception as exc:
+            log.warning("NovelMemory 初始化失败: %s", exc)
+            self.memory = None
+
         chapters_generated = []
         consecutive_failures = 0
         chapter_graph = build_chapter_graph()
@@ -597,7 +605,7 @@ class NovelPipeline:
 
                     outline_data = state.get("outline", {})
                     vs = VolumeSettlement(
-                        db=self.memory.structured_db if hasattr(self, "memory") and self.memory and hasattr(self.memory, "structured_db") else None,
+                        db=self.memory.structured_db if getattr(self, "memory", None) and getattr(self.memory, "structured_db", None) else None,
                         outline=outline_data if isinstance(outline_data, dict) else {},
                     )
 
@@ -644,8 +652,9 @@ class NovelPipeline:
             try:
                 from src.novel.services.continuity_service import ContinuityService as _ContinuityService
 
+                _mem = getattr(self, "memory", None)
                 continuity_svc = _ContinuityService(
-                    db=self.memory.structured_db if hasattr(self, "memory") and self.memory and hasattr(self.memory, "structured_db") else None,
+                    db=getattr(_mem, "structured_db", None) if _mem else None,
                     obligation_tracker=obligation_tracker,
                 )
                 continuity_brief = continuity_svc.generate_brief(
@@ -706,7 +715,7 @@ class NovelPipeline:
                 state["chapters_text"] = chapters_text
 
                 # --- Narrative Control: extract character snapshots ---
-                if hasattr(self, "memory") and self.memory and hasattr(self.memory, "structured_db"):
+                if getattr(self, "memory", None) and getattr(self.memory, "structured_db", None):
                     try:
                         characters_list = state.get("characters", [])
                         for char in characters_list:
@@ -714,15 +723,18 @@ class NovelPipeline:
                             if not char_name or char_name not in chapter_text:
                                 continue
                             char_id = char.get("character_id", char_name) if isinstance(char, dict) else getattr(char, "character_id", char_name)
+                            # Heuristic: extract location from text near character name
+                            location = self._extract_character_location(char_name, chapter_text)
                             self.memory.structured_db.insert_character_state(
                                 character_id=char_id,
                                 chapter=ch_num,
+                                location=location,
                             )
                     except Exception as exc:
                         log.debug("角色快照提取失败: %s", exc)
 
                 # --- Narrative Control: index chapter for vector consistency check ---
-                if hasattr(self, "memory") and self.memory:
+                if getattr(self, "memory", None):
                     try:
                         from src.novel.models.memory import ChapterSummary
                         from src.novel.tools.chapter_digest import create_digest
@@ -792,6 +804,14 @@ class NovelPipeline:
                 result["debt_statistics"] = obligation_tracker.get_debt_statistics()
             except Exception:
                 pass
+
+        # --- Cleanup: close NovelMemory ---
+        if getattr(self, "memory", None):
+            try:
+                self.memory.close()
+            except Exception:
+                pass
+            self.memory = None
 
         return result
 
@@ -2143,6 +2163,25 @@ class NovelPipeline:
         if not summaries:
             return "（尚未生成任何章节）"
         return "\n".join(summaries)
+
+    @staticmethod
+    def _extract_character_location(char_name: str, text: str) -> str:
+        """Heuristic: extract location keyword near character name mention."""
+        import re
+        # Find sentences containing the character name
+        sentences = re.split(r'[。！？\n]', text)
+        location_keywords = (
+            "客栈", "酒楼", "山洞", "广场", "大殿", "密室", "街道", "城门",
+            "书房", "卧室", "花园", "市集", "学院", "宫殿", "战场", "森林",
+            "河边", "山顶", "谷底", "码头", "府邸", "府中", "院中", "门口",
+            "城中", "城外", "山下", "洞中", "阵前", "殿中", "房间", "帐篷",
+        )
+        for sentence in reversed(sentences):  # Prefer later mentions
+            if char_name in sentence:
+                for kw in location_keywords:
+                    if kw in sentence:
+                        return kw
+        return ""
 
     @staticmethod
     def _backfill_outline_entry(state: dict, ch_num: int, chapter_text: str) -> None:

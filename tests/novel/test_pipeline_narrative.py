@@ -252,7 +252,7 @@ class TestGenerateChaptersInitializesServices:
             result = pipeline.generate_chapters(project_path, start_chapter=1, end_chapter=2, silent=True)
 
             # Services should have been created
-            MockTracker.assert_called_once_with(db=None)
+            MockTracker.assert_called_once()
             MockExtractor.assert_called_once_with(mock_llm)
             MockValidator.assert_called_once_with(mock_llm)
 

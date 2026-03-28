@@ -320,6 +320,7 @@ class Writer:
                 scenes_written_summary=scenes_written_summary,
                 debt_summary=debt_summary,
                 feedback_prompt=feedback_prompt,
+                continuity_brief=continuity_brief,
             )
 
         char_desc = self._build_character_description(characters)

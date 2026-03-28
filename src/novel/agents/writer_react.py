@@ -124,6 +124,7 @@ class WriterReactAgent(ReactAgent):
         scenes_written_summary: str = "",
         debt_summary: str = "",
         feedback_prompt: str = "",
+        continuity_brief: str = "",
     ) -> Scene:
         """ReAct 模式生成单个场景。
 
@@ -149,6 +150,7 @@ class WriterReactAgent(ReactAgent):
             scenes_written_summary,
             debt_summary,
             feedback_prompt,
+            continuity_brief=continuity_brief,
         )
 
         system = (
@@ -224,6 +226,7 @@ class WriterReactAgent(ReactAgent):
         scenes_written: str,
         debt_summary: str,
         feedback_prompt: str,
+        continuity_brief: str = "",
     ) -> str:
         """构建传给 generate_draft 工具的场景 prompt。"""
         try:
@@ -272,6 +275,8 @@ class WriterReactAgent(ReactAgent):
             parts.append("\n【角色】\n" + "\n".join(char_lines))
         if feedback_prompt:
             parts.append(f"\n{feedback_prompt}")
+        if continuity_brief:
+            parts.append(f"\n{continuity_brief}")
         if debt_summary:
             parts.append(f"\n【叙事义务】\n{debt_summary}")
         parts.append(

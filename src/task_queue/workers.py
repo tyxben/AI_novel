@@ -576,6 +576,13 @@ def _run_novel_agent_chat(params: dict, progress_cb) -> dict:
                 "Failed to persist agent reply to session %s", session_id, exc_info=True
             )
 
+    # Close StructuredDB to avoid connection leak
+    if structured_db is not None:
+        try:
+            structured_db.close()
+        except Exception:
+            pass
+
     progress_cb(1.0, "Agent 完成")
     return result
 

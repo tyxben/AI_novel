@@ -884,13 +884,18 @@ def run_agent_chat(
                     "content": msg.get("content", ""),
                 })
             # Merge: DB history + explicit history (dedup by content)
-            seen: set[tuple[str, str]] = set()
+            seen: set[tuple[str, int]] = set()
             merged: list[dict] = []
             for h in db_history + (history or []):
-                key = (h.get("role", ""), h.get("content", "")[:100])
+                # Normalize role: DB uses "agent", API uses "assistant"
+                role = h.get("role", "")
+                if role == "agent":
+                    role = "assistant"
+                content = h.get("content", "")
+                key = (role, hash(content))
                 if key not in seen:
                     seen.add(key)
-                    merged.append(h)
+                    merged.append({"role": role, "content": content})
             history = merged[-20:]  # Keep last 20
         except Exception:
             pass  # Fallback to explicit history
