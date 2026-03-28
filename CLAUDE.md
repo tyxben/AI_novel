@@ -97,6 +97,7 @@ python main.py run input/novel.txt --mode agent --resume
 ## AI 长篇小说写作模块 (src/novel/)
 - `src/novel/agents/` - 9个 Agent: NovelDirector / WorldBuilder / CharacterDesigner / PlotPlanner / Writer / ConsistencyChecker / StyleKeeper / QualityReviewer / FeedbackAnalyzer
 - `src/novel/tools/` - Tool 层: ConsistencyTool / QualityCheckTool / StyleAnalysisTool / BM25Retriever / ChapterDigest
+- `src/novel/services/` - 服务层: ContinuityService(连续性摘要) / AgentChat(工具调用对话) / ObligationTracker / VolumeSettlement 等
 - `src/novel/models/` - Pydantic 数据模型: Novel / Chapter / Character / World / Feedback 等
 - `src/novel/storage/` - 存储层: NovelMemory(SQLite+NetworkX+Chroma) / FileManager
 - `src/novel/templates/` - 模板预设: 大纲模板 / 风格预设 / 节奏模板 / AI味黑名单
@@ -108,16 +109,24 @@ python main.py run input/novel.txt --mode agent --resume
 
 ### Agent 编排
 - **初始化图**: NovelDirector → WorldBuilder → CharacterDesigner → END
-- **章节生成图**: PlotPlanner → Writer → [ConsistencyChecker ∥ StyleKeeper] → QualityReviewer → END/Writer(重写)
+- **章节生成图**: ContinuityService.generate_brief() → PlotPlanner → Writer(+continuity_brief) → [ConsistencyChecker ∥ StyleKeeper] → QualityReviewer → END/Writer(重写)
 - **反馈重写**: FeedbackAnalyzer → Writer.rewrite_chapter() (直接修改 + 传播调整)
 - ConsistencyChecker 和 StyleKeeper 并行执行 (ThreadPoolExecutor)
+- Writer 的 feedback_prompt 在 one-shot 和 ReAct 两条路径都注入
 - LangGraph 为可选依赖，未安装时 fallback 为顺序执行
 
 ### 省 Token 策略
-- 前3章跳过一致性检查，非9倍数章用 BM25 轻量检查
+- 每章执行轻量级向量一致性检查（Chroma 语义检索 + 规则矛盾检测），BM25 作为 fallback
+- 每9章做一次完整 LLM 一致性检查（事实提取 + 三层矛盾检测 + LLM 裁决）
 - LLM 打分仅每5章一次 + 末章（budget_mode）
-- 章节摘要替代全文送 LLM 打分（ChapterDigest）
+- 章节摘要替代全文送 LLM 打分（ChapterDigest），摘要同时索引到向量库供后续一致性检索
 - 每章目标 2000-3000 字，Writer 用 max_tokens + 硬截断控制
+
+### 叙事状态管理
+- **ContinuityService** (`src/novel/services/continuity_service.py`): 每章生成前聚合 continuity_brief（上章钩子 + 叙事债务 + 角色状态 + 活跃弧线 + 禁止违反项 + 推荐兑现），通过 `format_for_prompt()` 注入 Writer 系统提示
+- **角色状态快照**: 每章生成后自动提取角色位置/状态/情感到 StructuredDB，供后续 continuity_brief 查询
+- **向量索引**: 每章生成后 ChapterDigest 摘要自动索引到 Chroma 向量库，供一致性检查语义检索
+- **Agent Chat 会话记忆**: `run_agent_chat()` 支持 `session_id` + `db` 参数，自动从 DB 恢复历史对话 + 提取工作记忆注入系统提示
 
 ```bash
 # 创建小说项目（大纲+世界观+角色）
