@@ -302,6 +302,7 @@ class Writer:
         react_mode: bool = False,
         budget_mode: bool = False,
         feedback_prompt: str = "",
+        continuity_brief: str = "",
     ) -> Scene:
         """生成单个场景正文。"""
         if react_mode:
@@ -397,6 +398,11 @@ class Writer:
                 f"{_CHARACTER_NAME_LOCK}"
             )
 
+        # 连续性约束注入
+        continuity_prompt = ""
+        if continuity_brief:
+            continuity_prompt = f"\n{continuity_brief}\n"
+
         system_prompt = (
             f"{style}\n\n"
             f"你是一位专业小说写手，正在创作第{chapter_outline.chapter_number}章"
@@ -406,6 +412,7 @@ class Writer:
             f"{main_storyline_prompt}"
             f"{position_prompt}"
             f"{chapter_brief_prompt}"
+            f"{continuity_prompt}"
             f"【极其重要的字数限制】你必须严格控制输出在{target_words}字左右。"
             f"绝对不能超过{target_words + 200}字。宁可写少也不要写多。"
             f"写到接近目标字数时，必须在一个完整的句子处自然收束，不要强行展开新情节。\n\n"
@@ -471,7 +478,16 @@ class Writer:
                 f"{debt_summary}\n\n"
             )
 
+        # 反馈约束注入
+        feedback_constraint_prompt = ""
+        if feedback_prompt:
+            feedback_constraint_prompt = (
+                f"【前文质量反馈 — 本场景写作必须遵守以下改进要求】\n"
+                f"{feedback_prompt}\n\n"
+            )
+
         user_prompt = (
+            f"{feedback_constraint_prompt}"
             f"{debt_prompt}"
             f"【场景信息】\n"
             f"- 地点：{scene_plan.get('location', '未指定')}\n"
@@ -573,6 +589,7 @@ class Writer:
         react_mode: bool = False,
         budget_mode: bool = False,
         feedback_prompt: str = "",
+        continuity_brief: str = "",
     ) -> Chapter:
         """生成完整章节（逐场景生成，滑动窗口传递上下文）。"""
         # 从 chapter_outline 设置章节任务书
@@ -637,6 +654,7 @@ class Writer:
                 react_mode=react_mode,
                 budget_mode=budget_mode,
                 feedback_prompt=feedback_prompt,
+                continuity_brief=continuity_brief,
             )
 
             # 【修复】场景去重：移除与前文重复的段落
@@ -1312,6 +1330,7 @@ def writer_node(state: dict) -> dict:
     budget_mode_writer = state.get("budget_mode", False)
     feedback_prompt = state.get("feedback_prompt", "")
     debt_summary = state.get("debt_summary", "")
+    continuity_brief = state.get("continuity_brief", "")
 
     # Get feedback from previous chapter via FeedbackInjector if not already set
     if not feedback_prompt:
@@ -1426,6 +1445,7 @@ def writer_node(state: dict) -> dict:
             react_mode=react_mode,
             budget_mode=budget_mode_writer,
             feedback_prompt=feedback_prompt,
+            continuity_brief=continuity_brief,
         )
 
         decisions.append({

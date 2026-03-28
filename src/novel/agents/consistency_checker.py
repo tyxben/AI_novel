@@ -290,62 +290,46 @@ def consistency_checker_node(state: NovelState) -> dict[str, Any]:
             "completed_nodes": ["consistency_checker"],
         }
 
-    # 省 token：前3章跳过完整一致性检查（还没有足够上下文产生矛盾）
-    # 之后每3章做一次完整检查，其余章节仅标记通过
-    if chapter_number <= 3 or (chapter_number > 3 and chapter_number % 3 != 0):
-        log.info("第%d章跳过完整一致性检查（省 token）", chapter_number)
-        existing_quality = state.get("current_chapter_quality") or {}
-        return {
-            "current_chapter_quality": {
-                **existing_quality,
-                "consistency_check": {"passed": True, "contradictions": [], "skipped": True},
-            },
-            "decisions": [_make_decision(
-                step="skip_check",
-                decision="跳过完整检查",
-                reason=f"第{chapter_number}章：降频策略",
-            )],
-            "errors": [],
-            "completed_nodes": ["consistency_checker"],
-        }
+    # 每章至少做轻量级向量检查
+    # 每9章做一次完整 LLM 检查（事实提取 + 三层矛盾检测 + LLM 裁决）
+    use_lightweight = chapter_number % 9 != 0
 
-    # 每9章做一次完整 LLM 检查，其余用 BM25 轻量检查
-    use_bm25 = chapter_number % 9 != 0
-
-    # Build narrative context (shared by BM25 + full LLM paths)
+    # Build narrative context (shared by vector + full LLM paths)
     previous_summary, chapter_outline_hint = _build_narrative_context(
         state, chapter_number
     )
 
-    # ---- BM25 lightweight check ----
-    if use_bm25:
-        bm25_report = _bm25_check(state, chapter_text, chapter_number)
+    # ---- Lightweight vector check (every non-9th chapter) ----
+    if use_lightweight:
+        log.info("第%d章执行轻量级向量一致性检查", chapter_number)
+        vector_report = _vector_check(state, chapter_text, chapter_number)
         decisions.append(
             _make_decision(
-                step="bm25_check",
-                decision="通过" if bm25_report["passed"] else "发现潜在矛盾",
-                reason=f"BM25 轻量检查，{len(bm25_report['contradictions'])} 个潜在矛盾",
-                data={"contradictions_count": len(bm25_report["contradictions"])},
+                step="vector_check",
+                decision="通过" if vector_report["passed"] else "发现潜在矛盾",
+                reason=f"向量轻量检查({vector_report.get('method', 'vector')})，"
+                       f"{len(vector_report['contradictions'])} 个潜在矛盾",
+                data={"contradictions_count": len(vector_report["contradictions"])},
             )
         )
 
-        # Run narrative logic check alongside BM25 (1 LLM call) to catch
-        # plot thread breaks that keyword matching cannot detect.
+        # Run narrative logic check alongside vector check (1 LLM call) to
+        # catch plot thread breaks that rule-based matching cannot detect.
         narrative_issues = _run_narrative_logic_check(
             state, chapter_text, chapter_number,
             previous_summary, chapter_outline_hint,
             decisions, errors,
         )
 
-        all_contradictions = bm25_report["contradictions"] + narrative_issues
-        overall_passed = bm25_report["passed"] and len(narrative_issues) == 0
+        all_contradictions = vector_report["contradictions"] + narrative_issues
+        overall_passed = vector_report["passed"] and len(narrative_issues) == 0
 
         existing_quality = state.get("current_chapter_quality") or {}
         return {
             "current_chapter_quality": {
                 **existing_quality,
                 "consistency_check": {
-                    **bm25_report,
+                    **vector_report,
                     "contradictions": all_contradictions,
                     "passed": overall_passed,
                     "narrative_issues_count": len(narrative_issues),
@@ -522,13 +506,13 @@ def _run_narrative_logic_check(
 ) -> list[dict[str, Any]]:
     """Run narrative logic check, creating a ConsistencyChecker if needed.
 
-    This is factored out so both BM25 and full-LLM paths can call it.
+    This is factored out so both vector-check and full-LLM paths can call it.
     Returns the list of narrative issues found (may be empty).
     """
     if not previous_summary:
         return []
 
-    # Create checker if not provided (BM25 path)
+    # Create checker if not provided (lightweight vector check path)
     if checker is None:
         from src.llm.llm_client import create_llm_client
 
@@ -566,12 +550,187 @@ def _run_narrative_logic_check(
         return []
 
 
-def _bm25_check(
+def _vector_check(
+    state: NovelState,
+    chapter_text: str,
+    chapter_number: int,
+) -> dict[str, Any]:
+    """Vector-based lightweight consistency check (no LLM).
+
+    Uses Chroma vector store for semantic retrieval of related passages,
+    then applies rule-based contradiction detection.
+
+    Falls back to BM25 if the vector store is unavailable.
+
+    Returns a dict compatible with the consistency_check quality shape.
+    """
+    novel_id = state.get("novel_id", "unknown")
+    workspace = state.get("workspace", "/tmp")
+
+    contradictions: list[dict[str, Any]] = []
+
+    try:
+        from src.novel.storage.novel_memory import NovelMemory
+
+        memory = NovelMemory(novel_id, workspace)
+    except Exception as exc:
+        log.warning("向量检查: 记忆系统不可用, 回退到 BM25: %s", exc)
+        return _bm25_check_fallback(state, chapter_text, chapter_number)
+
+    try:
+        vector_store = memory.vector_store
+        if vector_store.count() == 0:
+            log.info("向量检查: 向量库为空，回退到 BM25")
+            return _bm25_check_fallback(state, chapter_text, chapter_number)
+
+        # Extract character names from state
+        characters: list[dict] = state.get("characters") or []
+        char_names = [c.get("name", "") for c in characters if c.get("name")]
+
+        _DEATH_KEYWORDS = ("死", "亡", "殒命", "丧命", "身亡", "去世", "陨落")
+        _ALIVE_KEYWORDS = ("出现", "说道", "笑道", "走", "拿", "站", "坐")
+        _DEPARTURE_KEYWORDS = ("我去", "前去", "出发", "赶往", "动身", "启程", "去执行")
+
+        # For each character, do semantic search for related content
+        for name in char_names:
+            # Search for facts about this character
+            try:
+                results = vector_store.search_similar_facts(
+                    f"{name} 状态 行动 位置",
+                    n_results=10,
+                )
+            except Exception as exc:
+                log.debug("向量检索角色 %s 失败: %s", name, exc)
+                continue
+
+            if not results or not results.get("documents") or not results["documents"][0]:
+                continue
+
+            docs = results["documents"][0]
+            metas = results["metadatas"][0] if results.get("metadatas") else [{}] * len(docs)
+
+            death_refs: list[dict] = []
+            alive_refs: list[dict] = []
+            departure_refs: list[dict] = []
+
+            for doc, meta in zip(docs, metas):
+                if name not in doc:
+                    continue
+                ch = meta.get("chapter", 0)
+                entry = {"text": doc, "chapter": ch}
+                if any(kw in doc for kw in _DEATH_KEYWORDS):
+                    death_refs.append(entry)
+                if any(kw in doc for kw in _ALIVE_KEYWORDS):
+                    alive_refs.append(entry)
+                if any(kw in doc for kw in _DEPARTURE_KEYWORDS):
+                    departure_refs.append(entry)
+
+            # Also check current chapter text
+            if name in chapter_text:
+                current_entry = {"text": chapter_text[:200], "chapter": chapter_number}
+                if any(kw in chapter_text for kw in _ALIVE_KEYWORDS):
+                    alive_refs.append(current_entry)
+
+            # Check: Dead character reappearing
+            for d_ref in death_refs:
+                for a_ref in alive_refs:
+                    if a_ref["chapter"] > d_ref["chapter"]:
+                        contradictions.append({
+                            "layer": "vector",
+                            "character": name,
+                            "type": "character_resurrection",
+                            "fact": {
+                                "chapter": a_ref["chapter"],
+                                "content": a_ref["text"][:100],
+                            },
+                            "conflicting_fact": {
+                                "chapter": d_ref["chapter"],
+                                "content": d_ref["text"][:100],
+                            },
+                            "confidence": 0.6,
+                            "reason": f"{name}在第{d_ref['chapter']}章疑似死亡，"
+                                      f"但在第{a_ref['chapter']}章再次出现",
+                        })
+
+            # Check: Character departed without follow-up
+            for dep_ref in departure_refs:
+                dep_ch = dep_ref["chapter"]
+                if dep_ch >= chapter_number:
+                    continue
+                has_followup = any(
+                    e["chapter"] > dep_ch
+                    for e in (alive_refs + departure_refs)
+                    if name in e["text"]
+                )
+                if not has_followup:
+                    contradictions.append({
+                        "layer": "vector",
+                        "character": name,
+                        "type": "character_disappeared",
+                        "fact": {
+                            "chapter": dep_ch,
+                            "content": dep_ref["text"][:100],
+                        },
+                        "conflicting_fact": {
+                            "chapter": chapter_number,
+                            "content": f"第{dep_ch}章后{name}再无出现",
+                        },
+                        "confidence": 0.4,
+                        "reason": f"{name}在第{dep_ch}章离去后无后续交代",
+                    })
+
+        # Event duplication check via semantic similarity on current chapter scenes
+        # Split current chapter into paragraphs and search for similar content
+        paragraphs = [p.strip() for p in chapter_text.split("\n\n") if len(p.strip()) > 50]
+        for para in paragraphs[:5]:  # Check first 5 substantial paragraphs
+            try:
+                similar = vector_store.search_similar_facts(para[:200], n_results=3)
+            except Exception:
+                continue
+            if similar and similar.get("distances") and similar["distances"][0]:
+                for i, dist in enumerate(similar["distances"][0]):
+                    if dist < 0.15:  # Very similar (cosine distance)
+                        meta = similar["metadatas"][0][i] if similar.get("metadatas") else {}
+                        sim_ch = meta.get("chapter", 0)
+                        if sim_ch != chapter_number and sim_ch > 0:
+                            contradictions.append({
+                                "layer": "vector",
+                                "type": "event_duplication",
+                                "fact": {
+                                    "chapter": chapter_number,
+                                    "content": para[:100],
+                                },
+                                "conflicting_fact": {
+                                    "chapter": sim_ch,
+                                    "content": similar["documents"][0][i][:100],
+                                },
+                                "confidence": 0.45,
+                                "reason": f"当前章与第{sim_ch}章存在高度相似段落",
+                            })
+
+        return {
+            "passed": len(contradictions) == 0,
+            "contradictions": contradictions,
+            "method": "vector",
+        }
+    except Exception as exc:
+        log.warning("向量检查异常, 回退到 BM25: %s", exc)
+        return _bm25_check_fallback(state, chapter_text, chapter_number)
+    finally:
+        try:
+            memory.close()
+        except Exception:
+            pass
+
+
+def _bm25_check_fallback(
     state: NovelState,
     chapter_text: str,
     chapter_number: int,
 ) -> dict[str, Any]:
     """BM25-based lightweight consistency check (no LLM).
+
+    Kept as a fallback for when the vector store is unavailable.
 
     Builds a BM25 index from previous chapters, then for each character
     queries relevant passages and does simple rule-based contradiction

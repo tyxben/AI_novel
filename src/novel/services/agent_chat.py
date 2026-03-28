@@ -229,6 +229,20 @@ class AgentToolExecutor:
         }
 
     def _tool_rewrite_chapter(self, feedback_text: str, chapter_number: int) -> dict:
+        # Guard: refuse to rewrite published chapters
+        from src.novel.storage.file_manager import FileManager
+        fm = FileManager(self.workspace)
+        novel_data = fm.load_novel(self.novel_id)
+        if novel_data:
+            published = set(novel_data.get("published_chapters", []))
+            if chapter_number in published:
+                return {
+                    "error": f"第{chapter_number}章已发布，不能自动重写。"
+                    "如需修改已发布章节，请先取消发布（publish_chapters），或手动编辑。",
+                    "status": "refused",
+                    "reason": "chapter_published",
+                }
+
         from src.novel.pipeline import NovelPipeline
         pipe = NovelPipeline(workspace=self.workspace)
         result = pipe.apply_feedback(
@@ -812,6 +826,25 @@ class AgentToolExecutor:
 # Agent loop
 # ---------------------------------------------------------------------------
 
+def _extract_working_memory(messages: list[dict], user_query: str) -> str:
+    """Extract brief working memory from conversation context.
+
+    Summarises the current user goal and recent tool interactions so the
+    agent keeps context across turns.
+    """
+    recent_tools: list[str] = []
+    for msg in messages[-6:]:
+        content = msg.get("content", "")
+        if "工具结果" in content or "tool" in content.lower():
+            recent_tools.append(content[:200])
+
+    memory_parts = [f"当前用户目标：{user_query[:200]}"]
+    if recent_tools:
+        memory_parts.append(f"最近工具调用：{'; '.join(recent_tools[-3:])}")
+
+    return "\n".join(memory_parts)
+
+
 def run_agent_chat(
     workspace: str,
     novel_id: str,
@@ -819,6 +852,8 @@ def run_agent_chat(
     context_chapters: list[int] | None = None,
     history: list[dict] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
+    session_id: str = "",
+    db: Any = None,
 ) -> dict:
     """Run the agent chat loop.
 
@@ -830,8 +865,35 @@ def run_agent_chat(
     Args:
         history: Previous conversation turns as [{"role": "user"|"assistant", "content": "..."}].
                  Used for multi-turn conversations.
+        session_id: Conversation session ID for auto-restoring history from DB.
+        db: StructuredDB instance for loading persisted conversation messages.
     """
     from src.llm.llm_client import create_llm_client
+
+    # ------------------------------------------------------------------
+    # Auto-restore conversation history from DB
+    # ------------------------------------------------------------------
+    if session_id and db and len(history or []) < 3:
+        try:
+            db_messages = db.get_conversation_messages(session_id)
+            # Convert DB messages to history format, keep last 20
+            db_history: list[dict] = []
+            for msg in db_messages[-20:]:
+                db_history.append({
+                    "role": msg.get("role", "user"),
+                    "content": msg.get("content", ""),
+                })
+            # Merge: DB history + explicit history (dedup by content)
+            seen: set[tuple[str, str]] = set()
+            merged: list[dict] = []
+            for h in db_history + (history or []):
+                key = (h.get("role", ""), h.get("content", "")[:100])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(h)
+            history = merged[-20:]  # Keep last 20
+        except Exception:
+            pass  # Fallback to explicit history
 
     llm = create_llm_client({})
     executor = AgentToolExecutor(workspace, novel_id)
@@ -863,6 +925,14 @@ def run_agent_chat(
 当所有操作完成后，必须调用 reply_to_user 来总结：
 {{"tool": "reply_to_user", "args": {{"message": "总结内容"}}}}
 """
+
+    # Add working memory if we have conversation history
+    if history and len(history) > 2:
+        working_mem = _extract_working_memory(
+            [{"role": h.get("role", "user"), "content": h.get("content", "")} for h in history],
+            message,
+        )
+        system_prompt += f"\n\n【工作记忆 — 当前会话上下文】\n{working_mem}\n"
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},

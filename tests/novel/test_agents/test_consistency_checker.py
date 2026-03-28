@@ -704,8 +704,19 @@ class TestConsistencyCheckerNode:
         assert len(result["errors"]) >= 1
         assert "LLM" in result["errors"][0]["message"]
 
-    def test_node_skips_early_chapters(self):
-        """前3章跳过完整一致性检查"""
+    @patch("src.novel.agents.consistency_checker._vector_check")
+    @patch("src.novel.agents.consistency_checker._run_narrative_logic_check")
+    def test_node_early_chapters_get_lightweight_check(
+        self, mock_narrative, mock_vector
+    ):
+        """前3章现在执行轻量级向量检查（不再跳过）"""
+        mock_vector.return_value = {
+            "passed": True,
+            "contradictions": [],
+            "method": "vector",
+        }
+        mock_narrative.return_value = []
+
         state: dict[str, Any] = {
             "current_chapter_text": "一些文本",
             "current_chapter": 2,
@@ -714,9 +725,10 @@ class TestConsistencyCheckerNode:
         result = consistency_checker_node(state)
 
         assert "consistency_checker" in result["completed_nodes"]
+        mock_vector.assert_called_once()
         quality = result["current_chapter_quality"]
         assert quality["consistency_check"]["passed"] is True
-        assert quality["consistency_check"].get("skipped") is True
+        assert quality["consistency_check"]["method"] == "vector"
 
 
 # ---------------------------------------------------------------------------

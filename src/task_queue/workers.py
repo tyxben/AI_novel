@@ -528,6 +528,20 @@ def _run_novel_agent_chat(params: dict, progress_cb) -> dict:
     context_chapters = params.get("context_chapters")
     history = params.get("history")
     novel_id = Path(project_path).name
+    session_id = params.get("session_id", "")
+
+    # Create StructuredDB for session history auto-restore
+    structured_db = None
+    if session_id:
+        try:
+            from src.novel.storage.structured_db import StructuredDB
+            db_path = os.path.join(project_path, "memory.db")
+            structured_db = StructuredDB(db_path)
+        except Exception:
+            import logging
+            logging.getLogger("workers").warning(
+                "Failed to open StructuredDB for session %s", session_id, exc_info=True
+            )
 
     progress_cb(0.05, "启动 Agent...")
 
@@ -538,16 +552,18 @@ def _run_novel_agent_chat(params: dict, progress_cb) -> dict:
         context_chapters=context_chapters,
         history=history,
         progress_callback=progress_cb,
+        session_id=session_id,
+        db=structured_db,
     )
 
     # Persist agent reply to conversation if session_id provided
-    session_id = params.get("session_id")
     if session_id:
         try:
-            from src.novel.storage.structured_db import StructuredDB
-            db_path = os.path.join(project_path, "memory.db")
-            db = StructuredDB(db_path)
-            db.add_message(
+            if structured_db is None:
+                from src.novel.storage.structured_db import StructuredDB
+                db_path = os.path.join(project_path, "memory.db")
+                structured_db = StructuredDB(db_path)
+            structured_db.add_message(
                 session_id=session_id,
                 role="agent",
                 content=result.get("reply", ""),

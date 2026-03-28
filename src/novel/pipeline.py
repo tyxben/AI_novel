@@ -497,6 +497,15 @@ class NovelPipeline:
         state["react_mode"] = react_mode
         state["budget_mode"] = budget_mode
 
+        # Initialize chapters_text from existing chapters in state
+        if "chapters_text" not in state:
+            state["chapters_text"] = {}
+            for ch in state.get("chapters", []):
+                ch_n = ch.get("chapter_number")
+                ch_t = ch.get("full_text", "")
+                if ch_n and ch_t:
+                    state["chapters_text"][ch_n] = ch_t
+
         chapters_generated = []
         consecutive_failures = 0
         chapter_graph = build_chapter_graph()
@@ -631,6 +640,26 @@ class NovelPipeline:
             else:
                 state["current_chapter_brief"] = {}
 
+            # --- Narrative Control: generate continuity brief ---
+            try:
+                from src.novel.services.continuity_service import ContinuityService as _ContinuityService
+
+                continuity_svc = _ContinuityService(
+                    db=self.memory.structured_db if hasattr(self, "memory") and self.memory and hasattr(self.memory, "structured_db") else None,
+                    obligation_tracker=obligation_tracker,
+                )
+                continuity_brief = continuity_svc.generate_brief(
+                    chapter_number=ch_num,
+                    chapters=state.get("chapters", []),
+                    chapter_brief=ch_outline.get("chapter_brief", {}),
+                    story_arcs=state.get("story_arcs", []),
+                    characters=state.get("characters", []),
+                )
+                state["continuity_brief"] = continuity_svc.format_for_prompt(continuity_brief)
+            except Exception as exc:
+                log.warning("连续性摘要生成失败: %s", exc)
+                state["continuity_brief"] = ""
+
             # Run chapter graph
             try:
                 state = chapter_graph.invoke(state)
@@ -670,6 +699,54 @@ class NovelPipeline:
                 chapters = state.get("chapters", [])
                 chapters.append(ch_data)
                 state["chapters"] = chapters
+
+                # Maintain chapters_text for consistency checker
+                chapters_text = state.get("chapters_text", {})
+                chapters_text[ch_num] = chapter_text
+                state["chapters_text"] = chapters_text
+
+                # --- Narrative Control: extract character snapshots ---
+                if hasattr(self, "memory") and self.memory and hasattr(self.memory, "structured_db"):
+                    try:
+                        characters_list = state.get("characters", [])
+                        for char in characters_list:
+                            char_name = char.get("name", "") if isinstance(char, dict) else getattr(char, "name", "")
+                            if not char_name or char_name not in chapter_text:
+                                continue
+                            char_id = char.get("character_id", char_name) if isinstance(char, dict) else getattr(char, "character_id", char_name)
+                            self.memory.structured_db.insert_character_state(
+                                character_id=char_id,
+                                chapter=ch_num,
+                            )
+                    except Exception as exc:
+                        log.debug("角色快照提取失败: %s", exc)
+
+                # --- Narrative Control: index chapter for vector consistency check ---
+                if hasattr(self, "memory") and self.memory:
+                    try:
+                        from src.novel.models.memory import ChapterSummary
+                        from src.novel.tools.chapter_digest import create_digest
+
+                        digest = create_digest(chapter_text)
+                        summary_text = digest.get("digest_text", "") or chapter_text[:500]
+                        # Ensure summary meets ChapterSummary validation (min 50 chars)
+                        if len(summary_text) < 50:
+                            summary_text = chapter_text[:500] if len(chapter_text) >= 50 else chapter_text + "。" * (50 - len(chapter_text))
+
+                        # Extract key events from digest
+                        key_events = digest.get("key_sentences", [])[:5]
+                        if not key_events:
+                            key_events = [summary_text[:100]]
+
+                        summary = ChapterSummary(
+                            chapter=ch_num,
+                            summary=summary_text,
+                            key_events=key_events,
+                        )
+                        self.memory.add_chapter_summary(summary)
+                        self.memory.save()
+                    except Exception as exc:
+                        log.debug("章节向量索引失败: %s", exc)
 
                 chapters_generated.append(ch_num)
 
