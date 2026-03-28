@@ -723,12 +723,15 @@ class NovelPipeline:
                             if not char_name or char_name not in chapter_text:
                                 continue
                             char_id = char.get("character_id", char_name) if isinstance(char, dict) else getattr(char, "character_id", char_name)
-                            # Heuristic: extract location from text near character name
-                            location = self._extract_character_location(char_name, chapter_text)
+                            # Heuristic: extract character state from text
+                            snapshot = self._extract_character_snapshot(char_name, chapter_text)
                             self.memory.structured_db.insert_character_state(
                                 character_id=char_id,
                                 chapter=ch_num,
-                                location=location,
+                                location=snapshot.get("location", ""),
+                                health=snapshot.get("health", ""),
+                                emotional_state=snapshot.get("emotional_state", ""),
+                                power_level=snapshot.get("power_level", ""),
                             )
                     except Exception as exc:
                         log.debug("角色快照提取失败: %s", exc)
@@ -2165,23 +2168,91 @@ class NovelPipeline:
         return "\n".join(summaries)
 
     @staticmethod
-    def _extract_character_location(char_name: str, text: str) -> str:
-        """Heuristic: extract location keyword near character name mention."""
+    def _extract_character_snapshot(char_name: str, text: str) -> dict[str, str]:
+        """Heuristic: extract character state (location, health, emotion) from chapter text.
+
+        Scans sentences containing *char_name* and matches keyword lists.
+        Prefers later occurrences (closer to chapter end = more current state).
+        """
         import re
-        # Find sentences containing the character name
+
         sentences = re.split(r'[。！？\n]', text)
-        location_keywords = (
+        # Collect sentences that mention the character (reversed = last first)
+        relevant = [s for s in reversed(sentences) if char_name in s]
+
+        result: dict[str, str] = {
+            "location": "",
+            "health": "",
+            "emotional_state": "",
+            "power_level": "",
+        }
+
+        _LOCATION_KW = (
             "客栈", "酒楼", "山洞", "广场", "大殿", "密室", "街道", "城门",
             "书房", "卧室", "花园", "市集", "学院", "宫殿", "战场", "森林",
             "河边", "山顶", "谷底", "码头", "府邸", "府中", "院中", "门口",
             "城中", "城外", "山下", "洞中", "阵前", "殿中", "房间", "帐篷",
+            "城池", "村庄", "小巷", "客房", "厅堂", "密道", "湖边", "崖边",
         )
-        for sentence in reversed(sentences):  # Prefer later mentions
-            if char_name in sentence:
-                for kw in location_keywords:
-                    if kw in sentence:
-                        return kw
-        return ""
+        _INJURY_KW = (
+            "重伤", "轻伤", "受伤", "吐血", "昏迷", "中毒", "虚弱",
+            "伤势", "断臂", "失血", "濒死", "瘫倒",
+        )
+        _HEALTHY_KW = ("痊愈", "恢复", "无恙", "康复", "好转")
+        _EMOTION_KW = {
+            "愤怒": ("怒", "暴怒", "愤怒", "恼怒", "大怒"),
+            "悲伤": ("悲", "痛哭", "泪", "哀", "悲伤", "悲痛", "哭泣"),
+            "恐惧": ("恐惧", "害怕", "惊恐", "颤抖", "胆寒"),
+            "喜悦": ("喜", "笑", "高兴", "欣慰", "开心", "大喜"),
+            "焦虑": ("焦虑", "不安", "忧虑", "担忧", "焦急"),
+            "坚定": ("坚定", "决心", "下定决心", "毅然", "义无反顾"),
+            "震惊": ("震惊", "惊讶", "愕然", "大惊", "骇然"),
+            "平静": ("平静", "淡然", "冷静", "从容"),
+        }
+        _POWER_KW = (
+            "突破", "晋级", "进阶", "升级", "觉醒", "领悟", "化神",
+            "筑基", "金丹", "元婴", "渡劫", "飞升", "凝气", "结丹",
+        )
+
+        for sent in relevant:
+            # Location (first match wins since we iterate latest-first)
+            if not result["location"]:
+                for kw in _LOCATION_KW:
+                    if kw in sent:
+                        result["location"] = kw
+                        break
+
+            # Health
+            if not result["health"]:
+                for kw in _INJURY_KW:
+                    if kw in sent:
+                        result["health"] = kw
+                        break
+                if not result["health"]:
+                    for kw in _HEALTHY_KW:
+                        if kw in sent:
+                            result["health"] = kw
+                            break
+
+            # Emotional state
+            if not result["emotional_state"]:
+                for emotion, keywords in _EMOTION_KW.items():
+                    if any(kw in sent for kw in keywords):
+                        result["emotional_state"] = emotion
+                        break
+
+            # Power level changes
+            if not result["power_level"]:
+                for kw in _POWER_KW:
+                    if kw in sent:
+                        result["power_level"] = kw
+                        break
+
+            # Stop early if all filled
+            if all(result.values()):
+                break
+
+        return result
 
     @staticmethod
     def _backfill_outline_entry(state: dict, ch_num: int, chapter_text: str) -> None:

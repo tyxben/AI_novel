@@ -897,6 +897,15 @@ def run_agent_chat(
                     seen.add(key)
                     merged.append({"role": role, "content": content})
             history = merged[-20:]  # Keep last 20
+
+            # Avoid duplicating the current user message: novel_routes.py
+            # saves it to DB before calling us, so the DB history already
+            # contains it.  Remove the trailing user message if it matches
+            # the current request so line 957 below can add it cleanly.
+            if history and history[-1].get("role") == "user":
+                last_content = history[-1].get("content", "")
+                if last_content == message or last_content == message.strip():
+                    history = history[:-1]
         except Exception:
             pass  # Fallback to explicit history
 

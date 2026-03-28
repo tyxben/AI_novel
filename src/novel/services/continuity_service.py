@@ -308,10 +308,12 @@ class ContinuityService:
                     log.debug("查询角色状态失败: %s", char_id, exc_info=True)
 
             if db_state:
-                entry["location"] = db_state.get("location", "")
-                entry["status"] = db_state.get("health", "")
-                # Use emotional_state as a proxy for goal if available
-                entry["goal"] = db_state.get("emotional_state", "")
+                # Only use DB values when they are non-empty; otherwise
+                # fall through to profile-based defaults.
+                entry["location"] = db_state.get("location", "") or ""
+                entry["status"] = db_state.get("health", "") or char_status
+                entry["goal"] = db_state.get("emotional_state", "") or ""
+                entry["power_level"] = db_state.get("power_level", "") or ""
             else:
                 # Fallback: derive from character profile
                 entry["location"] = ""

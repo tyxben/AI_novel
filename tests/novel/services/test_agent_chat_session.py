@@ -291,6 +291,43 @@ class TestRunAgentChatSessionRestore:
         # "回复B" from explicit
         assert "回复B" in contents
 
+    @patch("src.llm.llm_client.create_llm_client")
+    def test_current_message_not_duplicated_from_db(self, mock_create_llm, tmp_workspace, mock_llm):
+        """When novel_routes saves the current message to DB before calling
+        run_agent_chat, the DB history will contain the current message.
+        It should be stripped so it doesn't appear twice in LLM messages."""
+        mock_create_llm.return_value = mock_llm
+
+        current_msg = "帮我修改第五章的结尾"
+
+        # Simulate: DB already has the current message (saved by novel_routes)
+        db = MagicMock()
+        db.get_conversation_messages.return_value = [
+            {"role": "user", "content": "之前的消息"},
+            {"role": "agent", "content": "之前的回复"},
+            {"role": "user", "content": current_msg},  # Current message already in DB
+        ]
+
+        run_agent_chat(
+            workspace=str(tmp_workspace),
+            novel_id="novel_test",
+            message=current_msg,
+            history=[],
+            session_id="sess_001",
+            db=db,
+        )
+
+        call_args = mock_llm.chat.call_args
+        messages = call_args.kwargs.get("messages") or call_args[1].get("messages") or call_args[0][0]
+
+        # Current message should appear exactly ONCE (added at line 957)
+        user_msgs_with_current = [
+            m for m in messages if m["role"] == "user" and m["content"] == current_msg
+        ]
+        assert len(user_msgs_with_current) == 1, (
+            f"Current message appeared {len(user_msgs_with_current)} times, expected 1"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: working memory injection
