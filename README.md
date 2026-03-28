@@ -586,7 +586,6 @@ elif backend == "xxx":
 - [x] MCP Server — FastMCP 协议，供 Claude Code 等 AI 助手调用
 - [x] 任务队列 — 前后端分离，异步任务执行
 - [x] 叙事状态驱动架构 — ContinuityService 聚合写前约束 + 向量一致性检查 + Agent Chat 会话记忆
-- [ ] 七猫自动发布 — Playwright 自动化发布到七猫小说平台（已有脚本，集成中）
 - [ ] 多角色语音 — 不同角色使用不同音色
 - [ ] 批量处理 — 支持文件夹批量转换
 - [ ] Agent 条件路由 — 根据内容自动选择最优生成策略
