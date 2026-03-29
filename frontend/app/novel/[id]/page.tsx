@@ -196,7 +196,7 @@ export default function NovelDetailPage({
           <div style={{ display: activeTab === "edit" ? "block" : "none" }}>
             <EditSection novelId={id} />
           </div>
-          <div style={{ display: activeTab === "agent" ? "block" : "none" }}>
+          <div style={{ display: activeTab === "agent" ? "block" : "none" }} className="overflow-hidden">
             <AgentChatSection novelId={id} />
           </div>
           <div style={{ display: activeTab === "narrative" ? "block" : "none" }}>
@@ -2431,8 +2431,8 @@ function AgentChatSection({ novelId }: { novelId: string }) {
   };
 
   return (
-    <Panel title="Agent 对话" description="与 AI Agent 对话，讨论你的小说。">
-      <div className="flex overflow-hidden" style={{ height: "min(70vh, 680px)" }}>
+    <Panel title="Agent 对话" description="与 AI Agent 对话，讨论你的小说。" className="overflow-hidden">
+      <div className="flex overflow-hidden" style={{ height: "min(65vh, 600px)" }}>
         {/* Left sidebar — conversation list */}
         <div
           className={`shrink-0 border-r border-slate-200 transition-all overflow-hidden ${
