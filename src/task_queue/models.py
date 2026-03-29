@@ -23,6 +23,7 @@ class TaskType(str, enum.Enum):
     novel_resize = "novel_resize"
     novel_agent_chat = "novel_agent_chat"
     novel_narrative_rebuild = "novel_narrative_rebuild"
+    novel_plan = "novel_plan"
 
 
 class TaskStatus(str, enum.Enum):

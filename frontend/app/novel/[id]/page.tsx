@@ -2034,7 +2034,7 @@ function ToolStepCard({ step, defaultOpen }: { step: ToolStep; defaultOpen: bool
   if (isReply) return null; // reply content shown in main bubble
 
   return (
-    <div className={`rounded-lg border text-xs ${hasError ? "border-rose-200 bg-rose-50/50" : "border-slate-200 bg-white"}`}>
+    <div className={`rounded-lg border text-xs overflow-hidden ${hasError ? "border-rose-200 bg-rose-50/50" : "border-slate-200 bg-white"}`}>
       <button
         onClick={() => setOpen(!open)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-slate-50/50 transition rounded-lg"
@@ -2250,7 +2250,7 @@ function AgentChatSection({ novelId }: { novelId: string }) {
 
   return (
     <Panel title="Agent 对话" description="与 AI Agent 对话，讨论你的小说。">
-      <div className="flex" style={{ height: "min(70vh, 680px)" }}>
+      <div className="flex overflow-hidden" style={{ height: "min(70vh, 680px)" }}>
         {/* Left sidebar — conversation list */}
         <div
           className={`shrink-0 border-r border-slate-200 transition-all overflow-hidden ${
@@ -2320,9 +2320,9 @@ function AgentChatSection({ novelId }: { novelId: string }) {
         </div>
 
         {/* Right main area */}
-        <div className="flex flex-1 flex-col min-w-0">
+        <div className="flex flex-1 flex-col min-w-0 min-h-0">
           {/* Toggle sidebar button */}
-          <div className="flex items-center gap-2 border-b border-slate-100 px-2 py-1">
+          <div className="shrink-0 flex items-center gap-2 border-b border-slate-100 px-2 py-1">
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
               className="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
@@ -2344,7 +2344,7 @@ function AgentChatSection({ novelId }: { novelId: string }) {
           {/* Chat messages */}
           <div
             ref={scrollRef}
-            className="flex-1 overflow-y-auto space-y-3 px-3 py-2"
+            className="flex-1 min-h-0 overflow-y-auto space-y-3 px-3 py-2"
           >
             {displayMessages.length === 0 && !isWorking && (
               <div className="flex flex-col items-center justify-center py-16 text-slate-400">
@@ -2359,7 +2359,7 @@ function AgentChatSection({ novelId }: { novelId: string }) {
             {displayMessages.map((msg, idx) =>
               msg.role === "user" ? (
                 <div key={idx} className="flex justify-end">
-                  <div className="group relative max-w-[80%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-sm text-white select-text">
+                  <div className="group relative max-w-[80%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-sm text-white select-text break-words overflow-hidden">
                     <p className="whitespace-pre-wrap">{msg.content}</p>
                     <button
                       onClick={() => navigator.clipboard.writeText(msg.content)}
@@ -2380,8 +2380,8 @@ function AgentChatSection({ novelId }: { novelId: string }) {
                         ))}
                       </div>
                     )}
-                    <div className="group relative rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink select-text">
-                      <div className="prose-sm max-w-none leading-relaxed space-y-0.5">
+                    <div className="group relative rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink select-text break-words overflow-hidden">
+                      <div className="prose-sm max-w-none leading-relaxed space-y-0.5 break-words">
                         {renderMarkdown(msg.content)}
                       </div>
                       <div className="mt-1.5 flex items-center gap-2">
@@ -2429,10 +2429,10 @@ function AgentChatSection({ novelId }: { novelId: string }) {
           </div>
 
           {/* Divider */}
-          <div className="border-t border-slate-200" />
+          <div className="shrink-0 border-t border-slate-200" />
 
           {/* Input area */}
-          <div className="space-y-2 px-3 pt-3 pb-1">
+          <div className="shrink-0 space-y-2 px-3 pt-3 pb-1">
             <div className="flex items-end gap-2">
               <div className="flex-1 space-y-2">
                 <textarea

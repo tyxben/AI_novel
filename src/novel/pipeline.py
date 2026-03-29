@@ -469,6 +469,231 @@ class NovelPipeline:
         }
 
     # ------------------------------------------------------------------
+    # plan_chapters (outline-only, no text generation)
+    # ------------------------------------------------------------------
+
+    def plan_chapters(
+        self,
+        project_path: str,
+        start_chapter: int | None = None,
+        end_chapter: int | None = None,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> dict:
+        """Generate/revise outlines for a range of chapters WITHOUT writing text.
+
+        For each chapter:
+        1. Load or create placeholder outline
+        2. Run dynamic_outline revision (considers previous chapters, debts, arcs, character states)
+        3. Save revised outline to checkpoint
+
+        Returns dict with planned outlines for review.
+        """
+        from src.novel.agents.dynamic_outline import dynamic_outline_node
+
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+
+        # Load checkpoint
+        state = self._load_checkpoint(novel_id)
+        if state is None:
+            raise FileNotFoundError(f"找不到项目检查点: {project_path}")
+
+        # Refresh settings from novel.json
+        self._refresh_state_from_novel(state, fm.load_novel(novel_id))
+
+        outline = state.get("outline")
+        if not outline:
+            raise ValueError("项目大纲不存在，请先运行 create_novel")
+
+        total_chapters = len(outline.get("chapters", []))
+
+        # Auto-detect start chapter if not specified
+        if start_chapter is None:
+            completed = fm.list_chapters(novel_id)
+            start_chapter = (max(completed) + 1) if completed else 1
+
+        if end_chapter is None:
+            end_chapter = start_chapter + 3  # Default: plan 4 chapters
+
+        # Extend outline if needed
+        if end_chapter > total_chapters:
+            log.info(
+                "章节 %d-%d 超出当前大纲范围 (max=%d)，自动扩展大纲...",
+                start_chapter, end_chapter, total_chapters,
+            )
+            self._extend_outline(novel_id, state, end_chapter, progress_callback)
+            outline = state.get("outline", {})
+            total_chapters = len(outline.get("chapters", []))
+
+        # Ensure main_storyline exists
+        if not state.get("main_storyline"):
+            outline_data = state.get("outline", {})
+            if isinstance(outline_data, dict):
+                state["main_storyline"] = outline_data.get("main_storyline", {})
+            else:
+                state["main_storyline"] = {}
+
+        # Initialize chapters_text from existing chapters in state
+        if "chapters_text" not in state:
+            state["chapters_text"] = {}
+            for ch in state.get("chapters", []):
+                ch_n = ch.get("chapter_number")
+                ch_t = ch.get("full_text", "")
+                if ch_n and ch_t:
+                    state["chapters_text"][ch_n] = ch_t
+
+        # Initialize NovelMemory (for continuity service + obligation tracker)
+        try:
+            from src.novel.storage.novel_memory import NovelMemory
+            self.memory = NovelMemory(novel_id, self.workspace)
+        except Exception as exc:
+            log.warning("NovelMemory 初始化失败: %s", exc)
+            self.memory = None
+
+        # Initialize narrative control services
+        obligation_tracker = None
+        try:
+            from src.novel.services.obligation_tracker import ObligationTracker
+            if hasattr(self, 'memory') and self.memory and hasattr(self.memory, 'structured_db'):
+                obligation_tracker = ObligationTracker(self.memory.structured_db)
+            else:
+                obligation_tracker = ObligationTracker(db=None)
+        except Exception as e:
+            log.warning("ObligationTracker init failed: %s", e)
+
+        planned_chapters = []
+        overdue_debts = 0
+        active_arcs = 0
+
+        # Collect debt/arc stats
+        if obligation_tracker:
+            try:
+                stats = obligation_tracker.get_debt_statistics()
+                overdue_debts = stats.get("overdue_count", 0)
+            except Exception:
+                pass
+        try:
+            story_arcs = state.get("story_arcs", [])
+            active_arcs = sum(
+                1 for a in story_arcs
+                if a.get("status") in ("active", "in_progress", "planning")
+            )
+        except Exception:
+            pass
+
+        for ch_num in range(start_chapter, end_chapter + 1):
+            if progress_callback:
+                total_in_batch = end_chapter - start_chapter + 1
+                done_in_batch = ch_num - start_chapter
+                pct = done_in_batch / total_in_batch
+                progress_callback(pct, f"正在规划第{ch_num}章大纲...")
+
+            # Get or create chapter outline entry
+            ch_outline = self._get_chapter_outline(outline, ch_num)
+            if ch_outline is None:
+                log.warning("第%d章大纲条目不存在，跳过", ch_num)
+                continue
+
+            # Fill placeholder if needed
+            if self._is_placeholder_outline(ch_outline):
+                log.info("第%d章大纲为占位符，补全中...", ch_num)
+                ch_outline = self._fill_placeholder_outline(state, ch_outline, ch_num)
+                for i, existing_ch in enumerate(outline.get("chapters", [])):
+                    if existing_ch.get("chapter_number") == ch_num:
+                        outline["chapters"][i] = ch_outline
+                        break
+
+            # Set up state context for dynamic_outline_node
+            state["current_chapter"] = ch_num
+            state["current_chapter_outline"] = ch_outline
+
+            # Generate debt summary
+            if obligation_tracker:
+                try:
+                    obligation_tracker.escalate_debts(ch_num)
+                    state["debt_summary"] = obligation_tracker.get_summary_for_writer(ch_num)
+                except Exception:
+                    state["debt_summary"] = ""
+            else:
+                state["debt_summary"] = ""
+
+            # Generate continuity brief
+            try:
+                from src.novel.services.continuity_service import ContinuityService as _ContinuityService
+                _mem = getattr(self, "memory", None)
+                continuity_svc = _ContinuityService(
+                    db=getattr(_mem, "structured_db", None) if _mem else None,
+                    obligation_tracker=obligation_tracker,
+                )
+                continuity_brief = continuity_svc.generate_brief(
+                    chapter_number=ch_num,
+                    chapters=state.get("chapters", []),
+                    chapter_brief=ch_outline.get("chapter_brief", {}),
+                    story_arcs=state.get("story_arcs", []),
+                    characters=state.get("characters", []),
+                )
+                state["continuity_brief"] = continuity_svc.format_for_prompt(continuity_brief)
+            except Exception as exc:
+                log.warning("连续性摘要生成失败: %s", exc)
+                state["continuity_brief"] = ""
+
+            # Run dynamic_outline_node to revise
+            revision_reason = ""
+            try:
+                result = dynamic_outline_node(state)
+                revised = result.get("current_chapter_outline")
+                if revised:
+                    ch_outline = revised
+                    # Update outline in state
+                    for i, existing_ch in enumerate(outline.get("chapters", [])):
+                        if existing_ch.get("chapter_number") == ch_num:
+                            outline["chapters"][i] = ch_outline
+                            break
+
+                # Extract revision reason from decisions
+                for d in result.get("decisions", []):
+                    if d.get("step") == "revise_outline":
+                        revision_reason = d.get("reason", "")
+                        break
+            except Exception as exc:
+                log.warning("第%d章动态大纲修订失败: %s", ch_num, exc)
+
+            # Build planned chapter entry
+            planned_entry = {
+                "chapter_number": ch_num,
+                "title": ch_outline.get("title", f"第{ch_num}章"),
+                "goal": ch_outline.get("goal", ""),
+                "key_events": ch_outline.get("key_events", []),
+                "mood": ch_outline.get("mood", ""),
+                "involved_characters": ch_outline.get("involved_characters", []),
+                "chapter_brief": ch_outline.get("chapter_brief", {}),
+                "revision_reason": revision_reason,
+            }
+            planned_chapters.append(planned_entry)
+
+        # Save updated outlines to checkpoint and novel.json
+        state["outline"] = outline
+        self._save_checkpoint(novel_id, state)
+
+        # Also update novel.json
+        novel_data = fm.load_novel(novel_id) or {}
+        novel_data["outline"] = outline
+        fm.save_novel(novel_id, novel_data)
+
+        if progress_callback:
+            progress_callback(1.0, f"大纲规划完成，共规划 {len(planned_chapters)} 章")
+
+        return {
+            "novel_id": novel_id,
+            "planned_chapters": planned_chapters,
+            "context": {
+                "overdue_debts": overdue_debts,
+                "active_arcs": active_arcs,
+                "total_planned": len(planned_chapters),
+            },
+        }
+
+    # ------------------------------------------------------------------
     # generate_chapters
     # ------------------------------------------------------------------
 

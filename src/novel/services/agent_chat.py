@@ -164,6 +164,14 @@ TOOLS = [
         "description": "查看所有故事弧线的当前阶段和推进状态",
         "parameters": {},
     },
+    {
+        "name": "plan_chapters",
+        "description": "规划接下来几章的大纲（不生成正文）。生成标题、目标、关键事件、要收/埋的伏笔，供用户审核后再写作。",
+        "parameters": {
+            "num_chapters": {"type": "integer", "description": "要规划的章节数量（默认4）", "optional": True},
+            "start_chapter": {"type": "integer", "description": "起始章节号（默认从最后一章之后开始）", "optional": True},
+        },
+    },
 ]
 
 
@@ -882,6 +890,30 @@ class AgentToolExecutor:
                 except (json.JSONDecodeError, TypeError):
                     arc["chapters"] = []
         return {"total": len(arcs), "arcs": arcs[:20]}
+
+    def _tool_plan_chapters(self, num_chapters: int = 4, start_chapter: int | None = None) -> dict:
+        """Plan chapter outlines without generating text."""
+        from src.novel.pipeline import NovelPipeline
+        from src.novel.storage.file_manager import FileManager
+
+        pipe = NovelPipeline(workspace=self.workspace)
+        fm = FileManager(self.workspace)
+
+        if start_chapter is None:
+            completed = fm.list_chapters(self.novel_id)
+            start_chapter = (max(completed) + 1) if completed else 1
+
+        end_chapter = start_chapter + min(num_chapters, 10) - 1
+        project_path = str(Path(self.workspace) / "novels" / self.novel_id)
+
+        try:
+            return pipe.plan_chapters(
+                project_path=project_path,
+                start_chapter=start_chapter,
+                end_chapter=end_chapter,
+            )
+        except Exception as exc:
+            return {"error": f"大纲规划失败: {exc}"}
 
 
 # ---------------------------------------------------------------------------

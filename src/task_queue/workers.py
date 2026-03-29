@@ -77,6 +77,8 @@ def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:
         return _run_novel_agent_chat(params, progress_cb)
     elif task_type == TaskType.novel_narrative_rebuild:
         return _run_novel_narrative_rebuild(params, progress_cb)
+    elif task_type == TaskType.novel_plan:
+        return _run_novel_plan(params, progress_cb)
     else:
         raise ValueError(f"Unknown task type: {task_type}")
 
@@ -616,4 +618,34 @@ def _run_novel_narrative_rebuild(params: dict, progress_cb) -> dict:
         service.close()
 
     progress_cb(1.0, "叙事重建完成")
+    return result
+
+
+def _run_novel_plan(params: dict, progress_cb) -> dict:
+    """Worker: plan chapter outlines without generating text."""
+    from src.novel.pipeline import NovelPipeline
+    from src.novel.storage.file_manager import FileManager
+
+    pipe = NovelPipeline(workspace=params.get("workspace", "workspace"))
+    project_path = params["project_path"]
+    novel_id = Path(project_path).name
+    fm = FileManager(pipe.workspace)
+
+    # Auto-detect start chapter
+    completed = fm.list_chapters(novel_id)
+    start_ch = params.get("start_chapter") or ((max(completed) + 1) if completed else 1)
+
+    num_chapters = params.get("num_chapters", 4)
+    end_ch = params.get("end_chapter") or (start_ch + num_chapters - 1)
+
+    progress_cb(0.05, f"正在规划第{start_ch}-{end_ch}章大纲...")
+
+    result = pipe.plan_chapters(
+        project_path=project_path,
+        start_chapter=start_ch,
+        end_chapter=end_ch,
+        progress_callback=progress_cb,
+    )
+
+    progress_cb(1.0, f"大纲规划完成，共规划 {len(result.get('planned_chapters', []))} 章")
     return result

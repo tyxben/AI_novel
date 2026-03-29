@@ -59,6 +59,12 @@ class FeedbackApplyRequest(BaseModel):
     rewrite_instructions: Optional[dict] = None
 
 
+class NovelPlanRequest(BaseModel):
+    start_chapter: Optional[int] = None
+    end_chapter: Optional[int] = None
+    num_chapters: int = 4  # Default: plan 4 chapters ahead
+
+
 class NovelEditRequest(BaseModel):
     instruction: str
     effective_from_chapter: Optional[int] = None
@@ -292,6 +298,28 @@ def generate_chapters(novel_id: str, req: NovelGenerateRequest, request: Request
         params["react_mode"] = True
 
     task_id = submit_to_queue("novel_generate", params, keys=keys)
+    return {"task_id": task_id}
+
+
+@router.post("/{novel_id}/plan-chapters", status_code=201)
+def plan_chapters(novel_id: str, req: NovelPlanRequest, request: Request):
+    """Plan chapter outlines without generating text. Submits to task queue, returns task_id."""
+    validate_id(novel_id)
+    _load_novel_json(novel_id)
+    keys = extract_api_keys(request)
+
+    params: dict[str, Any] = {
+        "workspace": get_workspace(),
+        "project_path": _project_path(novel_id),
+    }
+    if req.start_chapter is not None:
+        params["start_chapter"] = req.start_chapter
+    if req.end_chapter is not None:
+        params["end_chapter"] = req.end_chapter
+    if req.num_chapters:
+        params["num_chapters"] = req.num_chapters
+
+    task_id = submit_to_queue("novel_plan", params, keys=keys)
     return {"task_id": task_id}
 
 
