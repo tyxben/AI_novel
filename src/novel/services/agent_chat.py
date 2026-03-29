@@ -14,8 +14,8 @@ from typing import Any, Callable
 
 log = logging.getLogger("novel.agent_chat")
 
-# Max tool-call iterations to prevent infinite loops
-MAX_ITERATIONS = 12
+# Default max tool-call iterations (can be overridden by config.yaml agent_chat.max_iterations)
+_DEFAULT_MAX_ITERATIONS = 20
 
 
 # ---------------------------------------------------------------------------
@@ -1063,12 +1063,35 @@ def run_agent_chat(
     conversation_log: list[dict] = []
     final_reply = ""
 
-    for i in range(MAX_ITERATIONS):
+    # Read max_iterations from config (fallback to default)
+    max_iterations = _DEFAULT_MAX_ITERATIONS
+    try:
+        import yaml
+        from pathlib import Path
+        config_path = Path(workspace).parent / "config.yaml"
+        if not config_path.exists():
+            config_path = Path("config.yaml")
+        if config_path.exists():
+            with open(config_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            max_iterations = cfg.get("agent_chat", {}).get("max_iterations", _DEFAULT_MAX_ITERATIONS)
+    except Exception:
+        pass
+
+    for i in range(max_iterations):
         if progress_callback:
             progress_callback(
-                0.1 + (i / MAX_ITERATIONS) * 0.8,
+                0.1 + (i / max_iterations) * 0.8,
                 f"Agent 思考中... (步骤 {i + 1})"
             )
+
+        # Smart truncation: warn Agent when approaching step limit
+        if i >= max_iterations - 2 and not final_reply:
+            remaining = max_iterations - i
+            messages.append({
+                "role": "user",
+                "content": f"[系统提示：你只剩{remaining}步就达到步骤上限。请立即用 {{\"reply\": \"...\"}} 给出你目前的分析和结论，不要再调用工具。如果分析尚未完成，先总结已有发现，告诉用户可以继续追问。]",
+            })
 
         response = llm.chat(
             messages=messages,
@@ -1133,7 +1156,7 @@ def run_agent_chat(
                 "get_arc_status": "查看弧线状态",
             }.get(tool_name, tool_name)
             progress_callback(
-                0.1 + (i / MAX_ITERATIONS) * 0.8,
+                0.1 + (i / max_iterations) * 0.8,
                 f"执行: {tool_label}..."
             )
 
