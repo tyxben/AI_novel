@@ -22,6 +22,47 @@ from src.novel.storage.file_manager import FileManager
 
 log = logging.getLogger("novel")
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_title_from_text(chapter_text: str, ch_num: int) -> str:
+    """Extract a short, meaningful title from chapter text.
+
+    Uses heuristics: finds the most "interesting" short phrase from the
+    first few paragraphs — a character action, a location reveal, or a
+    key event.  Falls back to first sentence truncated to 10 chars.
+    """
+    import re
+
+    lines = [ln.strip() for ln in chapter_text.split("\n") if ln.strip()]
+    if not lines:
+        return f"第{ch_num}章"
+
+    # Try to find a short, punchy sentence in the first 5 lines
+    for line in lines[:5]:
+        # Split into sentences
+        sentences = re.split(r'[。！？]', line)
+        for sent in sentences:
+            sent = sent.strip()
+            # Good title: 4-12 chars, contains character action or place
+            if 4 <= len(sent) <= 12:
+                return sent
+
+    # Fallback: first line truncated
+    first = lines[0]
+    if len(first) > 10:
+        # Cut at a natural boundary
+        for sep in ("，", "。", "！", "？", "、"):
+            idx = first.find(sep)
+            if 3 <= idx <= 12:
+                return first[:idx]
+        return first[:10]
+    return first or f"第{ch_num}章"
+
+
 # ---------------------------------------------------------------------------
 # 默认工作目录
 # ---------------------------------------------------------------------------
@@ -751,9 +792,14 @@ class NovelPipeline:
             # Save chapter
             chapter_text = state.get("current_chapter_text", "")
             if chapter_text:
+                # Get title: prefer revised outline title, fallback to extraction
+                revised_outline = state.get("current_chapter_outline", ch_outline)
+                ch_title = revised_outline.get("title", "") if isinstance(revised_outline, dict) else ch_outline.get("title", "")
+                if not ch_title or ch_title == f"第{ch_num}章":
+                    ch_title = _extract_title_from_text(chapter_text, ch_num)
                 ch_data = {
                     "chapter_number": ch_num,
-                    "title": ch_outline.get("title", f"第{ch_num}章"),
+                    "title": ch_title,
                     "full_text": chapter_text,
                     "word_count": len(chapter_text),
                     "status": "draft",
@@ -2331,11 +2377,12 @@ class NovelPipeline:
             if ch.get("goal") not in ("待规划", ""):
                 return
 
-            # Title: prefer current_chapter_outline's title (from PlotPlanner/Writer)
+            # Title: prefer current_chapter_outline's title (from dynamic_outline/PlotPlanner)
             cur_outline = state.get("current_chapter_outline", {})
             title = cur_outline.get("title", "")
             if not title or title == f"第{ch_num}章":
-                title = f"第{ch_num}章"
+                # Extract a short title from the chapter text
+                title = _extract_title_from_text(chapter_text, ch_num)
             ch["title"] = title
 
             # chapter_summary: short preview for display purposes only
