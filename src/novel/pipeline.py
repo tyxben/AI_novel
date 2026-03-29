@@ -645,6 +645,9 @@ class NovelPipeline:
             state["obligation_tracker"] = obligation_tracker
             state["brief_validator"] = brief_validator
             state["debt_extractor"] = debt_extractor
+            # Pass memory info for state_writeback (not the object itself — unpicklable)
+            state["novel_id"] = novel_id
+            state["workspace"] = self.workspace
 
             # --- Narrative Control: generate debt summary for Writer ---
             if obligation_tracker:
@@ -771,27 +774,20 @@ class NovelPipeline:
                 chapters_text[ch_num] = chapter_text
                 state["chapters_text"] = chapters_text
 
-                # --- Narrative Control: extract character snapshots ---
-                if getattr(self, "memory", None) and getattr(self.memory, "structured_db", None):
-                    try:
-                        characters_list = state.get("characters", [])
-                        for char in characters_list:
-                            char_name = char.get("name", "") if isinstance(char, dict) else getattr(char, "name", "")
-                            if not char_name or char_name not in chapter_text:
-                                continue
-                            char_id = char.get("character_id", char_name) if isinstance(char, dict) else getattr(char, "character_id", char_name)
-                            # Heuristic: extract character state from text
-                            snapshot = self._extract_character_snapshot(char_name, chapter_text)
-                            self.memory.structured_db.insert_character_state(
-                                character_id=char_id,
-                                chapter=ch_num,
-                                location=snapshot.get("location", ""),
-                                health=snapshot.get("health", ""),
-                                emotional_state=snapshot.get("emotional_state", ""),
-                                power_level=snapshot.get("power_level", ""),
-                            )
-                    except Exception as exc:
-                        log.debug("角色快照提取失败: %s", exc)
+                # Note: character snapshots, world updates, foreshadowing marking
+                # are now handled by the state_writeback node inside the graph.
+
+                # --- Narrative Control: persist state_writeback changes ---
+                # Save updated characters/world_setting back to novel.json
+                try:
+                    novel_persist = fm.load_novel(novel_id) or {}
+                    if state.get("characters"):
+                        novel_persist["characters"] = state["characters"]
+                    if state.get("world_setting"):
+                        novel_persist["world_setting"] = state["world_setting"]
+                    fm.save_novel(novel_id, novel_persist)
+                except Exception as exc:
+                    log.debug("状态回写持久化失败: %s", exc)
 
                 # --- Narrative Control: index chapter for vector consistency check ---
                 if getattr(self, "memory", None):

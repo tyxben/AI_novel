@@ -337,7 +337,7 @@ class TestGraph:
         from src.novel.agents.graph import _should_rewrite
 
         state = {"current_chapter_quality": {"need_rewrite": False}}
-        assert _should_rewrite(state) == "end"
+        assert _should_rewrite(state) == "state_writeback"
 
     def test_should_rewrite_fail(self):
         """_should_rewrite returns 'writer' when quality fails and under max retries."""
@@ -361,7 +361,7 @@ class TestGraph:
             "retry_counts": {1: 3},
             "max_retries": 2,
         }
-        assert _should_rewrite(state) == "end"
+        assert _should_rewrite(state) == "state_writeback"
 
     def test_is_langgraph_available(self):
         """is_langgraph_available returns a boolean."""

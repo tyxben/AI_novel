@@ -1,6 +1,9 @@
 """LangGraph 图构建 - 小说创作流水线
 
-chapter graph: plot_planner -> writer -> consistency_checker -> style_keeper -> quality_reviewer -> END (或回到 writer 重写)
+chapter graph:
+  dynamic_outline -> plot_planner -> writer -> consistency_checker
+  -> style_keeper -> quality_reviewer -> state_writeback -> END
+  (quality_reviewer 可回到 writer 重写)
 
 LangGraph 为可选依赖。如果未安装，提供 sequential fallback。
 """
@@ -37,21 +40,25 @@ def _get_node_functions() -> dict[str, Callable]:
     from src.novel.agents.novel_director import novel_director_node
     from src.novel.agents.world_builder import world_builder_node
     from src.novel.agents.character_designer import character_designer_node
+    from src.novel.agents.dynamic_outline import dynamic_outline_node
     from src.novel.agents.plot_planner import plot_planner_node
     from src.novel.agents.writer import writer_node
     from src.novel.agents.consistency_checker import consistency_checker_node
     from src.novel.agents.style_keeper import style_keeper_node
     from src.novel.agents.quality_reviewer import quality_reviewer_node
+    from src.novel.agents.state_writeback import state_writeback_node
 
     return {
         "novel_director": novel_director_node,
         "world_builder": world_builder_node,
         "character_designer": character_designer_node,
+        "dynamic_outline": dynamic_outline_node,
         "plot_planner": plot_planner_node,
         "writer": writer_node,
         "consistency_checker": consistency_checker_node,
         "style_keeper": style_keeper_node,
         "quality_reviewer": quality_reviewer_node,
+        "state_writeback": state_writeback_node,
     }
 
 
@@ -66,13 +73,13 @@ def _should_rewrite(state: dict) -> str:
     """Conditional edge after quality_reviewer.
 
     Returns "writer" if rewrite needed and under max retries,
-    otherwise returns "end".
+    otherwise returns "state_writeback" to finalize the chapter.
     """
     quality = state.get("current_chapter_quality") or {}
     need_rewrite = quality.get("need_rewrite", False)
 
     if not need_rewrite:
-        return "end"
+        return "state_writeback"
 
     current_chapter = state.get("current_chapter", 1)
     retry_counts = state.get("retry_counts") or {}
@@ -85,7 +92,7 @@ def _should_rewrite(state: dict) -> str:
             current_chapter,
             retries,
         )
-        return "end"
+        return "state_writeback"
 
     log.info("第%d章质量未通过，触发重写（第%d次）", current_chapter, retries + 1)
     return "writer"
@@ -99,22 +106,26 @@ def _should_rewrite(state: dict) -> str:
 def build_chapter_graph() -> Any:
     """Build the per-chapter generation graph.
 
-    Flow: plot_planner -> writer -> consistency_checker -> style_keeper -> quality_reviewer
-    quality_reviewer -> END (pass) or writer (rewrite, max 2)
+    Flow: dynamic_outline -> plot_planner -> writer -> consistency_checker
+          -> style_keeper -> quality_reviewer -> state_writeback -> END
+    quality_reviewer can loop back to writer for rewrites (max 2).
 
-    Returns a compiled LangGraph graph, or a _SequentialRunner fallback.
+    Returns a compiled LangGraph graph, or a _ChapterRunner fallback.
     """
     nodes = _get_node_functions()
 
     if _LANGGRAPH_AVAILABLE:
         graph = StateGraph(NovelState)
+        graph.add_node("dynamic_outline", nodes["dynamic_outline"])
         graph.add_node("plot_planner", nodes["plot_planner"])
         graph.add_node("writer", nodes["writer"])
         graph.add_node("consistency_checker", nodes["consistency_checker"])
         graph.add_node("style_keeper", nodes["style_keeper"])
         graph.add_node("quality_reviewer", nodes["quality_reviewer"])
+        graph.add_node("state_writeback", nodes["state_writeback"])
 
-        graph.set_entry_point("plot_planner")
+        graph.set_entry_point("dynamic_outline")
+        graph.add_edge("dynamic_outline", "plot_planner")
         graph.add_edge("plot_planner", "writer")
         graph.add_edge("writer", "consistency_checker")
         graph.add_edge("consistency_checker", "style_keeper")
@@ -123,22 +134,28 @@ def build_chapter_graph() -> Any:
         graph.add_conditional_edges(
             "quality_reviewer",
             _should_rewrite,
-            {"end": END, "writer": "writer"},
+            {"state_writeback": "state_writeback", "writer": "writer"},
         )
+
+        graph.add_edge("state_writeback", END)
 
         return graph.compile()
 
     # Fallback: sequential runner with rewrite loop
-    return _ChapterRunner(
-        nodes={
-            "plot_planner": nodes["plot_planner"],
-            "writer": nodes["writer"],
-            "consistency_checker": nodes["consistency_checker"],
-            "style_keeper": nodes["style_keeper"],
-            "quality_reviewer": nodes["quality_reviewer"],
-        },
-        max_rewrites=MAX_REWRITES,
-    )
+    fallback_nodes = {
+        "plot_planner": nodes["plot_planner"],
+        "writer": nodes["writer"],
+        "consistency_checker": nodes["consistency_checker"],
+        "style_keeper": nodes["style_keeper"],
+        "quality_reviewer": nodes["quality_reviewer"],
+    }
+    # Optional nodes (may be absent in test mocks)
+    if "dynamic_outline" in nodes:
+        fallback_nodes["dynamic_outline"] = nodes["dynamic_outline"]
+    if "state_writeback" in nodes:
+        fallback_nodes["state_writeback"] = nodes["state_writeback"]
+
+    return _ChapterRunner(nodes=fallback_nodes, max_rewrites=MAX_REWRITES)
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +213,10 @@ class _ChapterRunner:
     def invoke(self, state: dict) -> dict:
         current_state = dict(state)
 
+        # Step 0: dynamic_outline (revise outline based on actual progress)
+        if "dynamic_outline" in self.nodes:
+            current_state = self._run_node("dynamic_outline", current_state)
+
         # Step 1: plot_planner
         current_state = self._run_node("plot_planner", current_state)
 
@@ -213,9 +234,13 @@ class _ChapterRunner:
 
             # Check if rewrite needed
             route = _should_rewrite(current_state)
-            if route == "end":
+            if route != "writer":
                 break
             log.info("重写循环第%d次", attempt + 1)
+
+        # Step 6: state_writeback (persist changes back to state/DB)
+        if "state_writeback" in self.nodes:
+            current_state = self._run_node("state_writeback", current_state)
 
         return current_state
 
