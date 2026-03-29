@@ -15,7 +15,7 @@ from typing import Any, Callable
 log = logging.getLogger("novel.agent_chat")
 
 # Max tool-call iterations to prevent infinite loops
-MAX_ITERATIONS = 8
+MAX_ITERATIONS = 12
 
 
 # ---------------------------------------------------------------------------
@@ -977,7 +977,13 @@ def run_agent_chat(
     # Get basic novel info for context
     novel_info = executor.execute("get_novel_info", {})
 
-    system_prompt = f"""你是一个AI小说助手 Agent。用户会用自然语言告诉你要做什么，你需要自主判断调用哪些工具来完成任务。
+    system_prompt = f"""你是一个专业的AI小说创作助手。你的任务是帮助用户分析、修改和改进他们的小说。
+
+## 核心原则
+- **主动分析**：不要只说"已完成"，要给出具体的分析结果、发现的问题、改进建议
+- **有理有据**：引用具体章节号、角色名、情节点来支撑你的判断
+- **讨论互动**：当用户的需求有多种处理方式时，列出选项让用户选择
+- **专业建议**：从叙事结构、角色发展、伏笔回收、节奏控制等角度给出专业意见
 
 ## 当前小说信息
 {json.dumps(novel_info, ensure_ascii=False, indent=2)}
@@ -986,20 +992,30 @@ def run_agent_chat(
 {_tools_description()}
 
 ## 工作方式
-1. 分析用户的请求，理解他们想要做什么
-2. 决定需要调用哪些工具（可以多步调用）
-3. 每一步调用一个工具，查看结果后决定下一步
-4. 完成所有操作后，用 reply_to_user 工具总结结果
+1. 仔细分析用户的请求，理解他们的真正需求
+2. 调用工具收集必要信息（可多步调用）
+3. 基于收集到的信息进行深入分析
+4. 用 reply_to_user 给出**详细的分析报告和具体建议**
 
 ## 回复格式
-每次回复必须是一个 JSON 对象，包含你要调用的工具：
+每次回复必须是一个 JSON 对象：
 {{"tool": "工具名", "args": {{参数对象}}}}
 
-如果你需要先思考，可以用：
+需要先思考时：
 {{"thinking": "你的思考过程", "tool": "工具名", "args": {{参数对象}}}}
 
-当所有操作完成后，必须调用 reply_to_user 来总结：
-{{"tool": "reply_to_user", "args": {{"message": "总结内容"}}}}
+## 最终回复要求（极其重要）
+当调用 reply_to_user 时，message 必须包含：
+- **发现了什么**：具体问题、数据、事实
+- **分析和判断**：为什么是问题、影响范围
+- **具体建议**：下一步该怎么做，给出可操作的方案
+- 如果用户问了问题，必须正面回答，不能只说"已完成"
+
+示例好回复：
+"我检查了14-18章，发现以下问题：\n1. 第15章和第16章开头场景高度重复（都是矿场发灵石）...\n2. 苏晚照在前12章提到过3次但至今未正式出场...\n\n建议：\n- 重写第15-16章，避免重复...\n- 第19章可以安排苏晚照正式出场..."
+
+示例差回复（禁止）：
+"操作已完成。"
 """
 
     # Add working memory if we have conversation history
@@ -1121,11 +1137,32 @@ def run_agent_chat(
         messages.append({"role": "assistant", "content": response.content})
         messages.append({
             "role": "user",
-            "content": f"[工具结果] {tool_name}: {json.dumps(tool_result, ensure_ascii=False)[:2000]}",
+            "content": f"[工具结果] {tool_name}: {json.dumps(tool_result, ensure_ascii=False)[:4000]}",
         })
 
     if not final_reply and conversation_log:
-        final_reply = "操作已完成。"
+        # Agent reached max iterations without calling reply_to_user.
+        # Synthesize a reply from the last tool results instead of a generic message.
+        last_steps = conversation_log[-3:]
+        summary_parts = []
+        for s in last_steps:
+            tool = s.get("tool", "")
+            result = s.get("result", {})
+            if isinstance(result, dict):
+                # Extract key info from tool results
+                if result.get("error"):
+                    summary_parts.append(f"- {tool}: 出错 — {result['error']}")
+                elif tool == "read_chapter":
+                    summary_parts.append(f"- 已读取第{result.get('chapter_number', '?')}章 ({result.get('word_count', '?')}字)")
+                elif tool == "get_narrative_debts":
+                    stats = result.get("statistics", {})
+                    summary_parts.append(f"- 叙事债务: {stats.get('pending_count', 0)}个待处理, {stats.get('overdue_count', 0)}个逾期")
+                else:
+                    summary_parts.append(f"- {tool}: 已执行")
+        if summary_parts:
+            final_reply = "执行了以下操作但未完成完整分析（达到步骤上限）：\n" + "\n".join(summary_parts) + "\n\n请再发一条消息让我继续分析。"
+        else:
+            final_reply = "操作未完成，请再试一次或换个方式描述你的需求。"
 
     return {
         "reply": final_reply,
