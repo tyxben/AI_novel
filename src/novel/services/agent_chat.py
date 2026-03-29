@@ -998,24 +998,31 @@ def run_agent_chat(
 4. 用 reply_to_user 给出**详细的分析报告和具体建议**
 
 ## 回复格式
-每次回复必须是一个 JSON 对象：
-{{"tool": "工具名", "args": {{参数对象}}}}
+你可以选择两种回复方式：
 
-需要先思考时：
-{{"thinking": "你的思考过程", "tool": "工具名", "args": {{参数对象}}}}
+### 方式一：直接回复（讨论/分析/回答问题时优先使用）
+当你已有足够信息回答用户，或用户只是想讨论：
+{{"reply": "你的详细回复内容（支持 markdown 格式）"}}
 
-## 最终回复要求（极其重要）
-当调用 reply_to_user 时，message 必须包含：
-- **发现了什么**：具体问题、数据、事实
-- **分析和判断**：为什么是问题、影响范围
-- **具体建议**：下一步该怎么做，给出可操作的方案
-- 如果用户问了问题，必须正面回答，不能只说"已完成"
+### 方式二：调用工具（需要获取数据或执行操作时）
+{{"thinking": "为什么需要这个工具", "tool": "工具名", "args": {{参数}}}}
 
-示例好回复：
-"我检查了14-18章，发现以下问题：\n1. 第15章和第16章开头场景高度重复（都是矿场发灵石）...\n2. 苏晚照在前12章提到过3次但至今未正式出场...\n\n建议：\n- 重写第15-16章，避免重复...\n- 第19章可以安排苏晚照正式出场..."
+### 工作流程
+1. 如果用户问的问题你已经能回答（基于已知信息和对话历史），直接用方式一回复
+2. 如果需要更多数据（读章节、查债务等），先用方式二获取，再用方式一给出分析
+3. 如果用户要求执行操作（重写、生成章节等），先用方式一确认方案，用户同意后再用方式二执行
 
-示例差回复（禁止）：
-"操作已完成。"
+### 回复质量要求
+- 讨论型问题：给出分析 + 判断 + 建议选项，让用户参与决策
+- 分析型请求：列出具体发现 + 数据支撑 + 改进方案
+- 执行型请求：先说明计划，执行后说明结果和影响
+- 永远不要只说"操作已完成"——告诉用户你做了什么、发现了什么、建议什么
+
+示例好回复（直接回复模式）：
+{{"reply": "我检查了14-18章，发现以下问题：\\n1. 第15章和第16章开头场景高度重复（都是矿场发灵石）...\\n2. 苏晚照在前12章提到过3次但至今未正式出场...\\n\\n建议：\\n- 重写第15-16章，避免重复...\\n- 第19章可以安排苏晚照正式出场..."}}
+
+示例好回复（工具调用模式）：
+{{"thinking": "用户想了解第15章的问题，需要先读取章节内容", "tool": "read_chapter", "args": {{"chapter_number": 15}}}}
 """
 
     # Add working memory if we have conversation history
@@ -1065,17 +1072,30 @@ def run_agent_chat(
 
         response = llm.chat(
             messages=messages,
-            temperature=0.2,
+            temperature=0.3,
             json_mode=True,
-            max_tokens=2048,
+            max_tokens=4096,
         )
 
         # Parse agent response
         try:
             agent_action = json.loads(response.content)
         except json.JSONDecodeError:
-            # If not valid JSON, treat as final reply
+            # Non-JSON response — treat as direct reply (natural conversation)
             final_reply = response.content
+            break
+
+        # Direct reply — Agent chose to respond without tools
+        direct_reply = agent_action.get("reply")
+        if direct_reply and not agent_action.get("tool"):
+            final_reply = direct_reply
+            conversation_log.append({
+                "step": i + 1,
+                "thinking": agent_action.get("thinking", ""),
+                "tool": "direct_reply",
+                "args": {},
+                "result": {"reply": direct_reply},
+            })
             break
 
         thinking = agent_action.get("thinking", "")
@@ -1083,6 +1103,7 @@ def run_agent_chat(
         tool_args = agent_action.get("args", {})
 
         if not tool_name:
+            # Fallback: no tool and no reply field — treat raw content as reply
             final_reply = response.content
             break
 

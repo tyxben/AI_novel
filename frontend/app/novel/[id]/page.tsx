@@ -1876,6 +1876,133 @@ const TOOL_LABELS: Record<string, { label: string; icon: string }> = {
   reply_to_user: { label: "回复", icon: "💬" },
 };
 
+/* ── Lightweight Markdown renderer for agent replies ────────────── */
+
+function renderInline(text: string): React.ReactNode[] {
+  // Bold **text** → <strong>, then inline code `code` → <code>
+  const parts: React.ReactNode[] = [];
+  // Split on **…** first
+  const boldParts = text.split(/\*\*(.*?)\*\*/);
+  boldParts.forEach((segment, bi) => {
+    if (bi % 2 === 1) {
+      // Bold segment — still process inline code inside it
+      parts.push(<strong key={`b${bi}`}>{segment}</strong>);
+    } else {
+      // Normal segment — process inline code
+      const codeParts = segment.split(/`([^`]+)`/);
+      codeParts.forEach((cp, ci) => {
+        if (ci % 2 === 1) {
+          parts.push(
+            <code key={`b${bi}c${ci}`} className="rounded bg-slate-200/70 px-1 py-0.5 text-xs font-mono">
+              {cp}
+            </code>
+          );
+        } else if (cp) {
+          parts.push(<span key={`b${bi}t${ci}`}>{cp}</span>);
+        }
+      });
+    }
+  });
+  return parts;
+}
+
+function renderMarkdown(text: string): React.ReactNode[] {
+  const lines = text.split("\n");
+  const nodes: React.ReactNode[] = [];
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
+  let codeBlockKey = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Fenced code block toggle
+    if (line.trimStart().startsWith("```")) {
+      if (inCodeBlock) {
+        // Close code block
+        nodes.push(
+          <pre key={`code-${codeBlockKey}`} className="my-2 rounded-lg bg-slate-800 p-3 text-xs text-slate-100 overflow-x-auto font-mono">
+            {codeLines.join("\n")}
+          </pre>
+        );
+        codeLines = [];
+        inCodeBlock = false;
+      } else {
+        inCodeBlock = true;
+        codeBlockKey = i;
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    // Headers
+    if (line.startsWith("#### ")) {
+      nodes.push(<h5 key={i} className="font-semibold text-sm mt-3 mb-1 text-ink">{renderInline(line.slice(5))}</h5>);
+    } else if (line.startsWith("### ")) {
+      nodes.push(<h4 key={i} className="font-semibold text-sm mt-3 mb-1 text-ink">{renderInline(line.slice(4))}</h4>);
+    } else if (line.startsWith("## ")) {
+      nodes.push(<h3 key={i} className="font-semibold text-base mt-4 mb-1.5 text-ink">{renderInline(line.slice(3))}</h3>);
+    } else if (line.startsWith("# ")) {
+      nodes.push(<h2 key={i} className="font-bold text-lg mt-4 mb-2 text-ink">{renderInline(line.slice(2))}</h2>);
+    }
+    // Horizontal rule
+    else if (/^---+$/.test(line.trim())) {
+      nodes.push(<hr key={i} className="my-3 border-slate-200" />);
+    }
+    // Unordered list
+    else if (line.match(/^\s*[-*]\s/)) {
+      const indent = line.match(/^(\s*)/)?.[1]?.length ?? 0;
+      const content = line.replace(/^\s*[-*]\s/, "");
+      nodes.push(
+        <li key={i} className="list-disc text-ink" style={{ marginLeft: `${Math.max(1, indent / 2 + 1)}rem` }}>
+          {renderInline(content)}
+        </li>
+      );
+    }
+    // Ordered list
+    else if (line.match(/^\s*\d+\.\s/)) {
+      const indent = line.match(/^(\s*)/)?.[1]?.length ?? 0;
+      const content = line.replace(/^\s*\d+\.\s/, "");
+      nodes.push(
+        <li key={i} className="list-decimal text-ink" style={{ marginLeft: `${Math.max(1, indent / 2 + 1)}rem` }}>
+          {renderInline(content)}
+        </li>
+      );
+    }
+    // Blockquote
+    else if (line.startsWith("> ")) {
+      nodes.push(
+        <blockquote key={i} className="border-l-2 border-slate-300 pl-3 text-slate-600 italic my-1">
+          {renderInline(line.slice(2))}
+        </blockquote>
+      );
+    }
+    // Empty line
+    else if (!line.trim()) {
+      nodes.push(<div key={i} className="h-2" />);
+    }
+    // Normal paragraph
+    else {
+      nodes.push(<p key={i} className="text-ink">{renderInline(line)}</p>);
+    }
+  }
+
+  // If code block was never closed, render remaining lines
+  if (inCodeBlock && codeLines.length > 0) {
+    nodes.push(
+      <pre key={`code-${codeBlockKey}`} className="my-2 rounded-lg bg-slate-800 p-3 text-xs text-slate-100 overflow-x-auto font-mono">
+        {codeLines.join("\n")}
+      </pre>
+    );
+  }
+
+  return nodes;
+}
+
 function formatToolResult(result: any): string {
   if (!result) return "";
   if (typeof result === "string") return result;
@@ -2254,12 +2381,22 @@ function AgentChatSection({ novelId }: { novelId: string }) {
                       </div>
                     )}
                     <div className="group relative rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink select-text">
-                      <p className="whitespace-pre-wrap">{msg.content}</p>
-                      {msg.model && (
-                        <p className="mt-1.5 text-[10px] text-slate-400">
-                          model: {msg.model}
-                        </p>
-                      )}
+                      <div className="prose-sm max-w-none leading-relaxed space-y-0.5">
+                        {renderMarkdown(msg.content)}
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-2">
+                        {msg.steps && msg.steps.length > 0 && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
+                            <GitBranch className="h-2.5 w-2.5" />
+                            {msg.steps.filter(s => s.tool !== "reply_to_user").length} 步操作
+                          </span>
+                        )}
+                        {msg.model && (
+                          <span className="text-[10px] text-slate-400">
+                            model: {msg.model}
+                          </span>
+                        )}
+                      </div>
                       <button
                         onClick={() => navigator.clipboard.writeText(msg.content)}
                         className="absolute -right-8 top-1 rounded p-1 text-slate-300 opacity-0 transition hover:bg-slate-100 hover:text-slate-600 group-hover:opacity-100"
