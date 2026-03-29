@@ -139,6 +139,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(params ?? {}),
     }),
+  planChapters: (id: string, params?: any) =>
+    request<{ task_id: string }>(`/api/novels/${id}/plan-chapters`, {
+      method: "POST",
+      body: JSON.stringify(params ?? {}),
+    }),
   polishChapters: (id: string, params?: any) =>
     request<{ task_id: string }>(`/api/novels/${id}/polish`, {
       method: "POST",

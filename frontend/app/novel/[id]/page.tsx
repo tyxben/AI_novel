@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   useNovel,
   useGenerateChapters,
+  usePlanChapters,
   usePolishChapters,
   useExportNovel,
   useDeleteNovel,
@@ -74,6 +75,7 @@ import {
   GitBranch,
   ChevronUp,
   Copy,
+  ListChecks,
 } from "lucide-react";
 
 const btnCls =
@@ -268,7 +270,9 @@ function ProjectOverview({
 // ─── Action Buttons ───────────────────────────────────────────────────
 function ActionButtons({ novel, id }: { novel: any; id: string }) {
   const router = useRouter();
+  const qc = useQueryClient();
   const genMut = useGenerateChapters(id);
+  const planMut = usePlanChapters(id);
   const polishMut = usePolishChapters(id);
   const exportMut = useExportNovel(id);
   const deleteMut = useDeleteNovel();
@@ -288,17 +292,59 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
   const [silentMode, setSilentMode] = useState(false);
   const [reactMode, setReactMode] = useState(false);
 
+  // Plan → review → write flow
+  const [planTaskId, setPlanTaskId] = useState<string | null>(null);
+  const [plannedOutlines, setPlannedOutlines] = useState<any[] | null>(null);
+  const [planContext, setPlanContext] = useState<any>(null);
+  const { data: planTaskData } = useTask(planTaskId);
+
+  // Poll plan task completion
+  useEffect(() => {
+    if (!planTaskData || !planTaskId) return;
+    if (planTaskData.status === "completed") {
+      try {
+        const raw = planTaskData.result;
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (parsed?.planned_chapters && Array.isArray(parsed.planned_chapters)) {
+          setPlannedOutlines(parsed.planned_chapters);
+          setPlanContext(parsed.context ?? null);
+        }
+      } catch {
+        // Failed to parse — show error
+      }
+      setPlanTaskId(null);
+    } else if (planTaskData.status === "failed") {
+      setPlanTaskId(null);
+    }
+  }, [planTaskData, planTaskId]);
+
   // Polish controls
   const [showPolishOptions, setShowPolishOptions] = useState(false);
   const [polishStartCh, setPolishStartCh] = useState<number | "">("");
   const [polishEndCh, setPolishEndCh] = useState<number | "">("");
 
-  const handleGenerate = () => {
+  const buildGenParams = () => {
     const params: any = { batch_size: batchSize, silent: silentMode, react_mode: reactMode };
     if (targetTotal) params.target_total_chapters = Number(targetTotal);
     if (genStartCh) params.start_chapter = Number(genStartCh);
     if (genEndCh) params.end_chapter = Number(genEndCh);
-    genMut.mutate(params);
+    return params;
+  };
+
+  const handleGenerate = () => {
+    genMut.mutate(buildGenParams());
+  };
+
+  const handlePlan = () => {
+    const params: any = {};
+    if (batchSize) params.batch_size = batchSize;
+    if (genStartCh) params.start_chapter = Number(genStartCh);
+    if (genEndCh) params.end_chapter = Number(genEndCh);
+    planMut.mutate(params, {
+      onSuccess: (data) => {
+        setPlanTaskId(data.task_id);
+      },
+    });
   };
 
   const handlePolish = () => {
@@ -308,6 +354,8 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
     polishMut.mutate(params);
   };
 
+  const isPlanPolling = !!planTaskId && (!planTaskData || planTaskData.status === "pending" || planTaskData.status === "running");
+
   return (
     <Panel title="操作">
       <div className="space-y-4">
@@ -315,6 +363,21 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
         <div className="flex flex-wrap gap-3">
           <button
             className={btnPrimary}
+            onClick={() => {
+              if (showGenOptions) handlePlan();
+              else setShowGenOptions(true);
+            }}
+            disabled={planMut.isPending || isPlanPolling}
+          >
+            {planMut.isPending || isPlanPolling ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ListChecks className="h-4 w-4" />
+            )}
+            规划大纲
+          </button>
+          <button
+            className={btnSecondary}
             onClick={() => {
               if (showGenOptions) handleGenerate();
               else setShowGenOptions(true);
@@ -326,7 +389,7 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
             ) : (
               <Play className="h-4 w-4" />
             )}
-            生成章节
+            直接生成
           </button>
           <button
             className={btnSecondary}
@@ -393,7 +456,7 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
           )}
         </div>
 
-        {/* Generation options panel */}
+        {/* Generation options panel (shared by plan + direct generate) */}
         {showGenOptions && (
           <div className="rounded-[20px] border border-slate-100 bg-shell p-4">
             <div className="mb-3 flex items-center justify-between">
@@ -473,10 +536,123 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
               智能质控模式
               <span className="text-xs text-slate-400">（ReAct，较慢但质量更高）</span>
             </label>
-            <button className={btnPrimary + " mt-3"} onClick={handleGenerate} disabled={genMut.isPending}>
-              {genMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              开始生成
-            </button>
+            <div className="mt-3 flex gap-2">
+              <button className={btnPrimary} onClick={handlePlan} disabled={planMut.isPending || isPlanPolling}>
+                {planMut.isPending || isPlanPolling ? <Loader2 className="h-4 w-4 animate-spin" /> : <ListChecks className="h-4 w-4" />}
+                规划大纲
+              </button>
+              <button className={btnSecondary} onClick={handleGenerate} disabled={genMut.isPending}>
+                {genMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                直接生成（跳过规划）
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Plan task polling status */}
+        {isPlanPolling && (
+          <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs text-sky-700 flex items-center gap-2">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            正在规划大纲，请稍候...
+            {planTaskData?.progress_msg && <span className="text-slate-500">({planTaskData.progress_msg})</span>}
+          </div>
+        )}
+
+        {/* Plan task failed */}
+        {planTaskData?.status === "failed" && !planTaskId && (
+          <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+            大纲规划失败：{planTaskData.error || "未知错误"}
+          </div>
+        )}
+
+        {/* Outline review panel */}
+        {plannedOutlines && (
+          <div className="rounded-[20px] border border-indigo-200 bg-indigo-50/30 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-semibold text-ink flex items-center gap-2">
+                <ListChecks className="h-4 w-4 text-indigo-600" />
+                大纲规划结果
+              </h4>
+              <span className="text-xs text-slate-500">{plannedOutlines.length} 章</span>
+            </div>
+            {planContext && (
+              <div className="flex gap-3 text-xs text-slate-500">
+                {planContext.overdue_debts != null && (
+                  <span>逾期债务: {planContext.overdue_debts}</span>
+                )}
+                {planContext.active_arcs != null && (
+                  <span>活跃弧线: {planContext.active_arcs}</span>
+                )}
+                {planContext.total_planned != null && (
+                  <span>规划章数: {planContext.total_planned}</span>
+                )}
+              </div>
+            )}
+            <div className="max-h-[480px] overflow-y-auto space-y-2 pr-1">
+              {plannedOutlines.map((ch) => (
+                <div key={ch.chapter_number} className="rounded-xl border border-slate-200 bg-white p-3 space-y-1">
+                  <div className="font-medium text-sm text-ink">
+                    第{ch.chapter_number}章：{ch.title}
+                  </div>
+                  {ch.goal && (
+                    <div className="text-sm text-slate-600">{ch.goal}</div>
+                  )}
+                  {ch.key_events?.length > 0 && (
+                    <div className="text-xs text-slate-500">
+                      关键事件：{ch.key_events.join("、")}
+                    </div>
+                  )}
+                  {ch.mood && (
+                    <div className="text-xs text-slate-500">
+                      情绪基调：{ch.mood}
+                    </div>
+                  )}
+                  {ch.chapter_brief && (
+                    <div className="text-xs text-slate-400 space-y-0.5 pt-1 border-t border-slate-100 mt-1">
+                      {ch.chapter_brief.main_conflict && (
+                        <div>主冲突：{ch.chapter_brief.main_conflict}</div>
+                      )}
+                      {ch.chapter_brief.foreshadowing_collect?.length > 0 && (
+                        <div>收束伏笔：{ch.chapter_brief.foreshadowing_collect.join("、")}</div>
+                      )}
+                      {ch.chapter_brief.foreshadowing_plant?.length > 0 && (
+                        <div>埋设伏笔：{ch.chapter_brief.foreshadowing_plant.join("、")}</div>
+                      )}
+                    </div>
+                  )}
+                  {ch.revision_reason && (
+                    <div className="text-xs text-amber-600 italic mt-1">
+                      修订原因：{ch.revision_reason}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2 pt-2 border-t border-slate-200">
+              <button
+                className={btnPrimary}
+                onClick={() => {
+                  const start = plannedOutlines[0].chapter_number;
+                  const end = plannedOutlines[plannedOutlines.length - 1].chapter_number;
+                  genMut.mutate({ start_chapter: start, end_chapter: end, silent: silentMode, react_mode: reactMode });
+                  setPlannedOutlines(null);
+                  setPlanContext(null);
+                }}
+                disabled={genMut.isPending}
+              >
+                {genMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                确认写作
+              </button>
+              <button
+                className={btnSecondary}
+                onClick={() => {
+                  setPlannedOutlines(null);
+                  setPlanContext(null);
+                }}
+              >
+                取消
+              </button>
+            </div>
           </div>
         )}
 
@@ -589,9 +765,10 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
         )}
 
         {/* Error/success messages */}
-        {(genMut.isError || polishMut.isError || exportMut.isError) && (
+        {(genMut.isError || planMut.isError || polishMut.isError || exportMut.isError) && (
           <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
             {(genMut.error as Error)?.message ??
+              (planMut.error as Error)?.message ??
               (polishMut.error as Error)?.message ??
               (exportMut.error as Error)?.message ??
               "操作失败"}
@@ -600,6 +777,11 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
         {genMut.isSuccess && (
           <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-700">
             章节生成任务已提交，请在右侧任务面板查看进度。
+          </div>
+        )}
+        {planMut.isSuccess && !plannedOutlines && !isPlanPolling && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-700">
+            大纲规划任务已提交，请稍候...
           </div>
         )}
         {polishMut.isSuccess && (
@@ -844,7 +1026,7 @@ function ChaptersSection({
       <Panel title="章节列表">
         <div className="flex flex-col items-center py-8 text-slate-500">
           <FileText className="mb-2 h-8 w-8 text-slate-300" />
-          <p className="text-sm">暂无章节，点击"生成章节"开始创作</p>
+          <p className="text-sm">暂无章节，点击"规划大纲"先预览大纲再写作，或"直接生成"立即开始</p>
         </div>
       </Panel>
     );
@@ -4183,6 +4365,7 @@ function ActiveTaskPanel({ novelId }: { novelId: string }) {
 
   const taskTypeLabels: Record<string, string> = {
     novel_create: "创建项目",
+    novel_plan_chapters: "规划大纲",
     novel_generate: "生成章节",
     novel_polish: "精修润色",
     novel_feedback: "反馈重写",

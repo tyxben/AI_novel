@@ -105,6 +105,17 @@ export function useGenerateChapters(novelId: string) {
   });
 }
 
+export function usePlanChapters(novelId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params?: any) => api.planChapters(novelId, params),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["novel", novelId] });
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+    },
+  });
+}
+
 export function usePolishChapters(novelId: string) {
   const qc = useQueryClient();
   return useMutation({
