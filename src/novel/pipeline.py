@@ -1753,13 +1753,34 @@ class NovelPipeline:
                     is_propagation=is_propagation,
                 )
 
-                # Save rewritten chapter
+                # Save rewritten chapter (text + json metadata)
                 fm.save_chapter_text(novel_id, ch_num, new_text)
+                # Update chapter JSON with new word count and title
+                ch_json = {
+                    "chapter_number": ch_num,
+                    "title": ch_outline_data.get("title", f"第{ch_num}章"),
+                    "full_text": new_text,
+                    "word_count": len(new_text),
+                    "status": "draft",
+                }
+                # Extract better title if current is placeholder
+                if ch_json["title"] == f"第{ch_num}章":
+                    ch_json["title"] = _extract_title_from_text(new_text, ch_num)
+                fm.save_chapter(novel_id, ch_num, ch_json)
                 chapter_texts[ch_num] = new_text  # update for subsequent chapters' context
+
+                # Also update state chapters list
+                for ch_data in state.get("chapters", []):
+                    if ch_data.get("chapter_number") == ch_num:
+                        ch_data["full_text"] = new_text
+                        ch_data["word_count"] = len(new_text)
+                        ch_data["title"] = ch_json["title"]
+                        break
 
                 result["rewritten_chapters"].append(
                     {
                         "chapter_number": ch_num,
+                        "title": ch_json["title"],
                         "original_chars": len(original_text),
                         "new_chars": len(new_text),
                         "is_propagation": is_propagation,
@@ -1781,6 +1802,13 @@ class NovelPipeline:
                         "error": str(exc),
                     }
                 )
+
+        # Save updated state to checkpoint after rewrites
+        if result.get("rewritten_chapters"):
+            try:
+                self._save_checkpoint(novel_id, state)
+            except Exception:
+                pass
 
         return result
 
