@@ -32,7 +32,7 @@ class OpenAIBackend(LLMClient):
                 kwargs["api_key"] = self._api_key
             if self._base_url:
                 kwargs["base_url"] = self._base_url
-            kwargs["timeout"] = 120.0
+            kwargs["timeout"] = 600.0
             self._client = OpenAI(**kwargs)
         return self._client
 
@@ -52,7 +52,12 @@ class OpenAIBackend(LLMClient):
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
+            # Newer OpenAI models (gpt-5+, o3+) require max_completion_tokens
+            model = self._model.lower()
+            if any(model.startswith(p) for p in ("gpt-5", "o3", "o4")):
+                kwargs["max_completion_tokens"] = max_tokens
+            else:
+                kwargs["max_tokens"] = max_tokens
 
         response = client.chat.completions.create(**kwargs)
         choice = response.choices[0]
