@@ -211,6 +211,18 @@ export function useSaveChapter(novelId: string) {
   });
 }
 
+export function useUpdateChapterMetadata(novelId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ chapterNum, title }: { chapterNum: number; title: string }) =>
+      api.updateChapterMetadata(novelId, chapterNum, { title }),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["novel", novelId] });
+      qc.invalidateQueries({ queryKey: ["chapter", novelId, vars.chapterNum] });
+    },
+  });
+}
+
 export function useProofreadChapter(novelId: string) {
   return useMutation({
     mutationFn: (chapterNum: number) =>

@@ -171,6 +171,11 @@ export const api = {
       `/api/novels/${id}/chapters/${chNum}`,
       { method: "PUT", body: JSON.stringify({ text }) }
     ),
+  updateChapterMetadata: (id: string, chapterNum: number, data: { title?: string }) =>
+    request<{ success: boolean }>(`/api/novels/${id}/chapters/${chapterNum}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
   proofreadChapter: (id: string, chNum: number) =>
     request<{ issues: any[] }>(`/api/novels/${id}/chapters/${chNum}/proofread`, {
       method: "POST",

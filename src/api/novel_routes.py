@@ -92,6 +92,10 @@ class CreateConversationRequest(BaseModel):
     title: str = "新对话"
 
 
+class ChapterMetadataUpdate(BaseModel):
+    title: str | None = None
+
+
 class ChapterSaveRequest(BaseModel):
     text: str
 
@@ -596,6 +600,42 @@ def read_chapter(novel_id: str, chapter_num: int):
         "style_score": ch_data.get("style_score"),
         "published": chapter_num in published_chapters,
     }
+
+
+@router.patch("/{novel_id}/chapters/{chapter_num}")
+def update_chapter_metadata(novel_id: str, chapter_num: int, req: ChapterMetadataUpdate):
+    """Update chapter metadata (title, etc.) without modifying content."""
+    validate_id(novel_id)
+    novel_dir = _novels_dir() / novel_id
+    json_path = novel_dir / "chapters" / f"chapter_{chapter_num:03d}.json"
+
+    if not json_path.exists():
+        raise HTTPException(404, f"Chapter {chapter_num} not found")
+
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+
+    if req.title is not None:
+        data["title"] = req.title
+
+    json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Also update outline in novel.json
+    try:
+        novel_data = _load_novel_json(novel_id)
+        outline = novel_data.get("outline", {})
+        for ch in outline.get("chapters", []):
+            if ch.get("chapter_number") == chapter_num:
+                if req.title is not None:
+                    ch["title"] = req.title
+                break
+        novel_json_path = novel_dir / "novel.json"
+        novel_json_path.write_text(
+            json.dumps(novel_data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+    return {"success": True, "chapter_number": chapter_num, "title": req.title}
 
 
 @router.get("/{novel_id}/export")

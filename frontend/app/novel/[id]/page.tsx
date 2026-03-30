@@ -38,6 +38,7 @@ import {
   useDeleteConversation,
   useRebuildNarrative,
   useVolumesSummary,
+  useUpdateChapterMetadata,
 } from "@/lib/hooks";
 import { PageHeader } from "@/components/layout/page-header";
 import { Panel } from "@/components/ui/panel";
@@ -986,6 +987,55 @@ function OutlineSection({ outline }: { outline: any }) {
   );
 }
 
+// ─── Editable Chapter Title ───────────────────────────────────────────
+function EditableTitle({ novelId, chapter }: { novelId: string; chapter: any }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(chapter.title || `第 ${chapter.chapter_number} 章`);
+  const updateMut = useUpdateChapterMetadata(novelId);
+
+  // Sync if external data changes
+  useEffect(() => {
+    if (!editing) {
+      setTitle(chapter.title || `第 ${chapter.chapter_number} 章`);
+    }
+  }, [chapter.title, chapter.chapter_number, editing]);
+
+  const handleSave = () => {
+    const trimmed = title.trim();
+    if (trimmed && trimmed !== (chapter.title || `第 ${chapter.chapter_number} 章`)) {
+      updateMut.mutate({ chapterNum: chapter.chapter_number, title: trimmed });
+    }
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onBlur={handleSave}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); handleSave(); }
+          if (e.key === "Escape") { setTitle(chapter.title || `第 ${chapter.chapter_number} 章`); setEditing(false); }
+        }}
+        onClick={(e) => e.stopPropagation()}
+        className="flex-1 border-b border-accent bg-transparent text-sm font-medium text-ink outline-none"
+      />
+    );
+  }
+
+  return (
+    <span
+      className="flex-1 font-medium text-ink cursor-pointer hover:text-accent transition"
+      onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+      title="点击编辑标题"
+    >
+      {chapter.title || `第 ${chapter.chapter_number} 章`}
+    </span>
+  );
+}
+
 // ─── Chapters Section ─────────────────────────────────────────────────
 function ChaptersSection({
   chapters,
@@ -1109,9 +1159,7 @@ function ChaptersSection({
               <span className="min-w-[3rem] font-mono text-xs text-slate-400">
                 {String(ch.chapter_number).padStart(3, "0")}
               </span>
-              <span className="flex-1 font-medium text-ink">
-                {ch.title || `第 ${ch.chapter_number} 章`}
-              </span>
+              <EditableTitle novelId={novelId} chapter={ch} />
               {ch.word_count != null && (
                 <span className="text-xs text-slate-400">
                   {ch.word_count} 字
