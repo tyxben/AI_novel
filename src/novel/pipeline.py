@@ -34,6 +34,10 @@ def _extract_title_from_text(chapter_text: str, ch_num: int) -> str:
     Uses heuristics: finds the most "interesting" short phrase from the
     first few paragraphs — a character action, a location reveal, or a
     key event.  Falls back to first sentence truncated to 10 chars.
+
+    Skips markdown headers (lines starting with ``#``) and lines that
+    look like chapter-number headers (``第N章 ...``) to avoid picking up
+    wrong chapter numbers or ``#`` prefixes in the title.
     """
     import re
 
@@ -43,24 +47,36 @@ def _extract_title_from_text(chapter_text: str, ch_num: int) -> str:
 
     # Try to find a short, punchy sentence in the first 5 lines
     for line in lines[:5]:
+        # Skip markdown headers
+        if line.startswith("#"):
+            continue
+        # Skip lines that look like chapter number headers
+        if re.match(r'^第\d+章', line):
+            continue
+
         # Split into sentences
         sentences = re.split(r'[。！？]', line)
         for sent in sentences:
-            sent = sent.strip()
+            sent = sent.strip().strip('""\'\"\'')
             # Good title: 4-12 chars, contains character action or place
             if 4 <= len(sent) <= 12:
                 return sent
 
-    # Fallback: first line truncated
-    first = lines[0]
-    if len(first) > 10:
-        # Cut at a natural boundary
-        for sep in ("，", "。", "！", "？", "、"):
-            idx = first.find(sep)
-            if 3 <= idx <= 12:
-                return first[:idx]
-        return first[:10]
-    return first or f"第{ch_num}章"
+    # Fallback: first non-header line truncated
+    for line in lines[:5]:
+        if line.startswith("#") or re.match(r'^第\d+章', line):
+            continue
+        if len(line) > 10:
+            # Cut at a natural boundary
+            for sep in ("，", "。", "！", "？", "、"):
+                idx = line.find(sep)
+                if 3 <= idx <= 12:
+                    return line[:idx]
+            return line[:10]
+        if len(line) >= 4:
+            return line
+
+    return f"第{ch_num}章"
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +201,13 @@ class NovelPipeline:
                 serializable[k] = v
             except (TypeError, ValueError):
                 log.debug("跳过不可序列化字段: %s", k)
+
+        # Strip full_text from chapters before saving (content lives in .txt files)
+        if "chapters" in serializable:
+            serializable["chapters"] = [
+                {k: v for k, v in ch.items() if k != "full_text"}
+                for ch in serializable["chapters"]
+            ]
 
         # Atomic write: temp file + rename to prevent corruption on crash
         fd, tmp_path = tempfile.mkstemp(
@@ -1030,7 +1053,6 @@ class NovelPipeline:
                     "status": "draft",
                 }
                 fm.save_chapter(novel_id, ch_num, ch_data)
-                fm.save_chapter_text(novel_id, ch_num, chapter_text)
 
                 # Backfill outline for placeholder chapters
                 self._backfill_outline_entry(state, ch_num, chapter_text)
@@ -1754,8 +1776,6 @@ class NovelPipeline:
                 )
 
                 # Save rewritten chapter (text + json metadata)
-                fm.save_chapter_text(novel_id, ch_num, new_text)
-                # Update chapter JSON with new word count and title
                 ch_json = {
                     "chapter_number": ch_num,
                     "title": ch_outline_data.get("title", f"第{ch_num}章"),

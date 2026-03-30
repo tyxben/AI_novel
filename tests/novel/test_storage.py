@@ -912,7 +912,7 @@ class TestFileManager:
         assert status["status"] == "writing"
         assert status["current_chapter"] == 3
         assert status["total_chapters"] == 10
-        assert status["total_words"] == 300  # 3 * 100
+        assert status["total_words"] == 330  # 3 * 110 (len("这是第N章的正文内容。" * 10))
 
     def test_load_status_not_found(self, fm):
         status = fm.load_status("nonexistent")

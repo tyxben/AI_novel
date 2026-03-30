@@ -319,11 +319,15 @@ class TestFullPipelineSmokeTest:
                 assert json_file.exists(), f"chapter_{ch_num:03d}.json missing"
                 assert txt_file.exists(), f"chapter_{ch_num:03d}.txt missing"
 
-                # Verify JSON content
+                # Verify JSON content (metadata only, no full_text)
                 ch_data = json.loads(json_file.read_text(encoding="utf-8"))
                 assert ch_data["chapter_number"] == ch_num
                 assert ch_data["word_count"] > 0
-                assert len(ch_data["full_text"]) > 0
+                assert "full_text" not in ch_data, "json should not contain full_text"
+
+                # Verify text content in .txt file
+                txt_content = txt_file.read_text(encoding="utf-8")
+                assert len(txt_content) > 0
 
             # Step 3: export
             export_path = str(tmp_path / "exported_novel.txt")

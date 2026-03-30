@@ -172,6 +172,14 @@ TOOLS = [
             "start_chapter": {"type": "integer", "description": "起始章节号（默认从最后一章之后开始）", "optional": True},
         },
     },
+    {
+        "name": "rename_chapter",
+        "description": "修改章节标题（不会改动正文内容）",
+        "parameters": {
+            "chapter_number": {"type": "integer", "description": "章节号"},
+            "new_title": {"type": "string", "description": "新标题"},
+        },
+    },
 ]
 
 
@@ -915,6 +923,44 @@ class AgentToolExecutor:
         except Exception as exc:
             return {"error": f"大纲规划失败: {exc}"}
 
+    def _tool_rename_chapter(self, chapter_number: int, new_title: str) -> dict:
+        """Rename a chapter's title without touching its content."""
+        from src.novel.storage.file_manager import FileManager
+
+        novel_dir = Path(self.workspace) / "novels" / self.novel_id
+        json_path = novel_dir / "chapters" / f"chapter_{chapter_number:03d}.json"
+
+        if not json_path.exists():
+            return {"error": f"第{chapter_number}章不存在"}
+
+        # Update title in chapter json
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        old_title = data.get("title", f"第{chapter_number}章")
+        data["title"] = new_title
+        json_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # Also update outline if it exists
+        try:
+            fm = FileManager(self.workspace)
+            novel_data = fm.load_novel(self.novel_id) or {}
+            outline = novel_data.get("outline", {})
+            for ch in outline.get("chapters", []):
+                if ch.get("chapter_number") == chapter_number:
+                    ch["title"] = new_title
+                    break
+            fm.save_novel(self.novel_id, novel_data)
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "chapter_number": chapter_number,
+            "old_title": old_title,
+            "new_title": new_title,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Agent loop
@@ -1186,6 +1232,8 @@ def run_agent_chat(
                 "rebuild_narrative": "重建叙事数据",
                 "get_volume_settlement": "查看卷末收束",
                 "get_arc_status": "查看弧线状态",
+                "plan_chapters": "规划大纲",
+                "rename_chapter": "修改标题",
             }.get(tool_name, tool_name)
             progress_callback(
                 0.1 + (i / max_iterations) * 0.8,

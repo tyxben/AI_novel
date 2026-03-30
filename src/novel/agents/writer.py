@@ -1419,6 +1419,19 @@ def writer_node(state: dict) -> dict:
     if chapters_done:
         last_ch = chapters_done[-1]
         last_text = last_ch.get("full_text", "")
+        # If no full_text in state (resumed from checkpoint), load from .txt file
+        if not last_text:
+            try:
+                from src.novel.storage.file_manager import FileManager
+                workspace = state.get("workspace", "workspace")
+                novel_id = state.get("novel_id", "")
+                if novel_id:
+                    fm = FileManager(workspace)
+                    last_text = fm.load_chapter_text(
+                        novel_id, last_ch.get("chapter_number", 0)
+                    ) or ""
+            except Exception:
+                pass
         if last_text:
             # 取结尾 _MAX_CONTEXT_CHARS 字符，在段落边界截断
             if len(last_text) > _MAX_CONTEXT_CHARS:

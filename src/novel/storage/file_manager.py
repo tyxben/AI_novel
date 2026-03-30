@@ -69,46 +69,71 @@ class FileManager:
     def save_chapter(
         self, novel_id: str, chapter_number: int, chapter_data: dict[str, Any]
     ) -> Path:
-        """保存单章 JSON
+        """保存单章 metadata JSON + 纯文本 .txt
+
+        JSON 只存元数据（chapter_number, title, word_count, status 等），
+        不存 full_text。章节正文保存到同名 .txt 文件。
 
         Args:
             novel_id: 小说 ID
             chapter_number: 章节号
-            chapter_data: Chapter.model_dump() 的结果
+            chapter_data: Chapter dict，可包含 full_text（会被提取出来）
 
         Returns:
-            保存的文件路径
+            JSON 文件路径
         """
+        # Extract full_text — don't store it in json
+        full_text = chapter_data.get("full_text")
+        # Build metadata-only dict (exclude full_text)
+        data_to_save = {k: v for k, v in chapter_data.items() if k != "full_text"}
+
+        if full_text is not None:
+            # Update word_count from actual text
+            data_to_save["word_count"] = len(full_text)
+            # Save text to .txt file
+            self.save_chapter_text(novel_id, chapter_number, full_text)
+
         path = self._chapters_dir(novel_id) / f"chapter_{chapter_number:03d}.json"
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(chapter_data, f, ensure_ascii=False, indent=2)
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
         return path
 
     def load_chapter(
         self, novel_id: str, chapter_number: int
     ) -> dict[str, Any] | None:
-        """加载单章 JSON"""
+        """加载单章 metadata + 正文
+
+        JSON 提供元数据，.txt 提供正文（full_text）。
+        .txt 是正文的 single source of truth；即使旧 JSON 中
+        残留 full_text 字段，也会被 .txt 内容覆盖。
+        """
         path = self._chapters_dir(novel_id) / f"chapter_{chapter_number:03d}.json"
         if not path.exists():
             return None
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Always load text from .txt (single source of truth)
+        txt_path = path.with_suffix(".txt")
+        if txt_path.exists():
+            data["full_text"] = txt_path.read_text(encoding="utf-8")
+        return data
 
     def save_chapter_text(
         self, novel_id: str, chapter_number: int, text: str
     ) -> Path:
-        """保存章节纯文本，并同步更新对应 JSON 的 full_text 和 word_count"""
+        """保存章节纯文本，并同步 JSON 的 word_count（不写入 full_text）"""
         path = self._chapters_dir(novel_id) / f"chapter_{chapter_number:03d}.txt"
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
-        # Sync JSON if it exists
+        # Sync word_count in JSON (but NOT full_text)
         json_path = path.with_suffix(".json")
         if json_path.exists():
             try:
                 with open(json_path, encoding="utf-8") as jf:
                     data = json.load(jf)
-                data["full_text"] = text
                 data["word_count"] = len(text)
+                # Remove full_text if it exists in old json files
+                data.pop("full_text", None)
                 with open(json_path, "w", encoding="utf-8") as jf:
                     json.dump(data, jf, ensure_ascii=False, indent=2)
             except Exception as e:
