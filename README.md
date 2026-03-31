@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.9.0-orange)]()
+[![Version](https://img.shields.io/badge/version-v1.1.0-orange)]()
 
 ---
 
@@ -24,6 +24,10 @@
 - **叙事状态驱动** `NEW` — ContinuityService 聚合上下文，每章写前生成连续性约束（人物状态/未决线索/禁止断裂项）
 - **向量语义一致性检查** `NEW` — Chroma 向量检索替代 BM25，每章自动检查矛盾（角色复活/失踪/事件重复）
 - **智能会话记忆** `NEW` — Agent Chat 自动恢复对话历史 + 工作记忆注入，多轮协作不再"每轮重新开始"
+- **ReAct 推理模式** `NEW` — Writer 支持 ReAct 工具链推理，Prompt Registry 管理提示词版本与质量
+- **两段式章节编排** `NEW` — 写前大纲修订(dynamic_outline) + 写后状态回写(state_writeback)，对话型 Agent Chat 助手
+- **叙事债务追踪** `NEW` — ObligationTracker 追踪未解决线索 + VolumeSettlement 卷末自动收束
+- **LLM 分阶段配置** `NEW` — 大纲用 GPT-4、写作用 DeepSeek，按创作阶段选配最优模型
 - **读者反馈系统** — 分析反馈影响范围，自动重写受影响章节，反馈约束同时注入 one-shot 和 ReAct 写作路径
 - **风格预设** — 玄幻爽文 / 都市 / 武侠 / 仙侠 / 文学 / 轻小说 6 大类
 
@@ -586,6 +590,12 @@ elif backend == "xxx":
 - [x] MCP Server — FastMCP 协议，供 Claude Code 等 AI 助手调用
 - [x] 任务队列 — 前后端分离，异步任务执行
 - [x] 叙事状态驱动架构 — ContinuityService 聚合写前约束 + 向量一致性检查 + Agent Chat 会话记忆
+- [x] ReAct Agent 框架 — Writer ReAct 推理模式 + Prompt Registry 提示词版本管理
+- [x] 叙事控制层 — ObligationTracker 债务追踪 + VolumeSettlement 卷末收束 + 弧线推进
+- [x] Agent Chat 对话型助手 — 会话持久化 + 工作记忆注入 + 6 工具
+- [x] 两段式章节编排 — dynamic_outline 写前修订 + state_writeback 写后回写
+- [x] 存储重构 — canonical state 架构 + rename_chapter 防覆盖
+- [x] Next.js Prompt 管理页面 — Block 编辑/版本/回滚/预览
 - [ ] 多角色语音 — 不同角色使用不同音色
 - [ ] 批量处理 — 支持文件夹批量转换
 - [ ] Agent 条件路由 — 根据内容自动选择最优生成策略

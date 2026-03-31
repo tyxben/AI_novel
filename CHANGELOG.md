@@ -1,5 +1,64 @@
 # 更新日志
 
+## [1.1.0] - 2026-04-01
+
+### 新增
+- **章节标题内联编辑** — 前端点击标题直接修改，无需进入编辑模式
+- **OpenAI GPT-5+ 兼容** — max_completion_tokens 参数适配 + 超时增至 600s
+- **存储重构** — rename_chapter 工具 + canonical state 架构，彻底解决内容覆盖问题
+- **两步写作流程** — "规划大纲"审核后再"确认写作"，前端两段式交互
+- **两段式章节编排** — dynamic_outline 写前修订 + state_writeback 写后回写
+- **Agent Chat 对话型助手** — 从工具执行器升级为讨论型助手，支持步数配置 + 智能截断
+- **大纲预检** — 生成章节前自动检查大纲完整性
+- **编排闭环** — 重写反馈回流 + PlotPlanner 连续性 + 风格检查去重
+
+### 修复
+- Agent Chat 重写章节后同步更新 chapter JSON（title/word_count）
+- Agent Chat 对话区溢出修复（Panel overflow-hidden + 高度缩小）
+- 章节标题从正文智能提取，不再显示"第N章"
+- 系统提示词加 JSON 关键词，修复 OpenAI json_mode 400 错误
+- ReAct fallback 降级到 one-shot 时传递 feedback_prompt + continuity_brief
+- Agent Chat 消息去重 + 角色快照真实抽取
+- 占位符大纲回填不再用正文覆盖 goal/key_events
+- 防御性修复：state.get("chapters") or [] 替代 state.get("chapters", [])，避免 None 值导致迭代异常
+
+### 变更
+- 版本号从 1.0.0 升级至 1.1.0
+- .gitignore 增加 frontend 构建产物（test-results/playwright-report/tsconfig.tsbuildinfo）
+
+---
+
+## [1.0.0] - 2026-03-26
+
+### 新增
+- **ReAct Agent 框架** — Writer 支持 ReAct 推理模式，工具链路可视化（类 Claude Code 风格）
+- **Prompt Registry** — DB 驱动的 Prompt 管理系统，支持版本控制 + 质量追踪 + 自动优化
+- **Next.js Prompt 管理页面** — Block 编辑/版本/回滚/预览，独立前端
+- **Agent Chat 会话持久化** — 自动恢复对话历史 + 工作记忆注入，多轮协作不再丢上下文
+- **叙事控制层 P0** — ObligationTracker 叙事债务追踪 + VolumeSettlement 卷末收束 + 弧线推进
+- **知识图谱可视化** — StoryUnit + 角色关系网络图谱
+- **LLM 债务兑现判定** — LLM 自动识别章节中哪些叙事线索已兑现
+- **Agent Chat 6 工具** — 章节生成/重写/大纲查看/角色查看/一致性检查/设定修改
+- **叙事控制 REST API** — 7 个端点供前端调用
+- **前端叙事 Tab** — 债务表格可视化 + 弧线时间线
+- **LLM 按阶段分模型** — 不同创作阶段可配置不同 LLM（如大纲用 GPT-4、写作用 DeepSeek）
+- **占位符大纲自动补全** — 缺失章节大纲自动回填
+
+### 修复
+- Tab 状态保持 + Agent 对话优化 + 任务并发支持
+- 叙事债务表格加 max-height 滚动，不再撑开页面
+- Writer 未接收 debt_summary 的关键 bug
+- NovelMemory 初始化 + DB 连接泄漏修复
+- 占位符大纲补全导致 ChapterOutline validation 失败
+- SiliconFlow 429 重试逻辑修复
+- AI 导演模式加载历史视频不显示的问题
+- 小说精修报告修改前后对比展示
+
+### 变更
+- 项目版本从 0.9.0 升级至 1.0.0，标志小说创作系统全功能成熟
+
+---
+
 ## [0.9.0] - 2026-03-16
 
 ### 新增

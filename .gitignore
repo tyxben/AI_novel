@@ -15,5 +15,9 @@ test_screenshots/
 tests/screenshots/
 .coverage
 input/web_*.txt
+.next/
 frontend/.next/
 frontend/node_modules/
+frontend/test-results/
+frontend/playwright-report/
+frontend/tsconfig.tsbuildinfo
