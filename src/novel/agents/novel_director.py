@@ -268,7 +268,7 @@ class NovelDirector:
         """
         current = state.get("current_chapter", 0)
         outline_data = state.get("outline")
-        chapters_done = state.get("chapters", [])
+        chapters_done = state.get("chapters") or []
 
         if not outline_data:
             return {"errors": [{"agent": "NovelDirector", "message": "大纲不存在，无法规划下一章"}]}

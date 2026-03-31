@@ -411,7 +411,7 @@ def dynamic_outline_node(state: dict) -> dict:
         }
 
     # --- Build inputs ---
-    chapters = state.get("chapters", [])
+    chapters = state.get("chapters") or []
     previous_summaries = _build_previous_summaries(chapters, count=2)
     continuity_brief = state.get("continuity_brief", "")
     debt_summary = state.get("debt_summary", "")

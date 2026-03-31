@@ -559,7 +559,7 @@ class NovelPipeline:
         # Initialize chapters_text from existing chapters in state
         if "chapters_text" not in state:
             state["chapters_text"] = {}
-            for ch in state.get("chapters", []):
+            for ch in state.get("chapters") or []:
                 ch_n = ch.get("chapter_number")
                 ch_t = ch.get("full_text", "")
                 if ch_n and ch_t:
@@ -650,7 +650,7 @@ class NovelPipeline:
                 )
                 continuity_brief = continuity_svc.generate_brief(
                     chapter_number=ch_num,
-                    chapters=state.get("chapters", []),
+                    chapters=state.get("chapters") or [],
                     chapter_brief=ch_outline.get("chapter_brief", {}),
                     story_arcs=state.get("story_arcs", []),
                     characters=state.get("characters", []),
@@ -834,7 +834,7 @@ class NovelPipeline:
         # Initialize chapters_text from existing chapters in state
         if "chapters_text" not in state:
             state["chapters_text"] = {}
-            for ch in state.get("chapters", []):
+            for ch in state.get("chapters") or []:
                 ch_n = ch.get("chapter_number")
                 ch_t = ch.get("full_text", "")
                 if ch_n and ch_t:
@@ -1008,7 +1008,7 @@ class NovelPipeline:
                 )
                 continuity_brief = continuity_svc.generate_brief(
                     chapter_number=ch_num,
-                    chapters=state.get("chapters", []),
+                    chapters=state.get("chapters") or [],
                     chapter_brief=ch_outline.get("chapter_brief", {}),
                     story_arcs=state.get("story_arcs", []),
                     characters=state.get("characters", []),
@@ -1058,7 +1058,7 @@ class NovelPipeline:
                 self._backfill_outline_entry(state, ch_num, chapter_text)
 
                 # Append to chapters list in state
-                chapters = state.get("chapters", [])
+                chapters = state.get("chapters") or []
                 chapters.append(ch_data)
                 state["chapters"] = chapters
 
@@ -1630,7 +1630,7 @@ class NovelPipeline:
         style_name = state.get("style_name", "webnovel.shuangwen")
 
         # Build chapter map for context
-        chapters_done = state.get("chapters", [])
+        chapters_done = state.get("chapters") or []
         chapter_texts: dict[int, str] = {}
         for ch_data in chapters_done:
             ch_num = ch_data.get("chapter_number")
@@ -1790,7 +1790,7 @@ class NovelPipeline:
                 chapter_texts[ch_num] = new_text  # update for subsequent chapters' context
 
                 # Also update state chapters list
-                for ch_data in state.get("chapters", []):
+                for ch_data in state.get("chapters") or []:
                     if ch_data.get("chapter_number") == ch_num:
                         ch_data["full_text"] = new_text
                         ch_data["word_count"] = len(new_text)

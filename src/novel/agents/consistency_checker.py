@@ -458,7 +458,7 @@ def _build_narrative_context(
     # -- Previous summary: last 2 chapters, 1000 chars each (enough to
     #    capture plot threads, missions, foreshadowing at chapter end) --
     previous_summary = ""
-    chapters_done = state.get("chapters", [])
+    chapters_done = state.get("chapters") or []
     if chapters_done:
         recent_chapters = chapters_done[-2:]
         summary_parts = []

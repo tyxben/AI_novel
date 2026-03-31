@@ -1415,7 +1415,7 @@ def writer_node(state: dict) -> dict:
 
     # 前文上下文：取最后一章的结尾部分（而非开头），确保悬念和转折传递给下一章
     context = ""
-    chapters_done = state.get("chapters", [])
+    chapters_done = state.get("chapters") or []
     if chapters_done:
         last_ch = chapters_done[-1]
         last_text = last_ch.get("full_text", "")
