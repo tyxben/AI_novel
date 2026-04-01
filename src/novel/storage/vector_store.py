@@ -153,6 +153,12 @@ class VectorStore:
 
     def close(self) -> None:
         """释放资源"""
+        if self._client is not None:
+            if hasattr(self._client, "close"):
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
         self._collection = None
         self._client = None
 

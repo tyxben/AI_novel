@@ -59,7 +59,12 @@ class OpenAIBackend(LLMClient):
             else:
                 kwargs["max_tokens"] = max_tokens
 
-        response = client.chat.completions.create(**kwargs)
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            # 统一包装 OpenAI SDK 异常 (APIError, RateLimitError, APITimeoutError, APIConnectionError 等)
+            raise RuntimeError(f"OpenAI API 调用失败: {exc}") from exc
+
         choice = response.choices[0]
         usage = None
         if response.usage:

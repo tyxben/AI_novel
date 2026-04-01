@@ -65,11 +65,14 @@ class GeminiBackend(LLMClient):
             system_instruction="\n".join(system_parts) if system_parts else None,
         )
 
-        response = client.models.generate_content(
-            model=self._model,
-            contents=contents,
-            config=gen_config,
-        )
+        try:
+            response = client.models.generate_content(
+                model=self._model,
+                contents=contents,
+                config=gen_config,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Gemini API 调用失败: {exc}") from exc
 
         # 安全获取文本（response.text 在内容被安全过滤时可能抛出 ValueError）
         text = ""

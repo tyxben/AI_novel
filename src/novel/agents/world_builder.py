@@ -95,13 +95,7 @@ class WorldBuilder:
         if not chapter_text or not chapter_text.strip():
             return True, []
 
-        # 检查 1: 专有名词一致性（检测是否出现定义中的关键词变体）
-        for term, definition in world_setting.terms.items():
-            # 如果正文中提到了该专有名词的定义内容但名称不同，可能是不一致
-            # 这里做简单的存在性检查
-            pass  # 基础版本不做变体检测，留给 ConsistencyChecker
-
-        # 检查 2: 世界规则违反
+        # 检查 1: 世界规则违反
         # 基于规则关键词的简单匹配
         text_lower = chapter_text.lower()
         for rule in world_setting.rules:
@@ -114,18 +108,6 @@ class WorldBuilder:
                         violations.append(
                             f"可能违反世界规则「{rule}」: 文本中出现了「{keyword}」"
                         )
-
-        # 检查 3: 力量体系一致性
-        if world_setting.power_system:
-            level_names = {
-                lv.name for lv in world_setting.power_system.levels
-            }
-            # 检查是否出现了不在力量体系中的境界名称
-            # 简单规则：如果文中提到了 "XX期" / "XX境" 但不在已定义列表中
-            for level in world_setting.power_system.levels:
-                for ability in level.typical_abilities:
-                    # 检查低等级能力是否出现在应该是高等级的上下文中
-                    pass  # 留给更复杂的检查
 
         is_consistent = len(violations) == 0
         return is_consistent, violations

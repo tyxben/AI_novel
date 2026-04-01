@@ -52,6 +52,12 @@ class BaseVideoBackend(VideoGenerator):
             self._client.close()
             self._client = None
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     def _poll_task(self, task_id: str) -> dict:
         """轮询任务状态直到完成或超时。
 
@@ -90,7 +96,7 @@ class BaseVideoBackend(VideoGenerator):
         )
 
     def _download_video(self, url: str, output_path: Path) -> Path:
-        """下载视频到本地文件。
+        """下载视频到本地文件，失败自动重试最多3次。
 
         Args:
             url: 视频下载 URL。
@@ -98,14 +104,32 @@ class BaseVideoBackend(VideoGenerator):
 
         Returns:
             保存后的文件路径。
+
+        Raises:
+            RuntimeError: 3次重试后仍然下载失败。
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         client = self._get_client()
-        resp = client.get(url)
-        resp.raise_for_status()
-        output_path.write_bytes(resp.content)
-        log.debug("视频已下载: %s (%d bytes)", output_path, len(resp.content))
-        return output_path
+        last_exc: Exception | None = None
+
+        for attempt in range(3):
+            try:
+                resp = client.get(url, timeout=300)
+                resp.raise_for_status()
+                output_path.write_bytes(resp.content)
+                log.debug("视频已下载: %s (%d bytes)", output_path, len(resp.content))
+                return output_path
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    delay = 2 ** attempt
+                    log.warning(
+                        "视频下载失败，%ds 后重试 (%d/3): %s",
+                        delay, attempt + 1, exc,
+                    )
+                    time.sleep(delay)
+
+        raise RuntimeError(f"视频下载失败 (3次重试): {last_exc}") from last_exc
 
     def generate(
         self, prompt: str, image_path: Path | None = None, duration: float = 5.0

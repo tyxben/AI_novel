@@ -19,7 +19,15 @@ class Checkpoint:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        content = json.dumps(self.data, ensure_ascii=False, indent=2)
+        # Atomic write: write to temp file then rename
+        tmp = self.path.with_suffix(".tmp")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(self.path)  # Atomic on POSIX
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def is_done(self, stage: str) -> bool:
         return self.data["stages"].get(stage, {}).get("done", False)

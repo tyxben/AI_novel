@@ -340,14 +340,24 @@ class PlotPlanner:
         response: LLMResponse = self.llm.chat(
             messages, temperature=0.7, json_mode=True
         )
+        if not response or not response.content:
+            raise ValueError("LLM 返回空响应")
 
         parsed = extract_json_from_llm(response.content)
         scenes_raw = parsed.get("scenes", [])
 
         if not isinstance(scenes_raw, list) or len(scenes_raw) == 0:
-            raise ValueError(
-                f"LLM 返回的场景列表为空或格式错误: {response.content[:200]}"
-            )
+            log.warning("场景解析失败，使用默认3场景结构")
+            scenes_raw = [
+                {
+                    "scene_number": i + 1,
+                    "title": f"场景{i + 1}",
+                    "summary": chapter_outline.goal or "推进剧情",
+                    "mood": chapter_outline.mood or "neutral",
+                    "target_words": effective_estimated_words // 3,
+                }
+                for i in range(3)
+            ]
 
         scenes = self._validate_scenes(
             scenes_raw, effective_estimated_words
@@ -429,6 +439,8 @@ class PlotPlanner:
         response: LLMResponse = self.llm.chat(
             messages, temperature=0.8, json_mode=True
         )
+        if not response or not response.content:
+            raise ValueError("LLM 返回空响应")
 
         parsed = extract_json_from_llm(response.content)
         cliffhanger = parsed.get("cliffhanger")

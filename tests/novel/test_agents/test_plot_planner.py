@@ -260,18 +260,25 @@ def test_decompose_chapter_with_foreshadowing():
 
 
 
-def test_decompose_chapter_empty_scenes_error():
-    """LLM 返回空场景列表时应抛出 ValueError。"""
+def test_decompose_chapter_empty_scenes_fallback():
+    """LLM 返回空场景列表时应回退到默认3场景结构。"""
     mock_llm = MagicMock(spec=LLMClient)
     mock_llm.chat.return_value = _make_llm_response('{"scenes": []}')
 
     planner = PlotPlanner(mock_llm)
-    with pytest.raises(ValueError, match="场景列表为空"):
-        planner.decompose_chapter(
-            chapter_outline=_make_chapter_outline(),
-            volume_context={},
-            characters=[],
-        )
+    scenes = planner.decompose_chapter(
+        chapter_outline=_make_chapter_outline(),
+        volume_context={},
+        characters=[],
+    )
+    assert len(scenes) == 3
+    assert scenes[0]["scene_number"] == 1
+    assert scenes[1]["scene_number"] == 2
+    assert scenes[2]["scene_number"] == 3
+    # Each fallback scene should have a title and target_words
+    for s in scenes:
+        assert "title" in s
+        assert s["target_words"] > 0
 
 
 

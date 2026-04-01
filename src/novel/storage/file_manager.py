@@ -25,7 +25,14 @@ class FileManager:
 
     def _novel_dir(self, novel_id: str) -> Path:
         """获取小说项目目录"""
+        if not novel_id or "/" in novel_id or "\\" in novel_id:
+            raise ValueError(f"Invalid novel_id: {novel_id}")
+        if novel_id.startswith("."):
+            raise ValueError(f"Invalid novel_id: {novel_id}")
         d = self.workspace_root / novel_id
+        # Prevent path traversal
+        if not d.resolve().is_relative_to(self.workspace_root.resolve()):
+            raise ValueError(f"novel_id escapes workspace: {novel_id}")
         d.mkdir(parents=True, exist_ok=True)
         return d
 

@@ -487,8 +487,6 @@ class StructuredDB:
                       fulfilled_at, fulfillment_note, character_pending,
                       emotional_debt, escalation_history
         """
-        from datetime import datetime, timezone
-
         status = kwargs.get("status", "pending")
         urgency_level = kwargs.get("urgency_level", "normal")
         target_chapter = kwargs.get("target_chapter")

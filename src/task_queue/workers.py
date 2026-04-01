@@ -1,12 +1,29 @@
 """Task workers — execute pipeline tasks in threads."""
 
 import json
+import logging
 import os
+import sqlite3
 import traceback
 from pathlib import Path
 
 from .models import TaskType, TaskStatus
 from .db import TaskDB
+
+log = logging.getLogger(__name__)
+
+_ALLOWED_ENV_KEYS = frozenset({
+    "GEMINI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
+    "SILICONFLOW_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "KLING_API_KEY",
+    "JIMENG_API_KEY",
+    "SEEDANCE_API_KEY",
+    "MINIMAX_API_KEY",
+    "TOGETHER_API_KEY",
+})
 
 
 class TaskCancelled(Exception):
@@ -18,6 +35,9 @@ def run_task(task_id: str, task_type: TaskType, params: dict, db: TaskDB):
     keys = params.pop("_keys", {})
     injected = []
     for k, v in keys.items():
+        if k not in _ALLOWED_ENV_KEYS:
+            log.warning("忽略非白名单环境变量: %s", k)
+            continue
         if v:
             os.environ[k] = v
             injected.append(k)
@@ -268,8 +288,8 @@ def _run_ppt_generate(params: dict, progress_cb) -> dict:
                 result["planning"] = planning_data
                 result["quality_report"] = quality_data
                 result["project_id"] = project_id
-    except Exception:
-        pass  # Non-critical: outline/extraction/quality are nice-to-have
+    except (KeyError, ValueError, TypeError, FileNotFoundError) as exc:
+        log.warning("PPT checkpoint 读取失败（非关键）: %s", exc)
 
     return result
 
@@ -365,9 +385,8 @@ def _run_ppt_continue(params: dict, progress_cb) -> dict:
                 slides,
                 output_path=str(pipeline.file_manager.get_html_path(project_id)),
             )
-    except Exception:
-        import logging
-        logging.getLogger("ppt").warning("HTML preview rendering failed", exc_info=True)
+    except Exception as exc:
+        log.warning("HTML preview rendering failed (non-critical): %s", exc, exc_info=True)
         html_path = None
 
     progress_cb(1.0, "PPT 生成完成！")
@@ -390,8 +409,8 @@ def _run_ppt_continue(params: dict, progress_cb) -> dict:
             result["outline"] = outline_data
             result["planning"] = planning_data
             result["quality_report"] = quality_data
-    except Exception:
-        pass
+    except (KeyError, ValueError, TypeError, FileNotFoundError) as exc:
+        log.warning("PPT continue checkpoint 读取失败（非关键）: %s", exc)
 
     return result
 
@@ -582,8 +601,8 @@ def _run_novel_agent_chat(params: dict, progress_cb) -> dict:
     if structured_db is not None:
         try:
             structured_db.close()
-        except Exception:
-            pass
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("StructuredDB 关闭失败: %s", exc)
 
     progress_cb(1.0, "Agent 完成")
     return result
@@ -604,8 +623,8 @@ def _run_novel_narrative_rebuild(params: dict, progress_cb) -> dict:
         from src.llm.llm_client import create_llm_client
 
         llm = create_llm_client({})
-    except Exception:
-        pass  # Rule-based only if LLM unavailable
+    except (ImportError, OSError, ValueError, RuntimeError) as exc:
+        log.warning("LLM 客户端创建失败，将仅使用规则模式: %s", exc)
 
     progress_cb(0.1, "扫描章节...")
 

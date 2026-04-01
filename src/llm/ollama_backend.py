@@ -42,7 +42,11 @@ class OllamaBackend(LLMClient):
         if json_mode:
             kwargs["format"] = "json"
 
-        response = client.chat(**kwargs)
+        try:
+            response = client.chat(**kwargs)
+        except Exception as exc:
+            raise RuntimeError(f"Ollama API 调用失败: {exc}") from exc
+
         content = response.get("message", {}).get("content", "")
 
         usage = None

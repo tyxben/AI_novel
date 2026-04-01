@@ -191,9 +191,13 @@ class _SequentialRunner:
             log.info("执行节点: %s (fallback)", name)
             try:
                 result = node_fn(current_state)
+                # Ensure completed_nodes is set on success even if node forgot
+                if "completed_nodes" not in result:
+                    result["completed_nodes"] = [name]
                 current_state = _merge_state(current_state, result)
             except Exception as exc:
                 log.error("节点 %s 执行失败: %s", name, exc)
+                # Do NOT add to completed_nodes on failure — only record the error
                 current_state = _merge_state(
                     current_state,
                     {
@@ -257,9 +261,13 @@ class _ChapterRunner:
         node_fn = self.nodes[name]
         try:
             result = node_fn(state)
+            # Ensure completed_nodes is set on success even if node forgot
+            if "completed_nodes" not in result:
+                result["completed_nodes"] = [name]
             return _merge_state(state, result)
         except Exception as exc:
             log.error("节点 %s 执行失败: %s", name, exc)
+            # Do NOT add to completed_nodes on failure — only record the error
             return _merge_state(
                 state,
                 {

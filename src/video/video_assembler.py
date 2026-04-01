@@ -128,6 +128,22 @@ class VideoAssembler:
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
+    # Context manager & cleanup
+    # ------------------------------------------------------------------
+
+    def cleanup(self):
+        """Remove temporary video files."""
+        import shutil
+        if self.tmp_dir.exists():
+            shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.cleanup()
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -248,7 +264,12 @@ class VideoAssembler:
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, check=True,
+                timeout=30,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"ffprobe 超时 (30s): {audio_path}"
+            ) from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"ffprobe 执行失败 (exit code {exc.returncode}): {audio_path}\n"
@@ -633,9 +654,14 @@ class VideoAssembler:
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, check=True,
+                timeout=30,
             )
             info = json.loads(result.stdout)
             return float(info["format"]["duration"])
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"ffprobe 超时 (30s): {video_path}"
+            ) from exc
         except (subprocess.CalledProcessError, json.JSONDecodeError,
                 KeyError, ValueError) as exc:
             raise RuntimeError(
@@ -854,7 +880,8 @@ class VideoAssembler:
         with open(concat_list, "w", encoding="utf-8") as f:
             for clip in clips:
                 # concat demuxer 需要绝对路径
-                f.write(f"file '{clip.resolve()}'\n")
+                safe_path = str(clip.resolve()).replace("'", "'\\''")
+                f.write(f"file '{safe_path}'\n")
 
         cmd = [
             "ffmpeg", "-y",
@@ -1068,10 +1095,16 @@ class VideoAssembler:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=600,
             )
             if result.stderr:
                 # FFmpeg 正常输出也会写到 stderr
                 log.debug("FFmpeg stderr [%s]: %s", description, result.stderr[-500:])
+        except subprocess.TimeoutExpired:
+            log.error("FFmpeg 超时 [%s] (600s)", description)
+            raise RuntimeError(
+                f"FFmpeg 操作超时 (600s): {description}"
+            )
         except subprocess.CalledProcessError as exc:
             log.error(
                 "FFmpeg 失败 [%s] (exit code %d)\nstderr: %s",

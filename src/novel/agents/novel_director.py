@@ -731,6 +731,8 @@ class NovelDirector:
                 json_mode=True,
                 max_tokens=1024,
             )
+            if not response or not response.content:
+                raise ValueError("LLM 返回空响应")
             arc_data = _extract_json_obj(response.content)
         except Exception as exc:
             log.warning("弧线%d LLM 生成失败: %s，使用占位结构", arc_number, exc)

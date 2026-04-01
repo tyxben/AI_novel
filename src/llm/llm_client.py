@@ -51,15 +51,15 @@ def _detect_provider() -> tuple[str, dict]:
         (provider_name, extra_config) 元组。
     """
     if os.environ.get("GEMINI_API_KEY"):
-        log.info("自动检测 LLM: 发现 GEMINI_API_KEY → gemini")
+        log.info("自动检测 LLM: 使用 gemini provider")
         return "gemini", {}
 
     if os.environ.get("DEEPSEEK_API_KEY"):
-        log.info("自动检测 LLM: 发现 DEEPSEEK_API_KEY → deepseek")
+        log.info("自动检测 LLM: 使用 deepseek provider")
         return "deepseek", {}
 
     if os.environ.get("OPENAI_API_KEY"):
-        log.info("自动检测 LLM: 发现 OPENAI_API_KEY → openai")
+        log.info("自动检测 LLM: 使用 openai provider")
         return "openai", {}
 
     # 检测本地 Ollama（使用 stdlib 避免额外依赖）
@@ -69,7 +69,7 @@ def _detect_provider() -> tuple[str, dict]:
         req = urllib.request.Request("http://localhost:11434/api/tags")
         with urllib.request.urlopen(req, timeout=2) as resp:
             if resp.status == 200:
-                log.info("自动检测 LLM: 发现本地 Ollama 服务 → ollama")
+                log.info("自动检测 LLM: 使用 ollama provider")
                 return "ollama", {}
     except Exception:
         log.debug("Ollama 服务未响应，跳过")

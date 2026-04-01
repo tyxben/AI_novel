@@ -3,6 +3,7 @@
 import io
 import logging
 import os
+import time
 
 from PIL import Image
 
@@ -44,47 +45,88 @@ class DashScopeBackend(ImageGenerator):
             self._client.close()
             self._client = None
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     def __del__(self):
         self.close()
 
+    _MAX_RETRIES = 3
+
     def generate(self, prompt: str) -> Image.Image:
-        """调用 DashScope API 生成图片。"""
+        """调用 DashScope API 生成图片，遇到限流/服务器错误/网络错误自动重试。"""
+        import httpx
+
         client = self._get_client()
+        last_exc: Exception | None = None
 
-        resp = client.post(
-            self.API_URL,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self._model,
-                "input": {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [{"text": prompt}],
-                        }
-                    ]
-                },
-                "parameters": {
-                    "size": self._size,
-                    "n": 1,
-                    "prompt_extend": True,
-                    "watermark": False,
-                },
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                resp = client.post(
+                    self.API_URL,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self._model,
+                        "input": {
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": [{"text": prompt}],
+                                }
+                            ]
+                        },
+                        "parameters": {
+                            "size": self._size,
+                            "n": 1,
+                            "prompt_extend": True,
+                            "watermark": False,
+                        },
+                    },
+                )
+            except httpx.RequestError as exc:
+                last_exc = exc
+                delay = 2 ** attempt
+                log.warning(
+                    "DashScope 网络错误，%ds 后重试 (%d/%d): %s",
+                    delay, attempt + 1, self._MAX_RETRIES, exc,
+                )
+                time.sleep(delay)
+                continue
 
-        # 从响应中提取图片 URL
-        image_url = data["output"]["choices"][0]["message"]["content"][0]["image"]
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_exc = httpx.HTTPStatusError(
+                    f"HTTP {resp.status_code}",
+                    request=resp.request,
+                    response=resp,
+                )
+                delay = 2 ** attempt
+                log.warning(
+                    "DashScope HTTP %d，%ds 后重试 (%d/%d)",
+                    resp.status_code, delay, attempt + 1, self._MAX_RETRIES,
+                )
+                time.sleep(delay)
+                continue
 
-        # 下载图片（URL 24小时有效）
-        img_resp = client.get(image_url)
-        img_resp.raise_for_status()
-        image = Image.open(io.BytesIO(img_resp.content))
+            resp.raise_for_status()
+            data = resp.json()
 
-        log.debug("DashScope 生成图片: %dx%d", image.width, image.height)
-        return image
+            # 从响应中提取图片 URL
+            image_url = data["output"]["choices"][0]["message"]["content"][0]["image"]
+
+            # 下载图片（URL 24小时有效）
+            img_resp = client.get(image_url)
+            img_resp.raise_for_status()
+            image = Image.open(io.BytesIO(img_resp.content))
+
+            log.debug("DashScope 生成图片: %dx%d", image.width, image.height)
+            return image
+
+        raise RuntimeError(
+            f"DashScope 图片生成失败 ({self._MAX_RETRIES}次重试): {last_exc}"
+        ) from last_exc

@@ -334,6 +334,8 @@ class DynamicOutlinePlanner:
         response: LLMResponse = self.llm.chat(
             messages, temperature=0.4, json_mode=True, max_tokens=4096
         )
+        if not response or not response.content:
+            raise ValueError("LLM 返回空响应")
 
         parsed = extract_json_from_llm(response.content)
 

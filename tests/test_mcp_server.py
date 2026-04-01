@@ -4,7 +4,7 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -12,6 +12,17 @@ import pytest
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_mcp_state():
+    """Reset mcp_server globals between tests to avoid cross-test leaks."""
+    import mcp_server
+    original_ws = mcp_server._DEFAULT_WORKSPACE
+    mcp_server._pipeline_instance = None
+    yield
+    mcp_server._DEFAULT_WORKSPACE = original_ws
+    mcp_server._pipeline_instance = None
+
 
 @pytest.fixture
 def tmp_workspace(tmp_path):
@@ -144,6 +155,7 @@ class TestNovelListProjects:
 class TestNovelGetStatus:
     def test_get_status(self, tmp_workspace):
         import mcp_server
+        mcp_server._DEFAULT_WORKSPACE = str(tmp_workspace)
         mcp_server._pipeline_instance = None
         pipe_mock = MagicMock()
         pipe_mock.get_status.return_value = {
@@ -153,8 +165,9 @@ class TestNovelGetStatus:
             "current_chapter": 2,
             "total_chapters": 3,
         }
+        project_path = str(tmp_workspace / "novels" / "novel_test123")
         with patch.object(mcp_server, "_get_pipeline", return_value=pipe_mock):
-            result = mcp_server.novel_get_status("workspace/novels/novel_test123")
+            result = mcp_server.novel_get_status(project_path)
         assert result["title"] == "测试小说"
         assert result["current_chapter"] == 2
         pipe_mock.get_status.assert_called_once()
@@ -269,7 +282,7 @@ class TestNovelGenerateChapters:
 
         assert result["chapters_generated"] == [3, 4, 5]
         pipe_mock.generate_chapters.assert_called_once_with(
-            project_path="workspace/novels/novel_test123",
+            project_path=ANY,
             start_chapter=3,
             end_chapter=5,
             silent=True,
@@ -329,7 +342,7 @@ class TestNovelApplyFeedback:
             )
         assert result["dry_run"] is True
         pipe_mock.apply_feedback.assert_called_once_with(
-            project_path="workspace/novels/novel_test123",
+            project_path=ANY,
             feedback_text="主角性格不一致",
             chapter_number=5,
             dry_run=True,

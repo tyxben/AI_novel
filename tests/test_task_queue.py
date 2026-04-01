@@ -267,41 +267,51 @@ class TestWorkers:
         from src.task_queue.workers import run_task
         import os
 
-        env_key = "TEST_FAKE_KEY_CLEANUP"
-        task = db.create_task(TaskType.novel_create, {
-            "genre": "玄幻", "theme": "修仙",
-            "_keys": {env_key: "secret_val"},
-        })
+        env_key = "SILICONFLOW_API_KEY"  # Must be in _ALLOWED_ENV_KEYS whitelist
+        old_val = os.environ.pop(env_key, None)
+        try:
+            task = db.create_task(TaskType.novel_create, {
+                "genre": "玄幻", "theme": "修仙",
+                "_keys": {env_key: "secret_val"},
+            })
 
-        captured = {}
+            captured = {}
 
-        def mock_create(params, progress_cb):
-            captured["key"] = os.environ.get(env_key)
-            return {}
+            def mock_create(params, progress_cb):
+                captured["key"] = os.environ.get(env_key)
+                return {}
 
-        with patch("src.task_queue.workers._run_novel_create", side_effect=mock_create):
-            run_task(task.task_id, task.task_type, task.params.copy(), db)
+            with patch("src.task_queue.workers._run_novel_create", side_effect=mock_create):
+                run_task(task.task_id, task.task_type, task.params.copy(), db)
 
-        # Key was available during execution
-        assert captured["key"] == "secret_val"
-        # Key is cleaned up after execution
-        assert os.environ.get(env_key) is None
+            # Key was available during execution
+            assert captured["key"] == "secret_val"
+            # Key is cleaned up after execution
+            assert os.environ.get(env_key) is None
+        finally:
+            if old_val is not None:
+                os.environ[env_key] = old_val
 
     def test_keys_cleaned_up_on_failure(self, db):
         from src.task_queue.workers import run_task
         import os
 
-        env_key = "TEST_FAKE_KEY_FAIL"
-        task = db.create_task(TaskType.novel_create, {
-            "genre": "玄幻", "theme": "修仙",
-            "_keys": {env_key: "fail_val"},
-        })
+        env_key = "SILICONFLOW_API_KEY"  # Must be in _ALLOWED_ENV_KEYS whitelist
+        old_val = os.environ.pop(env_key, None)
+        try:
+            task = db.create_task(TaskType.novel_create, {
+                "genre": "玄幻", "theme": "修仙",
+                "_keys": {env_key: "fail_val"},
+            })
 
-        with patch("src.task_queue.workers._run_novel_create", side_effect=RuntimeError("boom")):
-            run_task(task.task_id, task.task_type, task.params.copy(), db)
+            with patch("src.task_queue.workers._run_novel_create", side_effect=RuntimeError("boom")):
+                run_task(task.task_id, task.task_type, task.params.copy(), db)
 
-        assert db.get_task(task.task_id).status == TaskStatus.failed
-        assert os.environ.get(env_key) is None
+            assert db.get_task(task.task_id).status == TaskStatus.failed
+            assert os.environ.get(env_key) is None
+        finally:
+            if old_val is not None:
+                os.environ[env_key] = old_val
 
     def test_cancel_via_progress_callback(self, db):
         from src.task_queue.workers import run_task

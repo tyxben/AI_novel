@@ -184,6 +184,8 @@ class Writer:
         Returns:
             完整的文本（可能经过多次续写拼接）
         """
+        if not response or not response.content:
+            raise ValueError("LLM 返回空响应")
         text = response.content.strip()
 
         if response.finish_reason != "length":
@@ -213,6 +215,8 @@ class Writer:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            if not cont_response or not cont_response.content:
+                break
             continuation = cont_response.content.strip()
 
             if not continuation:
@@ -732,6 +736,8 @@ class Writer:
         ]
 
         response = self.llm.chat(messages, temperature=0.85)
+        if not response or not response.content:
+            raise ValueError("LLM 返回空响应")
         rewritten_text = response.content.strip()
 
         return Scene(
@@ -903,6 +909,8 @@ class Writer:
         ]
 
         response = self.llm.chat(messages, temperature=0.3, max_tokens=2048)
+        if not response or not response.content:
+            raise ValueError("LLM 返回空响应")
         return response.content.strip()
 
     def polish_chapter(

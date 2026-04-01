@@ -32,6 +32,22 @@ def _get_pipeline():
 
 
 # ---------------------------------------------------------------------------
+# Security helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_project_path(project_path: str) -> Path:
+    """Validate project_path is within workspace, prevent path traversal."""
+    ws = Path(_DEFAULT_WORKSPACE).resolve()
+    proj = Path(project_path).resolve()
+    try:
+        proj.relative_to(ws)
+    except ValueError:
+        raise ValueError(f"路径不在工作空间内: {project_path}")
+    return proj
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
@@ -144,9 +160,10 @@ def novel_generate_chapters(
         Generation summary with chapters_generated list and error info.
     """
     try:
+        validated = _validate_project_path(project_path)
         pipe = _get_pipeline()
         fm = pipe._get_file_manager()
-        novel_id = Path(project_path).name
+        novel_id = validated.name
 
         # Determine start chapter from existing chapters
         completed = fm.list_chapters(novel_id)
@@ -195,8 +212,9 @@ def novel_get_status(project_path: str) -> dict[str, Any]:
         Status dict with title, current/total chapters, word counts, etc.
     """
     try:
+        validated = _validate_project_path(project_path)
         pipe = _get_pipeline()
-        return pipe.get_status(project_path)
+        return pipe.get_status(str(validated))
     except Exception as e:
         return {"error": str(e)}
 
@@ -216,9 +234,10 @@ def novel_read_chapter(
         Dict with chapter_number, title, text, and word_count.
     """
     try:
+        validated = _validate_project_path(project_path)
         pipe = _get_pipeline()
         fm = pipe._get_file_manager()
-        novel_id = Path(project_path).name
+        novel_id = validated.name
 
         text = fm.load_chapter_text(novel_id, chapter_number)
         metadata = fm.load_chapter(novel_id, chapter_number)
@@ -261,9 +280,10 @@ def novel_apply_feedback(
         Dict with analysis results and list of rewritten chapters.
     """
     try:
+        validated = _validate_project_path(project_path)
         pipe = _get_pipeline()
         return pipe.apply_feedback(
-            project_path=project_path,
+            project_path=str(validated),
             feedback_text=feedback_text,
             chapter_number=chapter_number,
             dry_run=dry_run,
@@ -283,8 +303,9 @@ def novel_export(project_path: str) -> dict[str, Any]:
         Dict with the output file path.
     """
     try:
+        validated = _validate_project_path(project_path)
         pipe = _get_pipeline()
-        output_path = pipe.export_novel(project_path)
+        output_path = pipe.export_novel(str(validated))
         return {"output_path": output_path}
     except Exception as e:
         return {"error": str(e)}
@@ -335,14 +356,15 @@ def novel_edit_setting(
         Dict with change_id, status, change_type, entity_type, and details.
     """
     try:
+        validated = _validate_project_path(project_path)
         from dataclasses import asdict
 
         from src.novel.services.edit_service import NovelEditService
 
-        workspace = _infer_workspace(project_path)
+        workspace = _infer_workspace(str(validated))
         service = NovelEditService(workspace=workspace)
         result = service.edit(
-            project_path=project_path,
+            project_path=str(validated),
             instruction=instruction,
             effective_from_chapter=effective_from_chapter,
             dry_run=dry_run,
@@ -368,12 +390,13 @@ def novel_get_change_history(
         Dict with changes list and total count.
     """
     try:
+        validated = _validate_project_path(project_path)
         from src.novel.services.edit_service import NovelEditService
 
-        workspace = _infer_workspace(project_path)
+        workspace = _infer_workspace(str(validated))
         service = NovelEditService(workspace=workspace)
         limit = max(1, min(limit, 100))
-        changes = service.get_history(project_path=project_path, limit=limit)
+        changes = service.get_history(project_path=str(validated), limit=limit)
         return {"changes": changes, "total": len(changes)}
     except Exception as e:
         return {"status": "failed", "error": str(e)}
@@ -473,8 +496,9 @@ def ppt_get_status(project_path: str) -> dict[str, Any]:
         Project status information.
     """
     try:
+        validated = _validate_project_path(project_path)
         pipe = _get_ppt_pipeline()
-        return pipe.get_status(project_path=project_path)
+        return pipe.get_status(project_path=str(validated))
     except Exception as e:
         return {"error": str(e)}
 
@@ -801,7 +825,10 @@ def video_list_projects() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import os as _os
     import sys
+
+    _host = _os.environ.get("MCP_HOST", "127.0.0.1")
 
     transport = "stdio"
     for arg in sys.argv[1:]:
@@ -813,8 +840,8 @@ if __name__ == "__main__":
             break
 
     if transport == "streamable-http":
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=8000)
+        mcp.run(transport="streamable-http", host=_host, port=8000)
     elif transport == "sse":
-        mcp.run(transport="sse", host="0.0.0.0", port=8000)
+        mcp.run(transport="sse", host=_host, port=8000)
     else:
         mcp.run(transport="stdio")

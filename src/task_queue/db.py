@@ -51,6 +51,7 @@ class TaskDB:
         conn = self._connect()
         try:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA wal_autocheckpoint=1000")
             conn.execute(_CREATE_TABLE)
             # Recover orphaned running tasks from prior crash
             conn.execute(
@@ -137,11 +138,17 @@ class TaskDB:
             conn.close()
 
     def update_progress(self, task_id: str, progress: float, msg: str = "") -> None:
-        """Update progress value and message."""
+        """Update progress value and message.
+
+        Skips the update if the task has already reached a terminal status
+        (completed, failed, cancelled) to prevent late callbacks from
+        overwriting final state.
+        """
         conn = self._connect()
         try:
             conn.execute(
-                "UPDATE tasks SET progress = ?, progress_msg = ? WHERE task_id = ?",
+                "UPDATE tasks SET progress = ?, progress_msg = ? "
+                "WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
                 (progress, msg, task_id),
             )
             conn.commit()

@@ -48,6 +48,12 @@ class SiliconFlowBackend(ImageGenerator):
             self._client.close()
             self._client = None
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     def __del__(self):
         self.close()
 

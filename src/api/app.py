@@ -10,7 +10,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
-# Load .env file (same as web.py / Gradio frontend)
+# Load .env file for API keys
 try:
     from dotenv import load_dotenv
     load_dotenv()
