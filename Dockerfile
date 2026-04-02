@@ -23,6 +23,7 @@ VOLUME /app/workspace
 
 EXPOSE 8000
 
+ENV API_HOST=0.0.0.0
 CMD ["python", "-m", "src.api.app"]
 
 
@@ -38,6 +39,7 @@ FROM node:20-alpine AS frontend-build
 WORKDIR /app
 COPY --from=frontend-deps /app/node_modules ./node_modules
 COPY frontend/ .
+RUN mkdir -p public
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
