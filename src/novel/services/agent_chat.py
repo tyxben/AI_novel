@@ -208,15 +208,34 @@ class AgentToolExecutor:
         self._project_path = str(Path(workspace) / "novels" / novel_id)
 
     def execute(self, tool_name: str, args: dict) -> dict:
-        """Execute a tool and return the result dict."""
+        """Execute a tool and return the result dict.
+
+        Retries once on transient errors (network, API failures).
+        """
         method = getattr(self, f"_tool_{tool_name}", None)
         if not method:
             return {"error": f"Unknown tool: {tool_name}"}
-        try:
-            return method(**args)
-        except Exception as e:
-            log.exception("Tool %s failed", tool_name)
-            return {"error": str(e)}
+
+        last_err = None
+        for attempt in range(2):  # 1 retry
+            try:
+                return method(**args)
+            except Exception as e:
+                last_err = e
+                err_msg = str(e).lower()
+                is_transient = any(k in err_msg for k in (
+                    "connection", "timeout", "rate", "503", "502", "429",
+                    "network", "reset", "refused",
+                ))
+                if attempt == 0 and is_transient:
+                    import time
+                    log.warning("Tool %s transient error, retrying: %s", tool_name, e)
+                    time.sleep(2)
+                    continue
+                log.exception("Tool %s failed", tool_name)
+                return {"error": str(e)}
+        log.exception("Tool %s failed after retry", tool_name)
+        return {"error": str(last_err)}
 
     def _tool_read_chapter(self, chapter_number: int) -> dict:
         from src.novel.storage.file_manager import FileManager
@@ -1269,22 +1288,33 @@ def run_agent_chat(
         # Synthesize a reply from the last tool results instead of a generic message.
         last_steps = conversation_log[-3:]
         summary_parts = []
+        has_errors = False
         for s in last_steps:
             tool = s.get("tool", "")
             result = s.get("result", {})
             if isinstance(result, dict):
-                # Extract key info from tool results
                 if result.get("error"):
-                    summary_parts.append(f"- {tool}: 出错 — {result['error']}")
+                    has_errors = True
+                    summary_parts.append(f"- {tool}: 失败 — {result['error'][:200]}")
                 elif tool == "read_chapter":
                     summary_parts.append(f"- 已读取第{result.get('chapter_number', '?')}章 ({result.get('word_count', '?')}字)")
+                elif tool == "rewrite_chapter":
+                    chs = result.get("chapters_rewritten", [])
+                    summary_parts.append(f"- 已重写章节: {chs}" if chs else "- 重写完成")
+                elif tool == "generate_chapters":
+                    chs = result.get("chapters_generated", [])
+                    summary_parts.append(f"- 已生成章节: {chs}" if chs else "- 生成完成")
+                elif tool == "edit_setting":
+                    summary_parts.append(f"- 已修改设定: {result.get('change_type', '?')} ({result.get('entity_type', '?')})")
                 elif tool == "get_narrative_debts":
                     stats = result.get("statistics", {})
                     summary_parts.append(f"- 叙事债务: {stats.get('pending_count', 0)}个待处理, {stats.get('overdue_count', 0)}个逾期")
                 else:
                     summary_parts.append(f"- {tool}: 已执行")
         if summary_parts:
-            final_reply = "执行了以下操作但未完成完整分析（达到步骤上限）：\n" + "\n".join(summary_parts) + "\n\n请再发一条消息让我继续分析。"
+            header = "执行了以下操作但未完成完整分析（达到步骤上限）：\n"
+            footer = "\n\n如有失败操作，可能是网络波动，请再试一次。" if has_errors else "\n\n请再发一条消息让我继续分析。"
+            final_reply = header + "\n".join(summary_parts) + footer
         else:
             final_reply = "操作未完成，请再试一次或换个方式描述你的需求。"
 
