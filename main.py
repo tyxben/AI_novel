@@ -671,5 +671,100 @@ def create_video(inspiration, duration, budget, config_path, workspace):
             raise click.Abort()
 
 
+@cli.command()
+@click.option("--api-port", type=int, default=8000, help="后端 API 端口")
+@click.option("--frontend-port", type=int, default=3000, help="前端端口")
+@click.option("--no-frontend", is_flag=True, help="仅启动后端 API")
+def serve(api_port: int, frontend_port: int, no_frontend: bool):
+    """一键启动 Web 服务（后端 API + Next.js 前端）"""
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    project_root = Path(__file__).parent
+    frontend_dir = project_root / "frontend"
+    procs: list[subprocess.Popen] = []
+
+    def _cleanup(sig=None, frame=None):
+        console.print("\n[yellow]正在停止服务...[/yellow]")
+        for p in procs:
+            try:
+                p.terminate()
+                p.wait(timeout=5)
+            except Exception:
+                p.kill()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
+
+    # Kill stale processes on target ports
+    for port in ([api_port] if no_frontend else [api_port, frontend_port]):
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"], capture_output=True, text=True
+            )
+            if result.stdout.strip():
+                for pid in result.stdout.strip().split("\n"):
+                    os.kill(int(pid), signal.SIGTERM)
+                time.sleep(0.5)
+        except Exception:
+            pass
+
+    # Start backend API
+    console.print(f"[bold blue]🚀 启动后端 API (port {api_port})...[/bold blue]")
+    env = {**os.environ, "API_PORT": str(api_port)}
+    api_proc = subprocess.Popen(
+        [sys.executable, "-m", "src.api.app"],
+        cwd=str(project_root),
+        env=env,
+    )
+    procs.append(api_proc)
+
+    # Start frontend
+    if not no_frontend:
+        if not frontend_dir.exists():
+            console.print("[red]❌ frontend/ 目录不存在[/red]")
+            _cleanup()
+
+        node_modules = frontend_dir / "node_modules"
+        if not node_modules.exists():
+            console.print("[yellow]📦 安装前端依赖...[/yellow]")
+            subprocess.run(["npm", "install"], cwd=str(frontend_dir), check=True)
+
+        console.print(f"[bold blue]🚀 启动前端 (port {frontend_port})...[/bold blue]")
+        fe_env = {**os.environ, "PORT": str(frontend_port)}
+        fe_proc = subprocess.Popen(
+            ["npm", "run", "dev"],
+            cwd=str(frontend_dir),
+            env=fe_env,
+        )
+        procs.append(fe_proc)
+
+    time.sleep(2)
+
+    console.print()
+    console.print("[bold green]✅ 服务已启动[/bold green]")
+    console.print(f"   后端 API:  http://localhost:{api_port}")
+    if not no_frontend:
+        console.print(f"   前端页面:  http://localhost:{frontend_port}")
+    console.print("   按 Ctrl+C 停止所有服务")
+    console.print()
+
+    # Wait for any process to exit
+    try:
+        while True:
+            for p in procs:
+                ret = p.poll()
+                if ret is not None:
+                    console.print(f"[red]服务进程退出 (PID {p.pid}, code {ret})[/red]")
+                    _cleanup()
+            time.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+
+
 if __name__ == "__main__":
     cli()
