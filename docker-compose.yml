@@ -1,0 +1,50 @@
+services:
+  api:
+    build:
+      context: .
+      target: backend
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./workspace:/app/workspace
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      target: frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=${API_URL:-http://localhost:8000}
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  mcp:
+    build:
+      context: .
+      target: backend
+    command: python mcp_server.py --transport streamable-http
+    ports:
+      - "${MCP_PORT:-8080}:8000"
+    env_file:
+      - .env
+    environment:
+      - MCP_HOST=0.0.0.0
+    volumes:
+      - ./workspace:/app/workspace
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    profiles:
+      - mcp
