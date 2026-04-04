@@ -557,14 +557,24 @@ class NovelPipeline:
             else:
                 state["main_storyline"] = {}
 
-        # Initialize chapters_text from existing chapters in state
+        # Initialize chapters_text from existing chapters on disk
         if "chapters_text" not in state:
             state["chapters_text"] = {}
-            for ch in state.get("chapters") or []:
-                ch_n = ch.get("chapter_number")
-                ch_t = ch.get("full_text", "")
-                if ch_n and ch_t:
-                    state["chapters_text"][ch_n] = ch_t
+        chapters_text = state["chapters_text"]
+        if not chapters_text:
+            from src.novel.storage.file_manager import FileManager as _FM
+            fm_load = _FM(self.workspace)
+            existing_nums = fm_load.list_chapters(novel_id)
+            for ch_n in existing_nums:
+                if ch_n not in chapters_text:
+                    try:
+                        chapters_dir = fm_load._chapters_dir(novel_id)
+                        txt_path = chapters_dir / f"chapter_{ch_n:03d}.txt"
+                        if txt_path.exists():
+                            chapters_text[ch_n] = txt_path.read_text(encoding="utf-8")
+                    except Exception:
+                        pass
+            state["chapters_text"] = chapters_text
 
         # Initialize NovelMemory (for continuity service + obligation tracker)
         try:
@@ -605,6 +615,9 @@ class NovelPipeline:
         except Exception:
             pass
 
+        # Track events planned in this batch to prevent repetition
+        batch_planned_events = []
+
         for ch_num in range(start_chapter, end_chapter + 1):
             if progress_callback:
                 total_in_batch = end_chapter - start_chapter + 1
@@ -621,6 +634,7 @@ class NovelPipeline:
             # Fill placeholder if needed
             if self._is_placeholder_outline(ch_outline):
                 log.info("第%d章大纲为占位符，补全中...", ch_num)
+                state["_batch_planned_context"] = batch_planned_events
                 ch_outline = self._fill_placeholder_outline(state, ch_outline, ch_num)
                 for i, existing_ch in enumerate(outline.get("chapters", [])):
                     if existing_ch.get("chapter_number") == ch_num:
@@ -681,6 +695,11 @@ class NovelPipeline:
                         break
             except Exception as exc:
                 log.warning("第%d章动态大纲修订失败: %s", ch_num, exc)
+
+            # Track this chapter's planned events for dedup in next iteration
+            batch_planned_events.append(
+                f"第{ch_num}章「{ch_outline.get('title', '')}」: {ch_outline.get('goal', '')}"
+            )
 
             # Build planned chapter entry
             planned_entry = {
@@ -1062,6 +1081,19 @@ class NovelPipeline:
 
                 # Backfill outline for placeholder chapters
                 self._backfill_outline_entry(state, ch_num, chapter_text)
+
+                # Backfill actual_summary to outline for future planning
+                try:
+                    actual_summary = self._generate_actual_summary(
+                        chapter_text, ch_num, ch_title, state=state
+                    )
+                    if actual_summary:
+                        for i, och in enumerate(outline.get("chapters", [])):
+                            if och.get("chapter_number") == ch_num:
+                                outline["chapters"][i]["actual_summary"] = actual_summary
+                                break
+                except Exception as exc:
+                    log.warning("第%d章实际摘要生成失败: %s", ch_num, exc)
 
                 # Append to chapters list in state (deduplicate on resume)
                 chapters = state.get("chapters") or []
@@ -2279,15 +2311,51 @@ class NovelPipeline:
         main_storyline = outline_data.get("main_storyline", {}) or state.get("main_storyline", {})
         total_chapters = len(outline_data.get("chapters", []))
 
-        # Gather previous chapter summaries for context
+        # Gather previous chapter context — prefer actual text over outline goals
         prev_summaries = []
+        novel_id = state.get("novel_id")
+        fm = None
+        if novel_id:
+            try:
+                from src.novel.storage.file_manager import FileManager
+                ws = state.get("workspace") or getattr(self, "workspace", None)
+                if ws:
+                    fm = FileManager(ws)
+            except Exception:
+                fm = None
+
         for ch in outline_data.get("chapters", []):
-            if ch.get("chapter_number", 0) < ch_num and ch.get("goal") != "待规划":
+            ch_n = ch.get("chapter_number", 0)
+            if ch_n >= ch_num or (ch.get("goal", "") == "待规划" and ch_n < ch_num):
+                continue
+
+            # Try to load actual chapter text for recent chapters (last 5)
+            if fm and novel_id and ch_n >= ch_num - 5:
+                try:
+                    txt = fm.load_chapter_text(novel_id, ch_n)
+                    if txt and len(txt) > 100:
+                        # Extract ending (last 300 chars) for continuity
+                        ending = txt[-300:].strip()
+                        prev_summaries.append(
+                            f"第{ch_n}章「{ch.get('title', '')}」\n"
+                            f"  大纲目标: {ch.get('goal', '')[:60]}\n"
+                            f"  实际结尾: ...{ending}"
+                        )
+                        continue
+                except Exception:
+                    pass
+
+            # Fallback: use outline goal or actual_summary
+            actual = ch.get("actual_summary", "")
+            goal = ch.get("goal", "")
+            summary_text = actual if actual else goal
+            if summary_text:
+                label = "实际发生" if actual else "计划目标"
                 prev_summaries.append(
-                    f"第{ch['chapter_number']}章「{ch.get('title', '')}」: {ch.get('goal', '')}"
+                    f"第{ch_n}章「{ch.get('title', '')}」({label}): {summary_text}"
                 )
-        # Keep last 5 for context
-        recent_context = "\n".join(prev_summaries[-5:]) if prev_summaries else "暂无前文"
+
+        recent_context = "\n\n".join(prev_summaries[-5:]) if prev_summaries else "暂无前文"
 
         # Volume info
         volume_info = ""
@@ -2300,13 +2368,26 @@ class NovelPipeline:
                 )
                 break
 
+        # Anti-repetition: events already planned in this batch
+        batch_ctx = state.get("_batch_planned_context", [])
+        batch_section = ""
+        if batch_ctx:
+            batch_section = "\n已规划章节（不要重复这些事件）:\n" + "\n".join(batch_ctx)
+
         prompt = f"""请为第{ch_num}章（共{total_chapters}章）补全详细大纲。
 
 {f"主线信息: 主角目标={main_storyline.get('protagonist_goal', '')}, 核心冲突={main_storyline.get('core_conflict', '')}" if main_storyline else ""}
 {volume_info}
 
-前文概要:
+前文概要（注意区分"大纲目标"和"实际结尾"——以实际结尾为准）:
 {recent_context}
+{batch_section}
+
+【重要约束】
+1. 仔细阅读上方"实际结尾"部分，本章必须从那里接续，推进到新的情节
+2. 前面章节已经完成的事件（如制度落地、内鬼抓获、矿道封锁等）不要重复
+3. 本章必须让故事产生实质性进展，不能停留在同一个场景重复同样的事
+4. 标题必须具体，不能用"第N章"这种格式
 
 请严格按 JSON 格式返回:
 {{
@@ -2633,6 +2714,54 @@ class NovelPipeline:
                 break
 
         return result
+
+    def _generate_actual_summary(self, chapter_text: str, chapter_number: int, title: str, state: dict | None = None) -> str:
+        """Generate a brief summary of what actually happened in a chapter.
+
+        Used to backfill the outline so future planning has accurate context
+        instead of relying on the planned goal which may diverge from reality.
+        """
+        if not chapter_text or len(chapter_text) < 50:
+            return ""
+
+        from src.llm.llm_client import create_llm_client
+        from src.novel.llm_utils import get_stage_llm_config
+
+        try:
+            llm_config = get_stage_llm_config(state or {}, "outline_generation")
+            llm = create_llm_client(llm_config)
+        except Exception:
+            # Fallback: use last 200 chars as summary
+            return chapter_text[-200:].strip()
+
+        # Use the ending portion for efficiency
+        text_for_summary = chapter_text[-2000:] if len(chapter_text) > 2000 else chapter_text
+
+        try:
+            response = llm.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一位小说编辑助手。请用2-3句话总结本章实际发生的关键事件、"
+                            "解决了什么问题、留下了什么悬念。重点描述结果而非过程。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"第{chapter_number}章「{title}」内容:\n{text_for_summary}\n\n"
+                            f"请总结本章实际发生了什么（2-3句话）:"
+                        ),
+                    },
+                ],
+                temperature=0.3,
+                max_tokens=256,
+            )
+            return response.content.strip() if response.content else ""
+        except Exception:
+            # Fallback
+            return chapter_text[-200:].strip()
 
     @staticmethod
     def _backfill_outline_entry(state: dict, ch_num: int, chapter_text: str) -> None:
