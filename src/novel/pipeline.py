@@ -631,26 +631,14 @@ class NovelPipeline:
                 log.warning("第%d章大纲条目不存在，跳过", ch_num)
                 continue
 
-            # Fill placeholder if needed, or re-plan if outline is low-quality
-            needs_replan = self._is_placeholder_outline(ch_outline)
-            if not needs_replan and batch_planned_events:
-                # Detect repetitive outlines: if this chapter's goal is too similar
-                # to previously planned chapters in this batch, force re-plan
-                cur_goal = ch_outline.get("goal", "")
-                for prev_entry in batch_planned_events:
-                    if cur_goal and cur_goal[:20] in prev_entry:
-                        needs_replan = True
-                        log.info("第%d章大纲与前面规划重复，强制重新规划", ch_num)
-                        break
-
-            if needs_replan:
-                log.info("第%d章大纲需要%s...", ch_num, "补全" if self._is_placeholder_outline(ch_outline) else "重新规划")
-                state["_batch_planned_context"] = batch_planned_events
-                ch_outline = self._fill_placeholder_outline(state, ch_outline, ch_num)
-                for i, existing_ch in enumerate(outline.get("chapters", [])):
-                    if existing_ch.get("chapter_number") == ch_num:
-                        outline["chapters"][i] = ch_outline
-                        break
+            # plan_chapters is an explicit user action — always re-plan
+            log.info("第%d章大纲重新规划中...", ch_num)
+            state["_batch_planned_context"] = batch_planned_events
+            ch_outline = self._fill_placeholder_outline(state, ch_outline, ch_num)
+            for i, existing_ch in enumerate(outline.get("chapters", [])):
+                if existing_ch.get("chapter_number") == ch_num:
+                    outline["chapters"][i] = ch_outline
+                    break
 
             # Set up state context for dynamic_outline_node
             state["current_chapter"] = ch_num
