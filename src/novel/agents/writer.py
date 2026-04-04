@@ -330,7 +330,8 @@ class Writer:
         char_desc = self._build_character_description(characters)
         world_desc = self._build_world_description(world_setting)
         style = self._get_style_prompt(style_name)
-        trimmed_context = truncate_text(context, _MAX_CONTEXT_CHARS) if context else ""
+        max_ctx = 6000 if scene_plan.get('scene_number', 1) == 1 else _MAX_CONTEXT_CHARS
+        trimmed_context = truncate_text(context, max_ctx) if context else ""
         target_words = scene_plan.get("target_words", 800)
 
         # 构建主线提示
@@ -407,6 +408,19 @@ class Writer:
         continuity_prompt = ""
         if continuity_brief:
             continuity_prompt = f"\n{continuity_brief}\n"
+
+        # First scene of chapter: add explicit transition requirement
+        is_first_scene = scene_plan.get('scene_number', 1) == 1
+        if is_first_scene and chapter_outline.chapter_number > 1:
+            continuity_prompt += (
+                "\n【章节衔接要求 — 最高优先级】\n"
+                "你正在写本章的第一个场景。必须遵守以下规则：\n"
+                "1. 第一段必须与上章结尾在时间、空间、人物状态上无缝衔接\n"
+                "2. 如果上章结尾有悬念（如出现神秘人物、计划了某个行动），本场景必须先交代其结果\n"
+                "3. 禁止跳过时间段（如上章说'明天集合'，本章必须写到集合时刻）\n"
+                "4. 禁止凭空开始新场景，必须先接续上章的动作/对话/事件\n"
+                "5. 开头不要使用'却说''话说''且说'等跳跃性连接词\n\n"
+            )
 
         system_prompt = (
             f"{style}\n\n"
@@ -507,7 +521,10 @@ class Writer:
             user_prompt += f"【本章已写内容 — 严禁重复以下任何段落、描写或对话】\n{scenes_written_summary}\n\n"
 
         if trimmed_context:
-            user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
+            if is_first_scene and chapter_outline.chapter_number > 1:
+                user_prompt += f"【上章结尾 — 必须从这里接续】\n{trimmed_context}\n\n"
+            else:
+                user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
 
         if character_lock_prompt:
             user_prompt += f"{character_lock_prompt}\n"
@@ -1443,9 +1460,10 @@ def writer_node(state: dict) -> dict:
             except Exception:
                 pass
         if last_text:
-            # 取结尾 _MAX_CONTEXT_CHARS 字符，在段落边界截断
-            if len(last_text) > _MAX_CONTEXT_CHARS:
-                tail = last_text[-_MAX_CONTEXT_CHARS:]
+            # 第一个场景用更大窗口（6000字符），确保章节衔接有足够上下文
+            _first_scene_ctx = 6000
+            if len(last_text) > _first_scene_ctx:
+                tail = last_text[-_first_scene_ctx:]
                 # 找到第一个段落边界，避免从半个段落开始
                 first_break = tail.find("\n\n")
                 if first_break > 0 and first_break < len(tail) // 3:

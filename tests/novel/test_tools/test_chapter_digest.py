@@ -124,9 +124,9 @@ class TestCreateDigest:
         assert digest["closing"] != ""
 
     def test_opening_closing_truncated(self) -> None:
-        """Opening and closing are capped at 200 chars."""
+        """Opening is capped at 200 chars, closing at 500 chars."""
         long_para = "这是一段很长的文字。" * 100
         text = long_para + "\n\n中间段落。\n\n" + long_para
         digest = create_digest(text)
         assert len(digest["opening"]) <= 203  # 200 + "..."
-        assert len(digest["closing"]) <= 203
+        assert len(digest["closing"]) <= 503  # 500 + "..."

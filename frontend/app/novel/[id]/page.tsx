@@ -2325,12 +2325,20 @@ function AgentChatSection({ novelId }: { novelId: string }) {
       steps: m.steps,
       model: m.model,
     }));
-    // Append optimistic user messages not yet in server response
+    // Append optimistic messages not yet in server response
     const serverCount = base.length;
     const optimisticNew = optimisticMessages.slice(
       Math.max(0, serverCount)
     );
-    return [...base, ...optimisticNew];
+    // Always include error messages — they're never persisted to server
+    const errorMsgs = optimisticMessages.filter(
+      (m) => m.role === "agent" && m.content.startsWith("[错误]")
+    );
+    const combined = [...base, ...optimisticNew];
+    for (const err of errorMsgs) {
+      if (!combined.includes(err)) combined.push(err);
+    }
+    return combined;
   })();
 
   // Auto-select latest conversation on load
@@ -2374,10 +2382,12 @@ function AgentChatSection({ novelId }: { novelId: string }) {
       qc.invalidateQueries({ queryKey: ["tasks"] });
       qc.invalidateQueries({ queryKey: ["conversations", novelId] });
     } else if (taskData.status === "failed") {
-      const errMsg = taskData.error || "Agent 处理失败，请稍后重试。";
+      const rawErr = taskData.error || "Agent 处理失败，请稍后重试。";
+      // Truncate traceback — only show the meaningful first line
+      const shortErr = rawErr.split("\n\nTraceback")[0].split("\nTraceback")[0].trim();
       setOptimisticMessages((prev) => [
         ...prev,
-        { role: "agent", content: `[错误] ${errMsg}` },
+        { role: "agent", content: `[错误] ${shortErr}` },
       ]);
       setActiveTaskId(null);
     }
@@ -2589,8 +2599,10 @@ function AgentChatSection({ novelId }: { novelId: string }) {
             {displayMessages.map((msg, idx) =>
               msg.role === "user" ? (
                 <div key={idx} className="flex justify-end">
-                  <div className="group relative max-w-[80%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-sm text-white select-text break-words overflow-hidden">
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
+                  <div className="group relative max-w-[80%]">
+                    <div className="rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-sm text-white select-text break-words">
+                      <p className="whitespace-pre-wrap">{msg.content}</p>
+                    </div>
                     <button
                       onClick={() => navigator.clipboard.writeText(msg.content)}
                       className="absolute -left-8 top-1 rounded p-1 text-slate-300 opacity-0 transition hover:bg-slate-100 hover:text-slate-600 group-hover:opacity-100"
@@ -2610,22 +2622,24 @@ function AgentChatSection({ novelId }: { novelId: string }) {
                         ))}
                       </div>
                     )}
-                    <div className="group relative rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink select-text break-words overflow-hidden">
-                      <div className="prose-sm max-w-none leading-relaxed space-y-0.5 break-words">
-                        {renderMarkdown(msg.content)}
-                      </div>
-                      <div className="mt-1.5 flex items-center gap-2">
-                        {msg.steps && msg.steps.length > 0 && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
-                            <GitBranch className="h-2.5 w-2.5" />
-                            {msg.steps.filter(s => s.tool !== "reply_to_user").length} 步操作
-                          </span>
-                        )}
-                        {msg.model && (
-                          <span className="text-[10px] text-slate-400">
-                            model: {msg.model}
-                          </span>
-                        )}
+                    <div className="group relative">
+                      <div className="rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-ink select-text break-words">
+                        <div className="prose-sm max-w-none leading-relaxed space-y-0.5 break-words">
+                          {renderMarkdown(msg.content)}
+                        </div>
+                        <div className="mt-1.5 flex items-center gap-2">
+                          {msg.steps && msg.steps.length > 0 && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
+                              <GitBranch className="h-2.5 w-2.5" />
+                              {msg.steps.filter(s => s.tool !== "reply_to_user").length} 步操作
+                            </span>
+                          )}
+                          {msg.model && (
+                            <span className="text-[10px] text-slate-400">
+                              model: {msg.model}
+                            </span>
+                          )}
+                        </div>
                       </div>
                       <button
                         onClick={() => navigator.clipboard.writeText(msg.content)}

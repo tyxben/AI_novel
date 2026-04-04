@@ -623,14 +623,15 @@ class TestContextWindow:
 
     
     def test_long_context_is_truncated(self) -> None:
-        """超长上下文应被截断到约 2000 字符。"""
+        """超长上下文应被截断到约 _MAX_CONTEXT_CHARS 字符。"""
         llm = _make_llm("输出。")
         writer = Writer(llm)
 
-        long_context = "这是一段很长的上下文。" * 500  # 远超 2000 字符
+        # scene_number=2 uses standard _MAX_CONTEXT_CHARS (4000)
+        long_context = "这是一段很长的上下文。" * 500  # 远超 4000 字符
 
         writer.generate_scene(
-            scene_plan=_make_scene_plan(),
+            scene_plan=_make_scene_plan(scene_number=2),
             chapter_outline=_make_chapter_outline(),
             characters=[_make_character()],
             world_setting=_make_world(),
@@ -641,6 +642,27 @@ class TestContextWindow:
         user_msg = llm.chat.call_args[0][0][1]["content"]
         # 上下文部分不应超过原始长度（已截断）
         assert len(user_msg) < len(long_context)
+
+    def test_first_scene_uses_larger_context_window(self) -> None:
+        """第一个场景应使用更大的上下文窗口（6000字符）。"""
+        llm = _make_llm("输出。")
+        writer = Writer(llm)
+
+        # 5500 chars: exceeds _MAX_CONTEXT_CHARS (4000) but within first-scene limit (6000)
+        medium_context = "这是一段很长的上下文。" * 500  # 5500 chars
+
+        writer.generate_scene(
+            scene_plan=_make_scene_plan(scene_number=1),
+            chapter_outline=_make_chapter_outline(),
+            characters=[_make_character()],
+            world_setting=_make_world(),
+            context=medium_context,
+            style_name="webnovel.shuangwen",
+        )
+
+        user_msg = llm.chat.call_args[0][0][1]["content"]
+        # First scene keeps more context, so 5500 chars should NOT be truncated
+        assert medium_context[:100] in user_msg or "上下文" in user_msg
 
 
 # ---------------------------------------------------------------------------

@@ -85,9 +85,9 @@ def create_digest(
 
     # --- opening / closing ---
     opening_paras = paragraphs[:2]
-    closing_paras = paragraphs[-2:] if len(paragraphs) > 2 else paragraphs
+    closing_paras = paragraphs[-4:] if len(paragraphs) > 4 else paragraphs
     opening = _truncate("\n".join(opening_paras), 200)
-    closing = _truncate("\n".join(closing_paras), 200)
+    closing = _truncate("\n".join(closing_paras), 500)
 
     # --- dialogue samples ---
     dialogue_lines: list[str] = []

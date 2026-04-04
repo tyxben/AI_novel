@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("novel.services.continuity")
 
 # Tail length used when extracting continuation hooks from previous chapter text
-_TAIL_CHARS = 500
+_TAIL_CHARS = 1500
 
 # Patterns that signal an unresolved hook at chapter end (Chinese fiction).
 # All use non-capturing groups so finditer().group() returns the full match.
@@ -47,6 +47,14 @@ _HOOK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"[^。！？\n]{0,15}(?:离开|出发|赶往|动身|启程|前往)[^。！？\n]{2,20}"),
     # Trailing ellipsis (Chinese or ASCII)
     re.compile(r"[^。！？\n]{2,20}[\u2026\u22ef]{2,}"),
+    # Temporal anchors (time markers signaling upcoming events)
+    re.compile(r"[^。！？\n]{0,10}(?:明天|今晚|子时|午时|傍晚|天亮|次日|三日后|明早|入夜)[^。！？\n]{2,20}"),
+    # Pending/upcoming actions
+    re.compile(r"[^。！？\n]{0,10}(?:准备|即将|打算|要去|将要|等到|一到)[^。！？\n]{2,20}"),
+    # Mysterious/suspense endings (someone appearing, something discovered)
+    re.compile(r"[^。！？\n]{0,15}(?:一个人|一道身影|一个声音|一个熟人|有人|来人)[^。！？\n]{2,20}"),
+    # Unfinished movement/location change
+    re.compile(r"[^。！？\n]{0,10}(?:走向|朝着|赶往|奔向|冲向|跑向)[^。！？\n]{2,20}"),
 ]
 
 
@@ -129,6 +137,14 @@ class ContinuityService:
             sections.append("### 必须延续（上章遗留）")
             for item in items:
                 sections.append(f"- {item}")
+            sections.append("")
+
+        # previous_ending — verbatim last sentences
+        ending = brief.get("previous_ending", "")
+        if ending:
+            sections.append("### 上章结尾原文（本章必须从这里接续）")
+            sections.append(f"「{ending}」")
+            sections.append("⚠️ 本章第一段必须在时间、空间、人物动作上与上述结尾无缝衔接，禁止跳过任何未完成的事件。")
             sections.append("")
 
         # open_threads
@@ -231,6 +247,13 @@ class ContinuityService:
                     seen.add(item)
                     deduped.append(item)
             brief["must_continue"] = deduped[:5]  # Cap at 5
+
+            # Always include the last 2-3 sentences verbatim as "ending_text"
+            # This is critical for the Writer to know exactly where to pick up
+            sentences = [s.strip() for s in re.split(r'[。！？\n]', full_text) if s.strip()]
+            if sentences:
+                last_sentences = '。'.join(sentences[-3:]) + '。'
+                brief["previous_ending"] = last_sentences
 
         # Also check the *previous* chapter's outline chapter_brief for end_hook_type
         prev_outline = prev_chapter.get("outline")
