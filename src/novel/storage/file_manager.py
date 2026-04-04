@@ -23,7 +23,7 @@ class FileManager:
         self.workspace_root = Path(workspace_dir) / "novels"
         self.workspace_root.mkdir(parents=True, exist_ok=True)
 
-    def _novel_dir(self, novel_id: str) -> Path:
+    def _novel_dir(self, novel_id: str, create: bool = True) -> Path:
         """获取小说项目目录"""
         if not novel_id or "/" in novel_id or "\\" in novel_id:
             raise ValueError(f"Invalid novel_id: {novel_id}")
@@ -33,7 +33,8 @@ class FileManager:
         # Prevent path traversal
         if not d.resolve().is_relative_to(self.workspace_root.resolve()):
             raise ValueError(f"novel_id escapes workspace: {novel_id}")
-        d.mkdir(parents=True, exist_ok=True)
+        if create:
+            d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _chapters_dir(self, novel_id: str) -> Path:
@@ -542,7 +543,7 @@ class FileManager:
 
     def novel_exists(self, novel_id: str) -> bool:
         """检查小说项目是否存在"""
-        return (self._novel_dir(novel_id) / "novel.json").exists()
+        return (self._novel_dir(novel_id, create=False) / "novel.json").exists()
 
     def close(self) -> None:
         """释放资源（文件管理器无需特殊清理）"""

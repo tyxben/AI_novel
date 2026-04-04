@@ -126,6 +126,7 @@ def _register_task_routes(app: FastAPI):
 
     @app.get("/api/tasks", tags=["tasks"])
     def list_tasks(limit: int = 50):
+        limit = max(1, min(limit, 200))
         tasks = _h._task_db.list_tasks(limit=limit)
         return [t.model_dump() for t in tasks]
 

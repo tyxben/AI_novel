@@ -109,6 +109,7 @@ TOOLS = [
         "parameters": {
             "action": {"type": "string", "description": "操作: fulfill/add/escalate"},
             "debt_id": {"type": "string", "description": "债务ID（fulfill/escalate时需要）", "optional": True},
+            "chapter_number": {"type": "integer", "description": "债务兑现的章节号（fulfill时需要，不填则自动取当前章节）", "optional": True},
             "description": {"type": "string", "description": "债务描述（add时需要）", "optional": True},
             "source_chapter": {"type": "integer", "description": "来源章节号（add时需要）", "optional": True},
             "debt_type": {"type": "string", "description": "债务类型: must_pay_next/pay_within_3/long_tail_payoff（add时需要）", "optional": True},
@@ -206,6 +207,7 @@ class AgentToolExecutor:
         self.workspace = workspace
         self.novel_id = novel_id
         self._project_path = str(Path(workspace) / "novels" / novel_id)
+        self._cached_structured_db: Any = None
 
     def execute(self, tool_name: str, args: dict) -> dict:
         """Execute a tool and return the result dict.
@@ -236,6 +238,15 @@ class AgentToolExecutor:
                 return {"error": str(e)}
         log.exception("Tool %s failed after retry", tool_name)
         return {"error": str(last_err)}
+
+    def close(self) -> None:
+        """Release cached resources (e.g. SQLite connections)."""
+        if self._cached_structured_db is not None:
+            try:
+                self._cached_structured_db.close()
+            except Exception:
+                pass
+            self._cached_structured_db = None
 
     def _tool_read_chapter(self, chapter_number: int) -> dict:
         from src.novel.storage.file_manager import FileManager
@@ -419,6 +430,10 @@ class AgentToolExecutor:
                 try:
                     ch = json.loads(p.read_text(encoding="utf-8"))
                     text = ch.get("full_text", "")
+                    if not text:
+                        txt_path = p.with_suffix(".txt")
+                        if txt_path.exists():
+                            text = txt_path.read_text(encoding="utf-8")
                     if keyword in text:
                         # Find context around keyword
                         idx = text.index(keyword)
@@ -444,32 +459,39 @@ class AgentToolExecutor:
     def _get_obligation_tracker(self):
         """Load or create an ObligationTracker for the current novel.
 
+        Uses the cached StructuredDB to avoid leaking SQLite connections.
+
         Returns ObligationTracker instance, or None if the database
         cannot be initialized.
         """
         try:
             from src.novel.services.obligation_tracker import ObligationTracker
-            from src.novel.storage.structured_db import StructuredDB
 
-            db_path = Path(self._project_path) / "memory.db"
-            if not db_path.exists():
+            db = self._get_structured_db()
+            if db is None:
                 # Novel created before narrative features — use in-memory
                 return ObligationTracker(db=None)
-            db = StructuredDB(db_path)
             return ObligationTracker(db=db)
         except Exception as exc:
             log.warning("Failed to load ObligationTracker: %s", exc)
             return None
 
     def _get_structured_db(self):
-        """Load StructuredDB for the current novel, or None."""
+        """Load StructuredDB for the current novel, or None.
+
+        Caches the instance on self to avoid creating (and leaking) a new
+        SQLite connection on every call.
+        """
+        if self._cached_structured_db is not None:
+            return self._cached_structured_db
         try:
             from src.novel.storage.structured_db import StructuredDB
 
             db_path = Path(self._project_path) / "memory.db"
             if not db_path.exists():
                 return None
-            return StructuredDB(db_path)
+            self._cached_structured_db = StructuredDB(db_path)
+            return self._cached_structured_db
         except Exception as exc:
             log.warning("Failed to load StructuredDB: %s", exc)
             return None
@@ -557,6 +579,7 @@ class AgentToolExecutor:
         self,
         action: str,
         debt_id: str | None = None,
+        chapter_number: int | None = None,
         description: str | None = None,
         source_chapter: int | None = None,
         debt_type: str | None = None,
@@ -568,8 +591,20 @@ class AgentToolExecutor:
         if action == "fulfill":
             if not debt_id:
                 return {"error": "fulfill 操作需要 debt_id"}
-            tracker.mark_debt_fulfilled(debt_id, chapter_num=0, note="Agent Chat 手动标记")
-            return {"status": "fulfilled", "debt_id": debt_id}
+            # Resolve chapter number: explicit arg > novel current_chapter > 0
+            ch_num = chapter_number
+            if ch_num is None:
+                try:
+                    novel_json = Path(self._project_path) / "novel.json"
+                    if novel_json.exists():
+                        data = json.loads(novel_json.read_text("utf-8"))
+                        ch_num = data.get("current_chapter", 0)
+                except Exception:
+                    ch_num = 0
+            if ch_num is None:
+                ch_num = 0
+            tracker.mark_debt_fulfilled(debt_id, chapter_num=ch_num, note="Agent Chat 手动标记")
+            return {"status": "fulfilled", "debt_id": debt_id, "chapter_num": ch_num}
 
         elif action == "add":
             if not description or source_chapter is None:
@@ -1070,7 +1105,26 @@ def run_agent_chat(
 
     llm = create_llm_client({})
     executor = AgentToolExecutor(workspace, novel_id)
+    try:
+        return _run_agent_chat_inner(
+            executor, llm, workspace, novel_id, message,
+            context_chapters, history, progress_callback,
+        )
+    finally:
+        executor.close()
 
+
+def _run_agent_chat_inner(
+    executor: AgentToolExecutor,
+    llm: Any,
+    workspace: str,
+    novel_id: str,
+    message: str,
+    context_chapters: list[int] | None,
+    history: list[dict] | None,
+    progress_callback: Callable[[float, str], None] | None,
+) -> dict:
+    """Inner implementation of run_agent_chat (separated for cleanup)."""
     # Get basic novel info for context
     novel_info = executor.execute("get_novel_info", {})
 

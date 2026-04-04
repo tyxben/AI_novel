@@ -75,6 +75,8 @@ def extract_api_keys(request) -> dict:
             allowed = {
                 "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
                 "SILICONFLOW_API_KEY", "DASHSCOPE_API_KEY",
+                "KLING_API_KEY", "JIMENG_API_KEY", "SEEDANCE_API_KEY",
+                "MINIMAX_API_KEY", "TOGETHER_API_KEY",
             }
             return {k: v for k, v in keys.items() if k in allowed and v}
         return {}

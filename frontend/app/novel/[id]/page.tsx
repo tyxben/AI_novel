@@ -91,7 +91,7 @@ const inputCls =
 const labelCls =
   "mb-1.5 block text-xs font-semibold uppercase tracking-[0.15em] text-slate-500";
 const tabCls =
-  "px-4 py-2 text-sm font-semibold rounded-xl transition cursor-pointer";
+  "px-4 py-2 text-sm font-semibold rounded-xl transition cursor-pointer whitespace-nowrap";
 const tabActive = tabCls + " bg-accent text-white";
 const tabInactive = tabCls + " text-slate-500 hover:bg-shell hover:text-ink";
 
@@ -149,7 +149,7 @@ export default function NovelDetailPage({
       />
 
       {/* Tab navigation */}
-      <div className="flex gap-2 px-6 pb-2 pt-2 md:px-8">
+      <div className="flex flex-wrap gap-2 px-6 pb-2 pt-2 md:px-8 overflow-x-auto">
         {[
           { key: "overview" as const, label: "总览", icon: BookOpenText },
           { key: "chapters" as const, label: "章节", icon: FileText },
@@ -170,9 +170,9 @@ export default function NovelDetailPage({
         ))}
       </div>
 
-      <div className={`grid gap-5 px-6 py-4 md:px-8 ${activeTab === "agent" ? "" : "xl:grid-cols-[minmax(0,1.45fr)_360px]"}`}>
+      <div className={`grid gap-5 px-6 py-4 md:px-8 overflow-hidden ${activeTab === "agent" ? "" : "xl:grid-cols-[minmax(0,1.45fr)_360px]"}`}>
         {/* Left column — CSS display toggle keeps components mounted across tab switches */}
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
           <div style={{ display: activeTab === "overview" ? "block" : "none" }}>
             <div className="space-y-5">
               <ProjectOverview novel={novel} id={id} />

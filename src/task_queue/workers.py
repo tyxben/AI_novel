@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import traceback
 from pathlib import Path
 
@@ -25,6 +26,8 @@ _ALLOWED_ENV_KEYS = frozenset({
     "TOGETHER_API_KEY",
 })
 
+_env_lock = threading.Lock()
+
 
 class TaskCancelled(Exception):
     """Raised when a task is cancelled via progress callback."""
@@ -34,13 +37,14 @@ def run_task(task_id: str, task_type: TaskType, params: dict, db: TaskDB):
     """Execute a task. Called in a thread by the server."""
     keys = params.pop("_keys", {})
     injected = []
-    for k, v in keys.items():
-        if k not in _ALLOWED_ENV_KEYS:
-            log.warning("忽略非白名单环境变量: %s", k)
-            continue
-        if v:
-            os.environ[k] = v
-            injected.append(k)
+    with _env_lock:
+        for k, v in keys.items():
+            if k not in _ALLOWED_ENV_KEYS:
+                log.warning("忽略非白名单环境变量: %s", k)
+                continue
+            if v:
+                os.environ[k] = v
+                injected.append(k)
 
     db.update_status(task_id, TaskStatus.running)
 
@@ -54,7 +58,6 @@ def run_task(task_id: str, task_type: TaskType, params: dict, db: TaskDB):
     try:
         result = _dispatch(task_type, params, progress_cb)
         result_str = json.dumps(result, ensure_ascii=False, default=str) if result else ""
-        db.update_progress(task_id, 1.0, "完成")
         db.update_status(task_id, TaskStatus.completed, result=result_str)
     except TaskCancelled:
         db.update_status(task_id, TaskStatus.cancelled)
@@ -62,8 +65,9 @@ def run_task(task_id: str, task_type: TaskType, params: dict, db: TaskDB):
         error_msg = f"{e}\n\n{traceback.format_exc()}"
         db.update_status(task_id, TaskStatus.failed, error=error_msg)
     finally:
-        for k in injected:
-            os.environ.pop(k, None)
+        with _env_lock:
+            for k in injected:
+                os.environ.pop(k, None)
 
 
 def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:

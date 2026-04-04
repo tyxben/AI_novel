@@ -167,7 +167,7 @@ class AgentPipeline:
             )
         except Exception as e:
             log.error("Agent 流水线失败: %s", e)
-            # 保存当前状态用于恢复
+            # 注意: 此处保存的是输入 state（非部分进度），仅供调试参考
             self._save_state(dict(state))
             raise
 

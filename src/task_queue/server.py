@@ -41,6 +41,7 @@ def submit_task(req: SubmitRequest):
 
 @app.get("/api/tasks")
 def list_tasks(limit: int = 50):
+    limit = max(1, min(limit, 200))
     tasks = db.list_tasks(limit=limit)
     return [t.model_dump() for t in tasks]
 

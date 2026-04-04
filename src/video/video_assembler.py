@@ -726,8 +726,12 @@ class VideoAssembler:
         srt_path = Path(srt)
         if srt_path.exists() and srt_path.stat().st_size > 0:
             if self._has_subtitles_filter():
+                # 将 SRT 复制到临时目录以避免路径特殊字符问题
+                import shutil
+                safe_srt = Path(self.tmp_dir) / f"sub_{srt_path.stem}.srt"
+                shutil.copy2(str(srt_path), str(safe_srt))
                 escaped_srt = (
-                    str(srt_path.resolve())
+                    str(safe_srt.resolve())
                     .replace("\\", "\\\\")
                     .replace(":", "\\:")
                     .replace("'", "\\'")
@@ -1038,18 +1042,19 @@ class VideoAssembler:
             if not text:
                 continue
 
-            # FFmpeg drawtext 特殊字符转义: \ -> \\, ' -> '\\'', : -> \\:
-            # 顺序很重要：先转义反斜杠，再转义其他字符
-            escaped = text.replace("\\", "\\\\\\\\")
-            escaped = escaped.replace("'", "'\\\\\\''")
-            escaped = escaped.replace(":", "\\\\:")
+            # FFmpeg drawtext 特殊字符转义（命令通过 subprocess 列表传递，无 shell 层）
+            # 只需 FFmpeg filter-graph 级别的转义：
+            #   \ -> \\   ' -> '\''   : -> \:   % -> %%
+            escaped = text.replace("\\", "\\\\")
+            escaped = escaped.replace("'", "'\\''")
+            escaped = escaped.replace(":", "\\:")
             # 转义 % (drawtext 中 % 用于时间码等特殊序列)
             escaped = escaped.replace("%", "%%")
 
             # 转义 fontfile 路径中的特殊字符
-            escaped_font = font_path.replace("\\", "\\\\\\\\")
-            escaped_font = escaped_font.replace(":", "\\\\:")
-            escaped_font = escaped_font.replace("'", "'\\\\\\''")
+            escaped_font = font_path.replace("\\", "\\\\")
+            escaped_font = escaped_font.replace(":", "\\:")
+            escaped_font = escaped_font.replace("'", "'\\''")
 
             f = (
                 f"drawtext=fontfile='{escaped_font}'"

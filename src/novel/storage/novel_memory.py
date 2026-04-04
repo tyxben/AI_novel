@@ -53,7 +53,11 @@ class NovelMemory:
         self.knowledge_graph.save(str(self.workspace / "graph.json"))
 
     def close(self) -> None:
-        """关闭所有存储层，释放资源"""
+        """保存并关闭所有存储层，释放资源"""
+        try:
+            self.save()
+        except Exception:
+            pass  # best-effort save before closing
         self.structured_db.close()
         self.knowledge_graph.close()
         self.vector_store.close()

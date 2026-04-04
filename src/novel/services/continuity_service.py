@@ -40,13 +40,13 @@ _HOOK_PATTERNS: list[re.Pattern[str]] = [
     # Question / exclamation at or near end of a sentence
     re.compile(r"[^。？！\n]{4,}[？?！!]"),
     # Decision / plan verbs followed by content
-    re.compile(r".{0,15}(?:决定|打算|答应|准备|计划|承诺|约好|商定).{2,30}"),
+    re.compile(r"[^。！？\n]{0,15}(?:决定|打算|答应|准备|计划|承诺|约好|商定)[^。！？\n]{2,30}"),
     # Sudden events
-    re.compile(r".{0,10}(?:突然|忽然|猛然|骤然|陡然).{2,30}"),
+    re.compile(r"[^。！？\n]{0,10}(?:突然|忽然|猛然|骤然|陡然)[^。！？\n]{2,30}"),
     # Departure verbs
-    re.compile(r".{0,15}(?:离开|出发|赶往|动身|启程|前往).{2,20}"),
+    re.compile(r"[^。！？\n]{0,15}(?:离开|出发|赶往|动身|启程|前往)[^。！？\n]{2,20}"),
     # Trailing ellipsis (Chinese or ASCII)
-    re.compile(r".{2,20}[\u2026\u22ef]{2,}"),
+    re.compile(r"[^。！？\n]{2,20}[\u2026\u22ef]{2,}"),
 ]
 
 

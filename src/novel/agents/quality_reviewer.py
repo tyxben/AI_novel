@@ -447,7 +447,7 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
                 + "\n".join(f"- {p}" for p in rewrite_parts)
             )
 
-        max_retries = state.get("max_retries", 3)
+        max_retries = state.get("max_retries", 2)
         if retry_counts[current_chapter] >= max_retries:
             decisions.append(
                 _make_decision(

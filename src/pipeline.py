@@ -230,39 +230,40 @@ class Pipeline:
         duration = videogen_cfg.get("duration", 5)
         video_clips: list[Path] = []
 
-        with get_progress() as progress:
-            task = progress.add_task("AI 视频生成", total=len(segments))
-            for i, seg in enumerate(segments):
-                out = self.video_clip_dir / f"{i:04d}.mp4"
+        try:
+            with get_progress() as progress:
+                task = progress.add_task("AI 视频生成", total=len(segments))
+                for i, seg in enumerate(segments):
+                    out = self.video_clip_dir / f"{i:04d}.mp4"
 
-                # 段级断点续传: 跳过已生成的视频文件
-                if self.resume and out.exists():
+                    # 段级断点续传: 跳过已生成的视频文件
+                    if self.resume and out.exists():
+                        video_clips.append(out)
+                        progress.advance(task)
+                        continue
+
+                    # 生成视频 prompt
+                    video_prompt = prompt_gen.generate_video_prompt(
+                        seg["text"], segment_index=i,
+                    )
+
+                    # 可选使用 Stage 3 图片作为首帧
+                    image_path = images[i] if use_first_frame and i < len(images) else None
+
+                    result = gen.generate(
+                        prompt=video_prompt,
+                        image_path=image_path,
+                        duration=float(duration),
+                    )
+
+                    # 将生成的视频复制到 workspace
+                    shutil.copy2(str(result.video_path), str(out))
                     video_clips.append(out)
+
+                    self.ckpt.update_segment(i, "video_clip", str(out))
                     progress.advance(task)
-                    continue
-
-                # 生成视频 prompt
-                video_prompt = prompt_gen.generate_video_prompt(
-                    seg["text"], segment_index=i,
-                )
-
-                # 可选使用 Stage 3 图片作为首帧
-                image_path = images[i] if use_first_frame and i < len(images) else None
-
-                result = gen.generate(
-                    prompt=video_prompt,
-                    image_path=image_path,
-                    duration=float(duration),
-                )
-
-                # 将生成的视频复制到 workspace
-                shutil.copy2(str(result.video_path), str(out))
-                video_clips.append(out)
-
-                self.ckpt.update_segment(i, "video_clip", str(out))
-                progress.advance(task)
-
-        gen.close()
+        finally:
+            gen.close()
         self.ckpt.mark_done("videogen")
         return video_clips
 
@@ -291,7 +292,7 @@ class Pipeline:
                 audio, word_boundaries = tts.synthesize(seg["text"], audio_path)
                 sub_gen.generate_srt(word_boundaries, seg["text"], srt_path)
                 results.append({"audio": audio, "srt": srt_path})
-                self.ckpt.update_segment(i, "audio", str(audio_path))
+                self.ckpt.update_segment(i, "audio", str(audio_path), save=False)
                 self.ckpt.update_segment(i, "srt", str(srt_path))
                 progress.advance(task)
 
@@ -302,6 +303,11 @@ class Pipeline:
         results = []
         audios = sorted(self.audio_dir.glob("*.mp3"))
         srts = sorted(self.srt_dir.glob("*.srt"))
+        if len(audios) != len(srts):
+            raise RuntimeError(
+                f"音频文件数 ({len(audios)}) 与字幕文件数 ({len(srts)}) 不匹配，"
+                "请检查断点数据或删除 workspace 重新运行"
+            )
         for a, s in zip(audios, srts):
             results.append({"audio": a, "srt": s})
         return results

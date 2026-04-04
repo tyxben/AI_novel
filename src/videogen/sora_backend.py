@@ -163,14 +163,28 @@ class SoraBackend(BaseVideoBackend):
         return f"{self._base_url}/v1/videos/{video_id}/content"
 
     def _download_video(self, url: str, output_path: Path) -> Path:
-        """重写下载方法，添加 Authorization header。"""
+        """重写下载方法，添加 Authorization header + 3 次重试。"""
+        import time
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
         client = self._get_client()
-        resp = client.get(url, headers=self._headers())
-        resp.raise_for_status()
-        output_path.write_bytes(resp.content)
-        log.debug("Sora 视频已下载: %s (%d bytes)", output_path, len(resp.content))
-        return output_path
+        last_exc: Exception | None = None
+
+        for attempt in range(3):
+            try:
+                resp = client.get(url, headers=self._headers(), timeout=300)
+                resp.raise_for_status()
+                output_path.write_bytes(resp.content)
+                log.debug("Sora 视频已下载: %s (%d bytes)", output_path, len(resp.content))
+                return output_path
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    delay = 2 ** attempt
+                    log.warning("Sora 下载重试 (%d/3): %s", attempt + 1, exc)
+                    time.sleep(delay)
+
+        raise RuntimeError(f"Sora 视频下载失败 (3次重试): {last_exc}") from last_exc
 
     def _get_video_metadata(self, task_result: dict) -> dict:
         """提取视频元信息。"""

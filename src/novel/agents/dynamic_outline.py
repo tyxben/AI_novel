@@ -282,6 +282,7 @@ class DynamicOutlinePlanner:
         character_states: list[dict],
         arc_status: str,
         world_changes: str = "",
+        upcoming_outlines: str = "",
     ) -> dict:
         """Revise the chapter outline based on current narrative state.
 
@@ -321,9 +322,7 @@ class DynamicOutlinePlanner:
             debt_summary=debt_summary or "无",
             character_states=_format_character_states(character_states),
             arc_status=arc_status or "无弧线信息",
-            upcoming_outlines=_build_upcoming_outlines(
-                None, chapter_number
-            ),  # caller can enrich; kept simple here
+            upcoming_outlines=upcoming_outlines or "无后续章纲信息",
         )
 
         messages = [
@@ -467,6 +466,7 @@ def dynamic_outline_node(state: dict) -> dict:
             debt_summary=debt_summary,
             character_states=characters,
             arc_status=arc_status,
+            upcoming_outlines=upcoming_text,
         )
     except Exception as exc:
         log.error(

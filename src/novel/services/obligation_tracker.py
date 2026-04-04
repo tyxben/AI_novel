@@ -390,16 +390,13 @@ class ObligationTracker:
                 # so we also need to update urgency_level + escalation_history
                 # via a raw query if using real DB.
                 # For now, update via the available interface:
-                self.db.update_debt_status(
-                    debt_id=row["debt_id"],
-                    status="overdue",
-                )
-                # Update urgency_level and escalation_history directly
+                # Single transaction: update status + urgency + history atomically
                 if hasattr(self.db, "transaction"):
                     with self.db.transaction() as cur:
                         cur.execute(
                             """UPDATE chapter_debts
-                               SET urgency_level = ?,
+                               SET status = 'overdue',
+                                   urgency_level = ?,
                                    escalation_history = ?
                                WHERE debt_id = ?
                             """,
@@ -409,6 +406,11 @@ class ObligationTracker:
                                 row["debt_id"],
                             ),
                         )
+                else:
+                    self.db.update_debt_status(
+                        debt_id=row["debt_id"],
+                        status="overdue",
+                    )
 
                 escalated += 1
                 log.warning(

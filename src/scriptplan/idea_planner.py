@@ -67,9 +67,21 @@ class IdeaPlanner:
             data = json.loads(response.content)
         except json.JSONDecodeError:
             # 尝试从文本中提取 JSON
-            match = re.search(r'\{[^{}]*\}', response.content, re.DOTALL)
+            match = re.search(r'\{.*\}', response.content, re.DOTALL)
             if match:
-                data = json.loads(match.group())
+                try:
+                    data = json.loads(match.group())
+                except json.JSONDecodeError:
+                    log.error("IdeaPlanner 正则提取的 JSON 无效: %s", match.group()[:200])
+                    return VideoIdea(
+                        video_type="悬疑反转",
+                        target_duration=target_duration,
+                        segment_count=6,
+                        rhythm="3秒钩子+3段推进+1段反转+1段收尾",
+                        twist_type="无反转",
+                        ending_type="评论钩子",
+                        tone="悬疑",
+                    )
             else:
                 log.error("IdeaPlanner 返回非 JSON: %s", response.content[:200])
                 # 返回默认方案

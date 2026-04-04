@@ -19,6 +19,7 @@ from src.novel.agents.graph import build_chapter_graph, _merge_state
 from src.novel.config import NovelConfig, load_novel_config
 from src.novel.llm_utils import get_stage_llm_config
 from src.novel.storage.file_manager import FileManager
+from src.novel.utils import count_words
 
 log = logging.getLogger("novel")
 
@@ -1020,7 +1021,12 @@ class NovelPipeline:
 
             # Run chapter graph
             try:
-                state = chapter_graph.invoke(state)
+                graph_result = chapter_graph.invoke(state)
+                # Merge graph result back, preserving non-graph-managed fields
+                # (obligation_tracker, brief_validator, debt_extractor, memory,
+                #  chapters_text, novel_id, workspace, etc.)
+                for key, value in graph_result.items():
+                    state[key] = value
             except Exception as exc:
                 log.error("第%d章生成失败: %s", ch_num, exc)
                 state.setdefault("errors", []).append(
@@ -1049,7 +1055,7 @@ class NovelPipeline:
                     "chapter_number": ch_num,
                     "title": ch_title,
                     "full_text": chapter_text,
-                    "word_count": len(chapter_text),
+                    "word_count": count_words(chapter_text),
                     "status": "draft",
                 }
                 fm.save_chapter(novel_id, ch_num, ch_data)
@@ -1057,9 +1063,11 @@ class NovelPipeline:
                 # Backfill outline for placeholder chapters
                 self._backfill_outline_entry(state, ch_num, chapter_text)
 
-                # Append to chapters list in state
+                # Append to chapters list in state (deduplicate on resume)
                 chapters = state.get("chapters") or []
-                chapters.append(ch_data)
+                existing_nums = {ch.get("chapter_number") for ch in chapters}
+                if ch_num not in existing_nums:
+                    chapters.append(ch_data)
                 state["chapters"] = chapters
 
                 # Maintain chapters_text for consistency checker

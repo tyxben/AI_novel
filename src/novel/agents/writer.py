@@ -835,7 +835,8 @@ class Writer:
                 f"- 写到接近目标字数时在完整句子处自然收束，宁少勿多"
             )
 
-        max_tokens = max(6144, target_words * 3)
+        # clamp to 8192 to avoid DeepSeek 400 error
+        max_tokens = min(8192, max(6144, target_words * 3))
         rewrite_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -983,7 +984,8 @@ class Writer:
             f"- 宁可少写也不要超出上限"
         )
 
-        max_tokens = max(6144, target_words * 3)
+        # clamp to 8192 to avoid DeepSeek 400 error
+        max_tokens = min(8192, max(6144, target_words * 3))
         polish_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},

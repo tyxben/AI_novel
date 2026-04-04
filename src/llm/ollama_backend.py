@@ -47,19 +47,25 @@ class OllamaBackend(LLMClient):
         except Exception as exc:
             raise RuntimeError(f"Ollama API 调用失败: {exc}") from exc
 
-        content = response.get("message", {}).get("content", "")
+        # 兼容新版 ollama SDK (v0.2+) 返回 ChatResponse 对象
+        if isinstance(response, dict):
+            content = response.get("message", {}).get("content", "")
+        else:
+            msg = getattr(response, "message", None)
+            content = getattr(msg, "content", "") if msg else ""
 
         usage = None
-        if "prompt_eval_count" in response:
+        _get = response.get if isinstance(response, dict) else lambda k, d=None: getattr(response, k, d)
+        if _get("prompt_eval_count"):
             usage = {
-                "prompt_tokens": response.get("prompt_eval_count", 0),
-                "completion_tokens": response.get("eval_count", 0),
-                "total_tokens": response.get("prompt_eval_count", 0)
-                + response.get("eval_count", 0),
+                "prompt_tokens": _get("prompt_eval_count", 0) or 0,
+                "completion_tokens": _get("eval_count", 0) or 0,
+                "total_tokens": (_get("prompt_eval_count", 0) or 0)
+                + (_get("eval_count", 0) or 0),
             }
 
         # Ollama: done_reason = "stop" | "length"
-        finish_reason = response.get("done_reason")
+        finish_reason = _get("done_reason")
 
         return LLMResponse(
             content=content,

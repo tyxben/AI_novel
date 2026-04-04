@@ -389,7 +389,7 @@ class PlotPlanner:
 
         result: list[dict] = []
         for i, chapter_num in enumerate(volume_outline.chapters):
-            mood = rhythm[i]
+            mood = rhythm[i] if i < len(rhythm) else rhythm[-1]
             result.append(
                 {
                     "chapter_number": chapter_num,

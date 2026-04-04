@@ -14,6 +14,10 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
         raise FileNotFoundError(f"配置文件不存在: {path}")
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"配置文件内容无效（期望字典，得到 {type(cfg).__name__}）: {path}"
+        )
     _validate(cfg)
     return cfg
 

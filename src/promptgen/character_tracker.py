@@ -218,11 +218,12 @@ class CharacterTracker:
         if not desc_matches:
             return
 
-        # 将第一个描述分配给本段出现的角色（简单策略）
+        # 将描述按顺序分配给本段出现的角色
         # 只更新尚无描述的角色，保持首次描述的一致性
+        desc_queue = list(desc_matches)
         for char_name in characters:
-            if char_name not in self._characters and desc_matches:
-                description = desc_matches[0].strip().rstrip(",").strip()
+            if char_name not in self._characters and desc_queue:
+                description = desc_queue.pop(0).strip().rstrip(",").strip()
                 if description:
                     self._characters[char_name] = description
                     log.debug("角色描述更新: %s -> %s", char_name, description)

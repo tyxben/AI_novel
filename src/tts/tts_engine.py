@@ -52,10 +52,24 @@ class TTSEngine:
             return self._generate_silent_placeholder(output_path)
 
         # edge_tts 是纯异步库，在同步上下文中用 asyncio.run 驱动
+        # 若已在事件循环中（如 FastAPI），则用线程池规避 asyncio.run 限制
         try:
-            audio_path, boundaries = asyncio.run(
-                self._synthesize_async(text, output_path)
-            )
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(
+                        asyncio.run, self._synthesize_async(text, output_path)
+                    )
+                    audio_path, boundaries = future.result()
+            else:
+                audio_path, boundaries = asyncio.run(
+                    self._synthesize_async(text, output_path)
+                )
         except Exception as exc:
             log.error("TTS 合成失败: %s", exc)
             raise

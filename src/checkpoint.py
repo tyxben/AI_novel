@@ -42,12 +42,13 @@ class Checkpoint:
             return segs[idx]
         return {}
 
-    def update_segment(self, idx: int, key: str, value: Any) -> None:
+    def update_segment(self, idx: int, key: str, value: Any, *, save: bool = True) -> None:
         segs = self.data.setdefault("segments", [])
         while len(segs) <= idx:
             segs.append({})
         segs[idx][key] = value
-        self.save()
+        if save:
+            self.save()
 
     def total_segments(self) -> int:
         return len(self.data.get("segments", []))
