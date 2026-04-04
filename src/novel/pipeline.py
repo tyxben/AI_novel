@@ -631,9 +631,20 @@ class NovelPipeline:
                 log.warning("第%d章大纲条目不存在，跳过", ch_num)
                 continue
 
-            # Fill placeholder if needed
-            if self._is_placeholder_outline(ch_outline):
-                log.info("第%d章大纲为占位符，补全中...", ch_num)
+            # Fill placeholder if needed, or re-plan if outline is low-quality
+            needs_replan = self._is_placeholder_outline(ch_outline)
+            if not needs_replan and batch_planned_events:
+                # Detect repetitive outlines: if this chapter's goal is too similar
+                # to previously planned chapters in this batch, force re-plan
+                cur_goal = ch_outline.get("goal", "")
+                for prev_entry in batch_planned_events:
+                    if cur_goal and cur_goal[:20] in prev_entry:
+                        needs_replan = True
+                        log.info("第%d章大纲与前面规划重复，强制重新规划", ch_num)
+                        break
+
+            if needs_replan:
+                log.info("第%d章大纲需要%s...", ch_num, "补全" if self._is_placeholder_outline(ch_outline) else "重新规划")
                 state["_batch_planned_context"] = batch_planned_events
                 ch_outline = self._fill_placeholder_outline(state, ch_outline, ch_num)
                 for i, existing_ch in enumerate(outline.get("chapters", [])):
@@ -2277,6 +2288,7 @@ class NovelPipeline:
         return None
 
     @staticmethod
+    @staticmethod
     def _is_placeholder_outline(ch_outline: dict) -> bool:
         """Check if a chapter outline is a placeholder (not yet planned)."""
         goal = ch_outline.get("goal", "")
@@ -2288,6 +2300,12 @@ class NovelPipeline:
         if key_events == ["待规划"]:
             return True
         if not goal and not key_events:
+            return True
+        # Generic title + no actual_summary + no meaningful goal = placeholder
+        import re
+        if (re.match(r"^第\d+章\s*$", title.strip())
+                and not ch_outline.get("actual_summary")
+                and not goal):
             return True
         return False
 
