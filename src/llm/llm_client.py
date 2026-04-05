@@ -93,11 +93,32 @@ def create_llm_client(config: dict | None = None) -> LLMClient:
     """
     config = config or {}
     provider = config.get("provider", "auto")
+    original_provider = provider
 
     if provider == "auto":
         provider, extra = _detect_provider()
         config = {**config, **extra}
 
+    try:
+        return _create_for_provider(provider, config)
+    except RuntimeError:
+        if original_provider != "auto":
+            # Specified provider failed (e.g. openai key missing) — fallback to auto-detect
+            log.warning(
+                "指定的 provider '%s' 不可用，尝试自动检测...", original_provider
+            )
+            try:
+                fallback_provider, extra = _detect_provider()
+                fallback_config = {k: v for k, v in config.items() if k not in ("provider", "model", "api_key", "api_key_env", "base_url")}
+                fallback_config.update(extra)
+                return _create_for_provider(fallback_provider, fallback_config)
+            except RuntimeError:
+                pass  # auto-detect also failed, raise original error
+        raise
+
+
+def _create_for_provider(provider: str, config: dict) -> "LLMClient":
+    """Create LLM client for a specific provider."""
     if provider == "openai":
         from src.llm.openai_backend import OpenAIBackend
 

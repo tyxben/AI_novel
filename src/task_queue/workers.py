@@ -36,15 +36,15 @@ class TaskCancelled(Exception):
 def run_task(task_id: str, task_type: TaskType, params: dict, db: TaskDB):
     """Execute a task. Called in a thread by the server."""
     keys = params.pop("_keys", {})
-    injected = []
+    injected: dict[str, str | None] = {}  # key -> original value (None if not pre-existing)
     with _env_lock:
         for k, v in keys.items():
             if k not in _ALLOWED_ENV_KEYS:
                 log.warning("忽略非白名单环境变量: %s", k)
                 continue
             if v:
+                injected[k] = os.environ.get(k)  # Save original value
                 os.environ[k] = v
-                injected.append(k)
 
     db.update_status(task_id, TaskStatus.running)
 
@@ -66,8 +66,11 @@ def run_task(task_id: str, task_type: TaskType, params: dict, db: TaskDB):
         db.update_status(task_id, TaskStatus.failed, error=error_msg)
     finally:
         with _env_lock:
-            for k in injected:
-                os.environ.pop(k, None)
+            for k, original in injected.items():
+                if original is not None:
+                    os.environ[k] = original  # Restore pre-existing value
+                else:
+                    os.environ.pop(k, None)
 
 
 def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:
