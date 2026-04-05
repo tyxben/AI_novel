@@ -1072,9 +1072,20 @@ class NovelPipeline:
                     db=getattr(_mem, "structured_db", None) if _mem else None,
                     obligation_tracker=obligation_tracker,
                 )
+                # Ensure chapters have full_text for continuity extraction
+                _chapters_for_brief = []
+                _chapters_text = state.get("chapters_text", {})
+                for _bch in (state.get("chapters") or []):
+                    _bch_copy = dict(_bch)
+                    if not _bch_copy.get("full_text"):
+                        _bch_copy["full_text"] = _chapters_text.get(
+                            _bch_copy.get("chapter_number", 0), ""
+                        )
+                    _chapters_for_brief.append(_bch_copy)
+
                 continuity_brief = continuity_svc.generate_brief(
                     chapter_number=ch_num,
-                    chapters=state.get("chapters") or [],
+                    chapters=_chapters_for_brief,
                     chapter_brief=ch_outline.get("chapter_brief", {}),
                     story_arcs=state.get("story_arcs", []),
                     characters=state.get("characters", []),
@@ -1151,10 +1162,15 @@ class NovelPipeline:
                 except Exception as exc:
                     log.warning("第%d章实际摘要生成失败: %s", ch_num, exc)
 
-                # Append to chapters list in state (deduplicate on resume)
+                # Update chapters list in state (replace stale entry or append)
                 chapters = state.get("chapters") or []
-                existing_nums = {ch.get("chapter_number") for ch in chapters}
-                if ch_num not in existing_nums:
+                replaced = False
+                for i, existing_ch in enumerate(chapters):
+                    if existing_ch.get("chapter_number") == ch_num:
+                        chapters[i] = ch_data
+                        replaced = True
+                        break
+                if not replaced:
                     chapters.append(ch_data)
                 state["chapters"] = chapters
 

@@ -1440,11 +1440,21 @@ def writer_node(state: dict) -> dict:
     if world_setting is None:
         world_setting = WorldSetting(era="未知", location="未知")
 
-    # 前文上下文：取最后一章的结尾部分（而非开头），确保悬念和转折传递给下一章
+    # 前文上下文：取前一章（按章节号，非列表末尾）的结尾，确保悬念和转折传递给下一章
     context = ""
+    prev_ch_num = current_chapter - 1
     chapters_done = state.get("chapters") or []
-    if chapters_done:
-        last_ch = chapters_done[-1]
+    last_ch = None
+    for _ch in chapters_done:
+        if _ch.get("chapter_number") == prev_ch_num:
+            last_ch = _ch
+            break
+    # Fallback: if not found by number, also check chapters_text
+    if last_ch is None and prev_ch_num > 0:
+        prev_text = state.get("chapters_text", {}).get(prev_ch_num, "")
+        if prev_text:
+            last_ch = {"chapter_number": prev_ch_num, "full_text": prev_text}
+    if last_ch:
         last_text = last_ch.get("full_text", "")
         # If no full_text in state (resumed from checkpoint), load from .txt file
         if not last_text:
