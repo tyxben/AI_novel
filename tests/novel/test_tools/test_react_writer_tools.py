@@ -477,6 +477,38 @@ class TestSubmit:
         tk._draft = "草稿内容"
         assert tk.submit_final(text="") == "草稿内容"
 
+    def test_rejects_raw_thinking_json(self):
+        """submit_final should reject text that looks like raw tool-call JSON."""
+        tk = WriterToolkit(MagicMock())
+        tk._draft = "真正的小说正文内容"
+        raw_json = '{"thinking":"分析场景","tool":"generate_draft","args":{"scene_prompt":"..."}}'
+        result = tk.submit_final(text=raw_json)
+        assert result == "真正的小说正文内容"
+
+    def test_rejects_raw_tool_json(self):
+        """submit_final should reject text starting with {"tool"."""
+        tk = WriterToolkit(MagicMock())
+        tk._draft = "内部草稿正文"
+        raw_json = '{"tool":"submit","args":{"result":"some json"}}'
+        result = tk.submit_final(text=raw_json)
+        assert result == "内部草稿正文"
+
+    def test_rejects_draft_preview_json(self):
+        """submit_final should reject text starting with {"draft_preview"."""
+        tk = WriterToolkit(MagicMock())
+        tk._draft = "正常草稿"
+        raw_json = '{"draft_preview":"预览...","word_count":800,"target_words":800}'
+        result = tk.submit_final(text=raw_json)
+        assert result == "正常草稿"
+
+    def test_accepts_normal_story_text(self):
+        """submit_final should accept legitimate story text even if it contains braces."""
+        tk = WriterToolkit(MagicMock())
+        tk._draft = "草稿"
+        story = "林辰说：「这个计划{很完美}。」他转身离去。"
+        result = tk.submit_final(text=story)
+        assert result == story
+
 
 # -------------------------------------------------------------------------
 # get_current_draft

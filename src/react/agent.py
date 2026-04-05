@@ -216,6 +216,28 @@ class ReactAgent:
 
             if not tool_name:
                 # LLM 没有返回工具调用，可能是直接回答了
+                # 但如果内容看起来像截断的 tool-call JSON，不应作为最终输出
+                raw = response.content.strip()
+                if raw.startswith('{"thinking"') or raw.startswith('{"tool"'):
+                    log.warning(
+                        "ReAct step %d: malformed tool-call JSON, "
+                        "skipping as output",
+                        i + 1,
+                    )
+                    # 反馈给 LLM 让它重试
+                    messages.append(
+                        {"role": "assistant", "content": response.content}
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "[系统] 你的回复JSON格式有误，无法解析。"
+                                "请重新输出正确的JSON格式。"
+                            ),
+                        }
+                    )
+                    continue
                 log.warning(
                     "ReAct step %d: no tool call, treating as final output",
                     i + 1,

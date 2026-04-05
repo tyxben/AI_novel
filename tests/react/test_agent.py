@@ -607,3 +607,67 @@ class TestImports:
 
     def test_max_iterations_constant(self):
         assert MAX_ITERATIONS == 8
+
+
+# ===========================================================================
+# Malformed Tool-Call JSON Handling (bug fix: raw JSON as output)
+# ===========================================================================
+
+
+class TestMalformedToolCallJSON:
+    """Verify that malformed tool-call JSON is not treated as final output."""
+
+    def test_truncated_thinking_json_retries(self):
+        """Truncated JSON starting with {"thinking" should trigger retry."""
+        mock_llm = MagicMock()
+        # First response: truncated JSON that _parse_action can't extract a tool from.
+        # It starts with {"thinking" so should be detected as malformed tool call.
+        truncated = '{"thinking":"let me plan","tool":"generate_draft","args":{"scene_prompt":"very long prompt...'
+        mock_llm.chat.side_effect = [
+            _make_response(truncated),
+            _make_response(_submit_json("real output")),
+        ]
+        agent = ReactAgent(mock_llm)
+        result = agent.run(task="test", max_iterations=4)
+        assert result.finished is True
+        assert result.output == "real output"
+        # First response was malformed -> retried, so 2 LLM calls
+        assert mock_llm.chat.call_count == 2
+        # The retry should inject an error message
+        second_call_msgs = mock_llm.chat.call_args_list[1][0][0]
+        assert any("JSON格式有误" in m["content"] for m in second_call_msgs if m["role"] == "user")
+
+    def test_truncated_tool_json_retries(self):
+        """JSON starting with {"tool" (no thinking) also triggers retry."""
+        mock_llm = MagicMock()
+        truncated = '{"tool":"submit","args":{"result":"incomplete...'
+        mock_llm.chat.side_effect = [
+            _make_response(truncated),
+            _make_response(_submit_json("clean output")),
+        ]
+        agent = ReactAgent(mock_llm)
+        result = agent.run(task="test", max_iterations=4)
+        assert result.finished is True
+        assert result.output == "clean output"
+
+    def test_malformed_json_exhausts_max_iterations(self):
+        """If LLM keeps returning malformed JSON, max_iterations is reached."""
+        mock_llm = MagicMock()
+        truncated = '{"thinking":"...","tool":"generate_draft","args":{"x":"...'
+        mock_llm.chat.return_value = _make_response(truncated)
+        agent = ReactAgent(mock_llm)
+        result = agent.run(task="test", max_iterations=3)
+        assert result.finished is False
+        # Should have retried 3 times (max_iterations)
+        assert mock_llm.chat.call_count == 3
+
+    def test_plain_text_still_treated_as_output(self):
+        """Non-JSON plain text should still be treated as final output."""
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = _make_response(
+            "This is a direct text answer."
+        )
+        agent = ReactAgent(mock_llm)
+        result = agent.run(task="test")
+        assert result.finished is True
+        assert result.output == "This is a direct text answer."

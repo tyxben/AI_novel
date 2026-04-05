@@ -297,6 +297,7 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
   const [planTaskId, setPlanTaskId] = useState<string | null>(null);
   const [plannedOutlines, setPlannedOutlines] = useState<any[] | null>(null);
   const [planContext, setPlanContext] = useState<any>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
   const { data: planTaskData } = useTask(planTaskId);
 
   // Poll plan task completion
@@ -310,14 +311,19 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
           setPlannedOutlines(parsed.planned_chapters);
           setPlanContext(parsed.context ?? null);
         }
-      } catch {
-        // Failed to parse — show error
+      } catch (e) {
+        console.error("Plan result parse failed:", e);
+        setPlanError("大纲结果解析失败，请重试");
       }
       setPlanTaskId(null);
+      planMut.reset();
+      qc.invalidateQueries({ queryKey: ["novel", id] });
     } else if (planTaskData.status === "failed") {
+      setPlanError(planTaskData.error || "大纲规划失败，未知错误");
       setPlanTaskId(null);
+      planMut.reset();
     }
-  }, [planTaskData, planTaskId]);
+  }, [planTaskData, planTaskId, planMut, qc, id]);
 
   // Polish controls
   const [showPolishOptions, setShowPolishOptions] = useState(false);
@@ -337,6 +343,7 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
   };
 
   const handlePlan = () => {
+    setPlanError(null);
     const params: any = {};
     if (batchSize) params.batch_size = batchSize;
     if (genStartCh) params.start_chapter = Number(genStartCh);
@@ -560,9 +567,9 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
         )}
 
         {/* Plan task failed */}
-        {planTaskData?.status === "failed" && !planTaskId && (
+        {planError && (
           <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
-            大纲规划失败：{planTaskData.error || "未知错误"}
+            {planError}
           </div>
         )}
 
@@ -780,7 +787,7 @@ function ActionButtons({ novel, id }: { novel: any; id: string }) {
             章节生成任务已提交，请在右侧任务面板查看进度。
           </div>
         )}
-        {planMut.isSuccess && !plannedOutlines && !isPlanPolling && (
+        {planMut.isSuccess && !plannedOutlines && !isPlanPolling && !!planTaskId && (
           <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-700">
             大纲规划任务已提交，请稍候...
           </div>

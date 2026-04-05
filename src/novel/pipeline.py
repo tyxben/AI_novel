@@ -29,6 +29,45 @@ log = logging.getLogger("novel")
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_title(title: str, ch_num: int) -> str:
+    """Sanitize a chapter title, rejecting garbage and prompt fragments.
+
+    Applied to both extracted and outline-provided titles so that no
+    garbage leaks into saved chapter metadata.
+    """
+    # Strip raw escape sequences that sometimes appear in LLM output
+    title = title.replace("\\n", "").replace("\\t", "").replace("\\r", "")
+    # Also strip actual whitespace / newlines
+    title = title.strip().strip("\n\r\t ")
+
+    # Strip leading/trailing quotation marks (Chinese & ASCII)
+    _QUOTE_CHARS = '"\'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\u3010\u3011'
+    title = title.strip(_QUOTE_CHARS)
+    title = title.strip()
+
+    # Reject titles that look like prompt instructions or meta-text
+    _BAD_PATTERNS = [
+        "字数", "场景", "目标", "要求", "注意", "提示", "格式",
+        "左右", "以上", "以下", "不超过", "大约",
+    ]
+    if any(p in title for p in _BAD_PATTERNS):
+        return f"第{ch_num}章"
+
+    # Reject if still contains control-ish characters
+    if "\n" in title or "\t" in title or "\r" in title:
+        return f"第{ch_num}章"
+
+    # Reject overly long titles (likely a full sentence leaked through)
+    if len(title) > 15:
+        return f"第{ch_num}章"
+
+    # Reject too short or empty
+    if not title or len(title) < 2:
+        return f"第{ch_num}章"
+
+    return title
+
+
 def _extract_title_from_text(chapter_text: str, ch_num: int) -> str:
     """Extract a short, meaningful title from chapter text.
 
@@ -61,7 +100,9 @@ def _extract_title_from_text(chapter_text: str, ch_num: int) -> str:
             sent = sent.strip().strip('""\'\"\'')
             # Good title: 4-12 chars, contains character action or place
             if 4 <= len(sent) <= 12:
-                return sent
+                candidate = _sanitize_title(sent, ch_num)
+                if candidate != f"第{ch_num}章":
+                    return candidate
 
     # Fallback: first non-header line truncated
     for line in lines[:5]:
@@ -72,10 +113,16 @@ def _extract_title_from_text(chapter_text: str, ch_num: int) -> str:
             for sep in ("，", "。", "！", "？", "、"):
                 idx = line.find(sep)
                 if 3 <= idx <= 12:
-                    return line[:idx]
-            return line[:10]
+                    candidate = _sanitize_title(line[:idx], ch_num)
+                    if candidate != f"第{ch_num}章":
+                        return candidate
+            candidate = _sanitize_title(line[:10], ch_num)
+            if candidate != f"第{ch_num}章":
+                return candidate
         if len(line) >= 4:
-            return line
+            candidate = _sanitize_title(line, ch_num)
+            if candidate != f"第{ch_num}章":
+                return candidate
 
     return f"第{ch_num}章"
 
@@ -1063,10 +1110,20 @@ class NovelPipeline:
 
             # Save chapter
             chapter_text = state.get("current_chapter_text", "")
+            # Guard: reject chapter text that is raw tool-call JSON
+            if chapter_text and chapter_text.strip().startswith(
+                ('{"thinking"', '{"tool"', '{"draft_preview"')
+            ):
+                log.error(
+                    "第%d章文本包含原始工具调用JSON，跳过保存", ch_num
+                )
+                chapter_text = ""
             if chapter_text:
                 # Get title: prefer revised outline title, fallback to extraction
                 revised_outline = state.get("current_chapter_outline", ch_outline)
                 ch_title = revised_outline.get("title", "") if isinstance(revised_outline, dict) else ch_outline.get("title", "")
+                # Always sanitize outline-provided titles
+                ch_title = _sanitize_title(ch_title, ch_num) if ch_title else ""
                 if not ch_title or ch_title == f"第{ch_num}章":
                     ch_title = _extract_title_from_text(chapter_text, ch_num)
                 ch_data = {
@@ -1815,9 +1872,10 @@ class NovelPipeline:
                 )
 
                 # Save rewritten chapter (text + json metadata)
+                raw_title = ch_outline_data.get("title", f"第{ch_num}章")
                 ch_json = {
                     "chapter_number": ch_num,
-                    "title": ch_outline_data.get("title", f"第{ch_num}章"),
+                    "title": _sanitize_title(raw_title, ch_num),
                     "full_text": new_text,
                     "word_count": len(new_text),
                     "status": "draft",
@@ -2796,6 +2854,8 @@ class NovelPipeline:
             # Title: prefer current_chapter_outline's title (from dynamic_outline/PlotPlanner)
             cur_outline = state.get("current_chapter_outline", {})
             title = cur_outline.get("title", "")
+            # Always sanitize outline-provided titles
+            title = _sanitize_title(title, ch_num) if title else ""
             if not title or title == f"第{ch_num}章":
                 # Extract a short title from the chapter text
                 title = _extract_title_from_text(chapter_text, ch_num)

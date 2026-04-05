@@ -182,6 +182,18 @@ class WriterReactAgent(ReactAgent):
             text = text.get("draft", "") or text.get("text", "")
         text = str(text).strip()
 
+        # Sanitize: reject raw tool-call JSON that leaked as output
+        if text and (
+            text.startswith('{"thinking"')
+            or text.startswith('{"tool"')
+            or text.startswith('{"draft_preview"')
+        ):
+            log.warning(
+                "ReAct output contains raw tool-call JSON, "
+                "falling back to toolkit draft"
+            )
+            text = self.toolkit._draft or ""
+
         if not text or len(text) < 50:
             log.warning("ReAct 未产出有效文本，降级 one-shot Writer")
             from src.novel.agents.writer import Writer

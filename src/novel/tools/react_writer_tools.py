@@ -159,5 +159,13 @@ class WriterToolkit:
         }
 
     def submit_final(self, text: str = "") -> str:
-        """提交终稿。优先使用传入文本，否则使用当前草稿。"""
+        """提交终稿。优先使用传入文本，否则使用当前草稿。
+
+        如果传入的 text 看起来像原始 tool-call JSON，忽略并回退到草稿。
+        """
+        if text and text.strip().startswith(
+            ('{"thinking"', '{"tool"', '{"draft_preview"')
+        ):
+            log.warning("submit_final 收到原始 JSON，回退到内部草稿")
+            text = ""
         return text or self._draft

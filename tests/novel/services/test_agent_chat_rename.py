@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.novel.services.agent_chat import AgentToolExecutor, TOOLS
-from src.novel.pipeline import _extract_title_from_text
+from src.novel.pipeline import _extract_title_from_text, _sanitize_title
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +214,80 @@ class TestExtractTitleFromText:
         title = _extract_title_from_text(text, 2)
         assert len(title) <= 10
         assert not title.startswith("#")
+
+    # --- New sanitization tests ---
+
+    def test_rejects_escaped_newlines_in_text(self):
+        r"""Titles with literal \n escape sequences must be rejected."""
+        text = '\\n\\n"我不来不行，这是宿命。"他说。'
+        title = _extract_title_from_text(text, 22)
+        assert "\\n" not in title
+        assert title != ""
+
+    def test_rejects_prompt_instruction_fragments(self):
+        """Lines that look like prompt instructions (字数, 场景, etc.) are rejected."""
+        text = "\\n字数：800字左右\\n第一幕：矿洞深处。少年凌霄抬起头。"
+        title = _extract_title_from_text(text, 23)
+        assert "字数" not in title
+        assert "左右" not in title
+
+    def test_rejects_leading_quote_dialogue(self):
+        """Titles starting with dialogue quotes are stripped/rejected."""
+        text = '"矿下先锁死！"他大喝一声。灵力涌动。'
+        title = _extract_title_from_text(text, 24)
+        # Should not start with a quote character
+        assert not title.startswith('"')
+        assert not title.startswith("\u201c")
+
+    def test_text_with_only_prompt_fragments(self):
+        """If ALL lines are prompt fragments, fallback to default title."""
+        text = "字数：800字左右\n场景描写要求：\n注意节奏控制"
+        title = _extract_title_from_text(text, 5)
+        assert title == "第5章"
+
+    def test_real_garbage_case_backslash_n(self):
+        r"""Real-world case: '\n\n"我不来不行' should produce clean title."""
+        # Simulate LLM returning raw \n in text
+        text = '\n\n"我不来不行，矿脉已经快要枯竭了。"少年叹息。\n灵气如丝般稀薄。'
+        title = _extract_title_from_text(text, 22)
+        assert "\n" not in title
+        assert len(title) >= 2
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_title tests
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeTitle:
+    """Tests for the _sanitize_title helper function."""
+
+    def test_strips_escaped_newlines(self):
+        assert _sanitize_title("\\n\\n暗夜降临", 1) == "暗夜降临"
+
+    def test_strips_quotes(self):
+        assert _sanitize_title("\u201c命运之门\u201d", 1) == "命运之门"
+        assert _sanitize_title('"开端"', 1) == "开端"
+
+    def test_rejects_prompt_keywords(self):
+        assert _sanitize_title("字数控制在800", 5) == "第5章"
+        assert _sanitize_title("场景一：矿洞", 3) == "第3章"
+        assert _sanitize_title("注意力集中", 2) == "第2章"
+
+    def test_rejects_too_long(self):
+        assert _sanitize_title("这是一个超级长的标题不应该被用作章节名称因为太长了", 1) == "第1章"
+
+    def test_rejects_too_short(self):
+        assert _sanitize_title("a", 1) == "第1章"
+        assert _sanitize_title("", 1) == "第1章"
+
+    def test_passes_valid_title(self):
+        assert _sanitize_title("暗夜降临", 1) == "暗夜降临"
+        assert _sanitize_title("龙吟九天", 3) == "龙吟九天"
+
+    def test_strips_actual_newlines(self):
+        assert _sanitize_title("\n暗夜\n", 1) == "暗夜"
+
+    def test_rejects_left_right_pattern(self):
+        """'左右' is a prompt meta-word (e.g., '800字左右')."""
+        assert _sanitize_title("800字左右", 1) == "第1章"
