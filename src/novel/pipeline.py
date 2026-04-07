@@ -943,6 +943,42 @@ class NovelPipeline:
         except Exception as e:
             log.warning("Narrative control initialization failed (non-critical): %s", e)
 
+        # Auto-backfill actual_summary for chapters that don't have it yet
+        try:
+            from src.novel.storage.file_manager import FileManager
+            fm_bf = FileManager(self.workspace)
+            outline_chapters = outline.get("chapters", [])
+            chapters_needing_summary = []
+            for ch in outline_chapters:
+                ch_n = ch.get("chapter_number", 0)
+                if ch_n < 1 or ch_n >= start_chapter:
+                    continue
+                if ch.get("actual_summary"):
+                    continue
+                # Check if chapter text exists on disk
+                txt = fm_bf.load_chapter_text(novel_id, ch_n)
+                if txt and len(txt) > 100:
+                    chapters_needing_summary.append((ch_n, ch, txt))
+
+            if chapters_needing_summary:
+                log.info("发现 %d 章需要补全 actual_summary", len(chapters_needing_summary))
+                for ch_n, ch, txt in chapters_needing_summary:
+                    try:
+                        title = ch.get("title", f"第{ch_n}章")
+                        summary = self._generate_actual_summary(txt, ch_n, title, state=state)
+                        if summary:
+                            ch["actual_summary"] = summary
+                            log.info("第%d章 actual_summary 已补全", ch_n)
+                    except Exception as exc:
+                        log.warning("第%d章 actual_summary 补全失败: %s", ch_n, exc)
+
+                # Save back to novel.json
+                novel_data = fm_bf.load_novel(novel_id) or {}
+                novel_data["outline"] = outline
+                fm_bf.save_novel(novel_id, novel_data)
+        except Exception as exc:
+            log.warning("自动补全 actual_summary 失败: %s", exc)
+
         for ch_num in range(start_chapter, end_chapter + 1):
             log.info("=== 生成第 %d/%d 章 ===", ch_num, total_chapters)
 
@@ -1148,6 +1184,37 @@ class NovelPipeline:
 
                 # Backfill outline for placeholder chapters
                 self._backfill_outline_entry(state, ch_num, chapter_text)
+
+                # Validate transition from previous chapter
+                if ch_num > 1:
+                    try:
+                        prev_text = state.get("chapters_text", {}).get(ch_num - 1, "")
+                        if not prev_text:
+                            from src.novel.storage.file_manager import FileManager
+                            _fm_t = FileManager(self.workspace)
+                            prev_text = _fm_t.load_chapter_text(novel_id, ch_num - 1) or ""
+
+                        if prev_text and chapter_text:
+                            prev_ending = prev_text.strip()[-200:]
+                            cur_opening = chapter_text.strip()[:200]
+                            # Simple heuristic: check if opening references previous ending
+                            # Extract key nouns from prev_ending (3+ char Chinese words)
+                            import re
+                            prev_keywords = set(re.findall(r'[\u4e00-\u9fa5]{3,}', prev_ending))
+                            cur_keywords = set(re.findall(r'[\u4e00-\u9fa5]{3,}', cur_opening))
+                            common = prev_keywords & cur_keywords
+                            if not common and len(prev_keywords) > 3:
+                                log.warning(
+                                    "第%d章衔接警告: 开头与上章结尾无共同关键词 (上章末尾: %s...)",
+                                    ch_num, prev_ending[:50]
+                                )
+                                state.setdefault("decisions", []).append({
+                                    "step": "transition_check",
+                                    "decision": f"第{ch_num}章可能存在衔接问题",
+                                    "reason": f"开头未引用上章结尾的关键元素",
+                                })
+                    except Exception as exc:
+                        log.debug("衔接验证失败 (非关键): %s", exc)
 
                 # Backfill actual_summary to outline for future planning
                 try:

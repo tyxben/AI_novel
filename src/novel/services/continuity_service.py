@@ -116,6 +116,7 @@ class ContinuityService:
         self._extract_open_threads(brief, chapter_number)
         self._extract_character_states(brief, chapter_number, characters)
         self._extract_active_arcs(brief, chapter_number, story_arcs)
+        self._extract_dead_characters(brief, chapters or [], chapter_number)
         self._derive_forbidden_breaks(brief)
         self._extract_recommended_payoffs(brief, chapter_brief, chapter_number)
 
@@ -413,6 +414,53 @@ class ContinuityService:
             elif status and "伤" in status:
                 brief["forbidden_breaks"].append(
                     f"{name}当前状态为{status}，不应有超出合理范围的行动表现"
+                )
+
+    def _extract_dead_characters(
+        self,
+        brief: dict,
+        chapters: list[dict],
+        chapter_number: int,
+    ) -> None:
+        """Detect characters that died in previous chapters from actual_summaries.
+
+        Scans actual_summary fields for death keywords and adds entries to
+        forbidden_breaks so the Writer knows not to reference them as alive.
+        """
+        if not chapters:
+            return
+
+        # Death-indicating patterns
+        death_patterns = [
+            re.compile(r"([\u4e00-\u9fa5]{2,8})(?:被)?(?:处决|处死|杀死|杀掉|斩杀|斩首|击杀|身亡|阵亡|死亡|毙命|身死|咽气|气绝|没了声息)"),
+            re.compile(r"([\u4e00-\u9fa5]{2,8})(?:已)?(?:死|亡)(?:了|去)?"),
+            re.compile(r"林辰(?:亲手)?(?:杀了|处决了|斩了)([\u4e00-\u9fa5]{2,8})"),
+        ]
+
+        dead_chars: set[str] = set()
+
+        for ch in chapters:
+            ch_n = ch.get("chapter_number", 0)
+            if ch_n >= chapter_number:
+                continue
+            summary = ch.get("actual_summary", "")
+            if not summary:
+                continue
+            for pattern in death_patterns:
+                for m in pattern.finditer(summary):
+                    name = m.group(1).strip()
+                    # Filter out common verbs/words that aren't names
+                    if name and len(name) >= 2 and name not in ("林辰", "他", "她", "那人", "众人", "敌人", "大家", "所有"):
+                        # Skip captures that contain the protagonist's name
+                        # (e.g. "林辰差点" from "林辰差点死在敌人手里")
+                        if "林辰" in name:
+                            continue
+                        dead_chars.add(name)
+
+        if dead_chars:
+            for name in dead_chars:
+                brief["forbidden_breaks"].append(
+                    f"{name} 已死亡（前文章节中），不可作为活人出现，只能以'{name}余部'、'{name}残部'、'{name}的旧部'等形式提及"
                 )
 
     def _extract_recommended_payoffs(

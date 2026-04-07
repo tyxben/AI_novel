@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re as _re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +21,55 @@ from src.novel.templates.style_presets import get_style
 from src.novel.utils import count_words, truncate_text
 
 log = logging.getLogger("novel")
+
+# ---------------------------------------------------------------------------
+# 系统 UI 元素清洗（移除游戏化系统提示，避免污染叙事文本）
+# ---------------------------------------------------------------------------
+
+# Patterns for system UI elements that should not appear in narrative text
+_SYSTEM_UI_PATTERNS = [
+    # Bracketed system messages: 【...】
+    _re.compile(r"【[^】]{1,80}】"),
+    # Loyalty/stat changes: 忠诚度：71→79, 兵煞值+8
+    _re.compile(r"[\u4e00-\u9fa5]{2,8}[:：]\s*\d+\s*[→\-+]\s*\d+"),
+    _re.compile(r"[\u4e00-\u9fa5]{2,8}\s*[+\-]\s*\d+\s*$", _re.MULTILINE),
+]
+
+# Allowlist of system messages that ARE part of the story (system-cultivation novel)
+# These get kept; everything else gets stripped
+_SYSTEM_UI_ALLOWLIST = {
+    "【叮！】",  # iconic system notification
+}
+
+
+def _sanitize_chapter_text(text: str) -> str:
+    """Strip game-UI elements from generated chapter text.
+
+    The Writer sometimes leaks system messages, stat displays, and other
+    game-UI elements into the narrative. This filter removes them while
+    preserving allowlisted iconic markers like 【叮！】.
+    """
+    if not text:
+        return text
+
+    cleaned_lines = []
+    for line in text.split("\n"):
+        original = line
+        # Remove bracketed system messages (except allowlisted)
+        def _strip_brackets(m):
+            return m.group() if m.group() in _SYSTEM_UI_ALLOWLIST else ""
+        line = _SYSTEM_UI_PATTERNS[0].sub(_strip_brackets, line)
+        # Remove stat changes
+        line = _SYSTEM_UI_PATTERNS[1].sub("", line)
+        line = _SYSTEM_UI_PATTERNS[2].sub("", line)
+        # Skip lines that became empty or only whitespace
+        if line.strip() or not original.strip():
+            cleaned_lines.append(line)
+
+    result = "\n".join(cleaned_lines)
+    # Collapse 3+ consecutive newlines into 2
+    result = _re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 # 续写相关常量
 _MAX_CONTINUATIONS = 3  # 最多续写次数，防止无限循环
@@ -561,6 +611,9 @@ class Writer:
         if len(scene_text) > target_words * 2:
             log.warning("场景文本超长(%d字，目标%d字)", len(scene_text), target_words)
 
+        # 清洗系统 UI 元素（避免游戏化提示泄漏到叙事文本）
+        scene_text = _sanitize_chapter_text(scene_text)
+
         # 角色名称校验：检测占位符和未知名称
         scene_text = self._check_character_names(scene_text, characters)
 
@@ -709,6 +762,8 @@ class Writer:
             )
 
         full_text = "\n\n".join(s.text for s in scenes)
+        # 章节级清洗：兜底过滤系统 UI 元素
+        full_text = _sanitize_chapter_text(full_text)
         total_words = count_words(full_text)
 
         return Chapter(
