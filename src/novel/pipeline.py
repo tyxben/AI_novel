@@ -1131,6 +1131,57 @@ class NovelPipeline:
                 log.warning("连续性摘要生成失败: %s", exc)
                 state["continuity_brief"] = ""
 
+            # --- Global Director: whole-book directorial guidance ---
+            try:
+                from src.novel.services.global_director import GlobalDirector
+                novel_data_for_dir = fm.load_novel(novel_id) or {}
+                director = GlobalDirector(novel_data_for_dir, outline)
+                # Build recent_summaries for repetition detection
+                recent_summaries = []
+                for _och in outline.get("chapters", []):
+                    _ocn = _och.get("chapter_number", 0)
+                    if _ocn > 0 and _ocn < ch_num:
+                        recent_summaries.append({
+                            "chapter_number": _ocn,
+                            "title": _och.get("title", ""),
+                            "actual_summary": _och.get("actual_summary", ""),
+                        })
+                director_brief = director.analyze(ch_num, recent_summaries[-5:])
+                director_prompt = director.format_for_prompt(director_brief)
+                if director_prompt:
+                    # Append to continuity_brief so Writer sees it
+                    existing = state.get("continuity_brief", "")
+                    state["continuity_brief"] = (
+                        existing + "\n\n" + director_prompt if existing else director_prompt
+                    )
+            except Exception as exc:
+                log.warning("全局导演分析失败: %s", exc)
+
+            # --- Character Arc Tracker: per-character growth state ---
+            try:
+                from src.novel.services.character_arc_tracker import CharacterArcTracker
+                arc_tracker = state.get("_arc_tracker")
+                if arc_tracker is None:
+                    arc_tracker = CharacterArcTracker()
+                    # Restore from outline if persisted
+                    persisted = (fm.load_novel(novel_id) or {}).get("character_arc_states", {})
+                    if persisted:
+                        arc_tracker.from_dict({"states": persisted})
+                    state["_arc_tracker"] = arc_tracker
+
+                # Get characters that will appear in this chapter
+                involved_names = ch_outline.get("involved_characters", []) if ch_outline else []
+                if not involved_names:
+                    involved_names = [c.get("name", "") for c in state.get("characters", [])]
+                arc_prompt = arc_tracker.format_for_prompt(involved_names, ch_num)
+                if arc_prompt:
+                    existing = state.get("continuity_brief", "")
+                    state["continuity_brief"] = (
+                        existing + "\n\n" + arc_prompt if existing else arc_prompt
+                    )
+            except Exception as exc:
+                log.warning("角色弧线追踪失败: %s", exc)
+
             # Run chapter graph
             try:
                 graph_result = chapter_graph.invoke(state)
@@ -1173,6 +1224,32 @@ class NovelPipeline:
                 ch_title = _sanitize_title(ch_title, ch_num) if ch_title else ""
                 if not ch_title or ch_title == f"第{ch_num}章":
                     ch_title = _extract_title_from_text(chapter_text, ch_num)
+
+                # --- Hook Generator: evaluate and improve chapter ending ---
+                try:
+                    from src.novel.services.hook_generator import HookGenerator
+                    from src.llm.llm_client import create_llm_client
+
+                    hook_gen = HookGenerator(
+                        llm_client=create_llm_client(get_stage_llm_config(state, "scene_writing"))
+                    )
+                    eval_result = hook_gen.evaluate(chapter_text)
+                    if eval_result["needs_improvement"]:
+                        log.info(
+                            "第%d章结尾较弱 (评分%d, 类型%s)，尝试重写",
+                            ch_num, eval_result["score"], eval_result["hook_type"]
+                        )
+                        new_ending = hook_gen.generate_hook(
+                            chapter_text=chapter_text,
+                            chapter_number=ch_num,
+                            chapter_goal=ch_outline.get("goal", "") if ch_outline else "",
+                        )
+                        if new_ending:
+                            chapter_text = hook_gen.replace_ending(chapter_text, new_ending)
+                            log.info("第%d章结尾已优化", ch_num)
+                except Exception as exc:
+                    log.warning("钩子生成失败 (非关键): %s", exc)
+
                 ch_data = {
                     "chapter_number": ch_num,
                     "title": ch_title,
@@ -1217,6 +1294,7 @@ class NovelPipeline:
                         log.debug("衔接验证失败 (非关键): %s", exc)
 
                 # Backfill actual_summary to outline for future planning
+                actual_summary = ""
                 try:
                     actual_summary = self._generate_actual_summary(
                         chapter_text, ch_num, ch_title, state=state
@@ -1228,6 +1306,25 @@ class NovelPipeline:
                                 break
                 except Exception as exc:
                     log.warning("第%d章实际摘要生成失败: %s", ch_num, exc)
+
+                # Update character arc tracker from this chapter's events
+                try:
+                    arc_tracker = state.get("_arc_tracker")
+                    if arc_tracker is not None and actual_summary:
+                        arc_tracker.update_from_chapter(
+                            chapter_number=ch_num,
+                            actual_summary=actual_summary,
+                            characters=state.get("characters", []),
+                        )
+                        # Persist arc states to novel.json
+                        try:
+                            novel_persist = fm.load_novel(novel_id) or {}
+                            novel_persist["character_arc_states"] = arc_tracker.to_dict()["states"]
+                            fm.save_novel(novel_id, novel_persist)
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    log.warning("第%d章角色弧线更新失败: %s", ch_num, exc)
 
                 # Update chapters list in state (replace stale entry or append)
                 chapters = state.get("chapters") or []
