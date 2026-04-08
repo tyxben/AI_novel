@@ -2660,23 +2660,54 @@ class NovelPipeline:
         if batch_ctx:
             batch_section = "\n已规划章节（不要重复这些事件）:\n" + "\n".join(batch_ctx)
 
+        # Detect scene repetition by analyzing recent chapter titles
+        scene_repetition_warning = ""
+        recent_titles = []
+        for ch in outline_data.get("chapters", []):
+            cn = ch.get("chapter_number", 0)
+            if 0 < cn < ch_num and cn >= ch_num - 5:
+                t = ch.get("title", "")
+                if t:
+                    recent_titles.append(t)
+        # Check single-char overlap (e.g., '矿' appearing in 3+ recent titles)
+        if len(recent_titles) >= 3:
+            from collections import Counter
+            char_counts: dict = {}
+            for t in recent_titles[-5:]:
+                for ch in set(t):
+                    if '\u4e00' <= ch <= '\u9fa5':
+                        char_counts[ch] = char_counts.get(ch, 0) + 1
+            common = [c for c, n in char_counts.items() if n >= 3]
+            if common:
+                scene_repetition_warning = (
+                    f"\n## ⚠️ 场景重复警告 ⚠️\n"
+                    f"最近 5 章标题中「{','.join(common)}」相关字符出现 3 次以上。\n"
+                    f"本章必须强制切换到完全不同的场景/视角/冲突类型，不允许再写：\n"
+                    f"- 包含「{','.join(common)}」相关元素的场景\n"
+                    f"- 与前几章相同的事件类型（守矿/立威/查内鬼/迎敌等）\n"
+                    f"必须开拓新地点、新角色互动或新势力冲突。\n"
+                )
+
         prompt = f"""请为第{ch_num}章（共{total_chapters}章）补全详细大纲。
 
 {f"主线信息: 主角目标={main_storyline.get('protagonist_goal', '')}, 核心冲突={main_storyline.get('core_conflict', '')}" if main_storyline else ""}
 {volume_info}
 {director_section}
 {dead_chars_section}
+{scene_repetition_warning}
 前文概要（注意区分"大纲目标"和"实际结尾"——以实际结尾为准）:
 {recent_context}
 {batch_section}
 
-【重要约束】
-1. 仔细阅读上方"实际结尾"部分，本章必须从那里接续，推进到新的情节
-2. 前面章节已经完成的事件（如制度落地、内鬼抓获、矿道封锁等）不要重复
-3. 本章必须让故事产生实质性进展，不能停留在同一个场景重复同样的事
-4. 标题必须具体，不能用"第N章"这种格式
-5. 严格遵守"已死亡/已离场角色"约束，不可让死人重新活动
-6. 严格遵守"全局导演视角"中的阶段指引和场景重复警告
+【重要约束 — 必须严格遵守】
+1. 仔细阅读上方"实际结尾"，本章必须从那里接续，推进到新的情节
+2. 前面章节已完成的事件（如制度落地、内鬼抓获、矿道封锁等）严禁重复
+3. 本章必须让故事产生实质性进展，不能在同一场景重复同样的事
+4. 标题必须具体且与最近 5 章不同，不能用"第N章"格式
+5. 已死亡角色（见上方列表）严禁作为活人活动；其势力名称（如"黑风煞"作为帮派指代）也应改用"余部/残部/旧部"
+6. 严格遵守"全局导演视角"中的阶段指引
+7. ⚠️ 如果上方有"场景重复警告"，必须强制切换场景，不接受任何借口
+8. 当卷已进入新阶段（如从卷一进入卷二），必须开启全新主题，不继续写卷一的残留情节
 
 请严格按 JSON 格式返回:
 {{
