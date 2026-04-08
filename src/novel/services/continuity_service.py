@@ -80,6 +80,7 @@ class ContinuityService:
         chapter_brief: dict | None = None,
         story_arcs: list[dict] | None = None,
         characters: list | None = None,
+        protagonist_names: list[str] | None = None,
     ) -> dict[str, Any]:
         """Generate a unified continuity brief for the given chapter.
 
@@ -112,11 +113,15 @@ class ContinuityService:
             "recommended_payoffs": [],
         }
 
+        # Auto-derive protagonist names from characters if not provided
+        if protagonist_names is None:
+            protagonist_names = self._extract_protagonist_names(characters or [])
+
         self._extract_continuation_hooks(brief, chapters or [], chapter_number)
         self._extract_open_threads(brief, chapter_number)
         self._extract_character_states(brief, chapter_number, characters)
         self._extract_active_arcs(brief, chapter_number, story_arcs)
-        self._extract_dead_characters(brief, chapters or [], chapter_number)
+        self._extract_dead_characters(brief, chapters or [], chapter_number, protagonist_names)
         self._derive_forbidden_breaks(brief)
         self._extract_recommended_payoffs(brief, chapter_brief, chapter_number)
 
@@ -416,38 +421,82 @@ class ContinuityService:
                     f"{name}当前状态为{status}，不应有超出合理范围的行动表现"
                 )
 
+    @staticmethod
+    def _extract_protagonist_names(characters: list) -> list[str]:
+        """Extract protagonist/main character names from character list.
+
+        A character is considered protagonist if:
+        - role contains '主角' / 'protagonist' / 'main', OR
+        - it's the first character in the list (fallback)
+        """
+        names: list[str] = []
+        for c in characters or []:
+            if isinstance(c, dict):
+                role = str(c.get("role", "")).lower()
+                name = c.get("name", "")
+            else:
+                role = str(getattr(c, "role", "")).lower()
+                name = getattr(c, "name", "")
+            if not name:
+                continue
+            if any(k in role for k in ("主角", "protagonist", "main", "主人公")):
+                names.append(name)
+        # Fallback: first character if no protagonist marked
+        if not names and characters:
+            first = characters[0]
+            first_name = first.get("name", "") if isinstance(first, dict) else getattr(first, "name", "")
+            if first_name:
+                names.append(first_name)
+        return names
+
     def _extract_dead_characters(
         self,
         brief: dict,
         chapters: list[dict],
         chapter_number: int,
+        protagonist_names: list[str] | None = None,
     ) -> None:
         """Detect characters that died in previous chapters from actual_summaries.
 
         Scans actual_summary fields for death keywords and adds entries to
         forbidden_breaks so the Writer knows not to reference them as alive.
+
+        Args:
+            brief: Brief dict to update.
+            chapters: List of previous chapter dicts.
+            chapter_number: Current chapter being generated.
+            protagonist_names: List of protagonist names to exclude from detection.
+                If None, no protagonist filter is applied (caller should pass).
         """
         if not chapters:
             return
 
-        # Death-indicating patterns — capture must be a noun (2-4 chars), not a verb phrase
-        # Use sentence boundary anchors to avoid greedy matches across action descriptions
+        protagonist_names = protagonist_names or []
+
+        # Death detection patterns (universal — no hardcoded names)
         death_patterns = [
-            # 主语 + 被 + 处决类 (需要前置词或句首)
+            # X 被处决类 (sentence boundary anchored)
             re.compile(r"(?:^|[，。、])([\u4e00-\u9fa5]{2,4})(?:被)?(?:处决|处死|杀死|斩杀|斩首|击杀|阵亡|毙命|身死|咽气|气绝)"),
-            # 林辰 + 动作 + 宾语
-            re.compile(r"林辰(?:亲手)?(?:杀了|处决了|斩了|斩杀了)([\u4e00-\u9fa5]{2,4})"),
             # X 已死亡
             re.compile(r"(?:^|[，。、])([\u4e00-\u9fa5]{2,4})已死亡"),
+            # Subject + 处决了/杀了 + Object — captures the victim (second name)
+            re.compile(r"(?:[\u4e00-\u9fa5]{2,4})(?:亲手)?(?:杀了|处决了|斩了|斩杀了)([\u4e00-\u9fa5]{2,4})"),
         ]
 
-        # Pronouns/common words that should never be flagged as character names
+        # Generic pronouns/common words that are never character names
         _bad_names = {
-            "林辰", "他", "她", "他们", "她们", "那人", "众人", "敌人",
+            "他", "她", "他们", "她们", "那人", "众人", "敌人",
             "大家", "所有", "村民", "矿工", "士兵", "下属", "部下",
-            "村长", "敌方", "对方", "对手", "无人", "几人", "人员",
-            "本章", "事件", "事情", "人马",
+            "敌方", "对方", "对手", "无人", "几人", "人员",
+            "本章", "事件", "事情", "人马", "众生",
         }
+        # Add protagonist names to bad list
+        _bad_names.update(protagonist_names)
+
+        # Verb-prefix characters that indicate the capture is a verb phrase, not a name
+        _verb_prefix_chars = "且暂而把就让被使因如已未即将刚也都还又再"
+        # Filler chars that suggest the capture is a fragment, not a name
+        _filler_chars = ("无", "了", "的", "几", "成", "伤", "亡", "死")
 
         dead_chars: set[str] = set()
 
@@ -465,11 +514,14 @@ class ContinuityService:
                         continue
                     if name in _bad_names:
                         continue
-                    # Skip if contains protagonist or pronouns
-                    if any(bad in name for bad in ("林辰", "他", "她", "无", "了", "的", "几", "成", "伤")):
+                    # Skip if contains any protagonist name as substring
+                    if any(p and p in name for p in protagonist_names):
                         continue
-                    # Skip if starts with verb characters
-                    if name[0] in "且暂而把就让被使因如":
+                    # Skip if contains filler chars
+                    if any(bad in name for bad in _filler_chars):
+                        continue
+                    # Skip if starts with verb prefix
+                    if name[0] in _verb_prefix_chars:
                         continue
                     dead_chars.add(name)
 

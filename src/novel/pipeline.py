@@ -2640,10 +2640,15 @@ class NovelPipeline:
             from src.novel.services.continuity_service import ContinuityService
             _svc = ContinuityService()
             _tmp_brief = {"forbidden_breaks": []}
+            # Extract protagonist names from novel data to avoid false-positives
+            _novel_for_chars = (fm.load_novel(novel_id) if fm and novel_id else {}) or {}
+            _all_chars = _novel_for_chars.get("characters", [])
+            _proto_names = ContinuityService._extract_protagonist_names(_all_chars)
             _svc._extract_dead_characters(
                 _tmp_brief,
                 outline_data.get("chapters", []),
                 ch_num,
+                protagonist_names=_proto_names,
             )
             if _tmp_brief["forbidden_breaks"]:
                 dead_chars_section = (
@@ -2704,7 +2709,7 @@ class NovelPipeline:
 2. 前面章节已完成的事件（如制度落地、内鬼抓获、矿道封锁等）严禁重复
 3. 本章必须让故事产生实质性进展，不能在同一场景重复同样的事
 4. 标题必须具体且与最近 5 章不同，不能用"第N章"格式
-5. 已死亡角色（见上方列表）严禁作为活人活动；其势力名称（如"黑风煞"作为帮派指代）也应改用"余部/残部/旧部"
+5. 已死亡角色（见上方列表）严禁作为活人活动；其势力名称作为帮派指代时也应改用"余部/残部/旧部"形式
 6. 严格遵守"全局导演视角"中的阶段指引
 7. ⚠️ 如果上方有"场景重复警告"，必须强制切换场景，不接受任何借口
 8. 当卷已进入新阶段（如从卷一进入卷二），必须开启全新主题，不继续写卷一的残留情节

@@ -55,7 +55,7 @@ _LOCATION_KW = (
     "河边", "山顶", "谷底", "码头", "府邸", "府中", "院中", "门口",
     "城中", "城外", "山下", "洞中", "阵前", "殿中", "房间", "帐篷",
     "城池", "村庄", "小巷", "客房", "厅堂", "密道", "湖边", "崖边",
-    "山北", "山南", "断崖", "藏物点", "矿脉", "洞穴", "废墟",
+    "断崖", "洞穴", "废墟",
 )
 
 _INJURY_KW = (
@@ -127,24 +127,24 @@ _EXTRACTION_SYSTEM_PROMPT = """\
 4. 弧线推进：哪条故事线有进展、推进了多少（0.0~1.0之间的增量）
 5. 章节摘要：一句话概括本章核心事件
 
-只提取明确发生的变化，不要推测。输出严格 JSON 格式如下：
+只提取明确发生的变化，不要推测。输出严格 JSON 格式如下（示例字段值仅供格式参考）：
 {
     "character_updates": [
-        {"name": "角色名", "changes": {"health": "轻伤→恢复", "new_ability": "引灵术", "relationship": {"苏晚照": "初识"}, "location": "山洞", "emotion": "坚定"}}
+        {"name": "角色名", "changes": {"health": "状态变化", "new_ability": "新能力", "relationship": {"另一角色": "关系变化"}, "location": "新位置", "emotion": "情绪状态"}}
     ],
     "world_updates": [
-        {"type": "new_location", "name": "山北断崖", "description": "枯松下的藏物点"}
+        {"type": "new_location", "name": "新地点名称", "description": "地点描述"}
     ],
     "foreshadowing_planted": [
-        {"description": "引灵外物暗示无灵根有解", "chapter": %d}
+        {"description": "本章新埋的伏笔描述", "chapter": %d}
     ],
     "foreshadowing_collected": [
-        {"description": "第2章埋下的神秘人终于冒头", "original_chapter": 2}
+        {"description": "本章回收的旧伏笔描述", "original_chapter": 2}
     ],
     "arc_updates": [
-        {"arc_name": "矿脉争夺", "progress_delta": 0.15, "phase_note": "资源整合完成"}
+        {"arc_name": "故事弧线名称", "progress_delta": 0.15, "phase_note": "阶段进展说明"}
     ],
-    "outline_summary": "林辰整顿矿脉管理，建立分配制度，发现神秘修士"
+    "outline_summary": "本章核心事件的一句话概括"
 }
 
 如果某类变化没有发生，对应字段输出空数组 [] 或空字符串。"""
@@ -433,8 +433,9 @@ class StateWriteback:
                         changes["relationship"] = rel_type
                         break
 
-            # Early exit if we have enough
-            if len(changes) >= 4:
+            # Early exit only when ALL detector fields are filled
+            # (health, new_ability, power_level, location, emotion, relationship)
+            if len(changes) >= 6:
                 break
 
         return changes
