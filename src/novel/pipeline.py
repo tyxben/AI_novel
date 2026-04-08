@@ -2612,6 +2612,48 @@ class NovelPipeline:
                 )
                 break
 
+        # GlobalDirector: whole-book directorial guidance
+        director_section = ""
+        try:
+            from src.novel.services.global_director import GlobalDirector
+            novel_for_dir = (fm.load_novel(novel_id) if fm and novel_id else {}) or {}
+            director = GlobalDirector(novel_for_dir, outline_data)
+            recent_for_dir = []
+            for _ch in outline_data.get("chapters", []):
+                _cn = _ch.get("chapter_number", 0)
+                if 0 < _cn < ch_num:
+                    recent_for_dir.append({
+                        "chapter_number": _cn,
+                        "title": _ch.get("title", ""),
+                        "actual_summary": _ch.get("actual_summary", ""),
+                    })
+            d_brief = director.analyze(ch_num, recent_for_dir[-5:])
+            d_prompt = director.format_for_prompt(d_brief)
+            if d_prompt:
+                director_section = "\n" + d_prompt + "\n"
+        except Exception as exc:
+            log.debug("规划阶段 GlobalDirector 失败 (非关键): %s", exc)
+
+        # Dead characters: from previous chapters' actual_summaries
+        dead_chars_section = ""
+        try:
+            from src.novel.services.continuity_service import ContinuityService
+            _svc = ContinuityService()
+            _tmp_brief = {"forbidden_breaks": []}
+            _svc._extract_dead_characters(
+                _tmp_brief,
+                outline_data.get("chapters", []),
+                ch_num,
+            )
+            if _tmp_brief["forbidden_breaks"]:
+                dead_chars_section = (
+                    "\n## 已死亡/已离场角色（禁止当作活人使用）\n"
+                    + "\n".join(f"- {x}" for x in _tmp_brief["forbidden_breaks"])
+                    + "\n"
+                )
+        except Exception as exc:
+            log.debug("规划阶段死亡检测失败 (非关键): %s", exc)
+
         # Anti-repetition: events already planned in this batch
         batch_ctx = state.get("_batch_planned_context", [])
         batch_section = ""
@@ -2622,7 +2664,8 @@ class NovelPipeline:
 
 {f"主线信息: 主角目标={main_storyline.get('protagonist_goal', '')}, 核心冲突={main_storyline.get('core_conflict', '')}" if main_storyline else ""}
 {volume_info}
-
+{director_section}
+{dead_chars_section}
 前文概要（注意区分"大纲目标"和"实际结尾"——以实际结尾为准）:
 {recent_context}
 {batch_section}
@@ -2632,6 +2675,8 @@ class NovelPipeline:
 2. 前面章节已经完成的事件（如制度落地、内鬼抓获、矿道封锁等）不要重复
 3. 本章必须让故事产生实质性进展，不能停留在同一个场景重复同样的事
 4. 标题必须具体，不能用"第N章"这种格式
+5. 严格遵守"已死亡/已离场角色"约束，不可让死人重新活动
+6. 严格遵守"全局导演视角"中的阶段指引和场景重复警告
 
 请严格按 JSON 格式返回:
 {{
