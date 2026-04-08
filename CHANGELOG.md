@@ -1,5 +1,104 @@
 # 更新日志
 
+## [1.2.0] - 2026-04-08
+
+### 新增 — 小说生成质量三层增强
+
+- **GlobalDirector 全书状态监控** `NEW` — 新服务 `services/global_director.py`
+  - 计算每章在卷内的位置与推进百分比
+  - 自动判断故事阶段：起势 / 上升 / 高潮 / 收束 / 过渡
+  - 提取活跃故事弧线，卷末倒数自动预警
+  - 检测最近 5 章标题字符重复，强制场景切换
+  - 注入到 Writer 系统提示 + 大纲规划 prompt 双通道
+
+- **CharacterArcTracker 角色弧线追踪** `NEW` — 新服务 `services/character_arc_tracker.py`
+  - 从每章 actual_summary 自动识别成长阶段（觉醒/试炼/结盟/冲突/蜕变/失落/胜利）
+  - 记录每个角色的里程碑链（from_stage → to_stage + 触发事件）
+  - 长期未出场角色自动预警（>5 章未出现提示重新介绍）
+  - 状态持久化到 `novel.json` 的 `character_arc_states` 字段
+  - 注入到 Writer system prompt，约束角色行为与成长阶段一致
+
+- **HookGenerator 章末钩子生成** `NEW` — 新服务 `services/hook_generator.py`
+  - 自动评分章末钩子质量（0-10）
+  - 检测弱结尾（休息/总结/平淡）并用 LLM 重写
+  - 保留强钩子类型：问句 / 突发事件 / 省略悬念 / 被打断的关键动作
+  - 段落级智能拼接，不破坏正文主体
+
+- **自动补全 actual_summary** `NEW`
+  - `generate_chapters` 启动时扫描已写但缺摘要的章节
+  - 自动调 LLM 生成 2-3 句实际摘要（含死亡/转折等关键事件）
+  - 后续章节规划和死亡检测自动受益
+
+- **死亡角色检测** `NEW` — `ContinuityService._extract_dead_characters`
+  - 从 actual_summary 用正则识别"处决/斩杀/身亡"等关键词
+  - 死亡角色自动加入 `forbidden_breaks`，要求 Writer 用"余部/残部"指代
+  - 主角名自动从角色列表 role 字段提取（`_extract_protagonist_names`），不硬编码
+
+- **章节衔接验证器** `NEW`
+  - 章节保存后自动比对开头与上章结尾的关键词
+  - 无共同关键词时记 warning + decision，帮助发现断裂问题
+
+- **Writer 内容过滤器** `NEW` — `_sanitize_chapter_text`
+  - 自动过滤 `【系统】`、`【检测到...】` 等游戏 UI 泄漏
+  - 过滤 `忠诚度：71→79`、`【兵煞值+8】` 等数值变化
+  - 保留故事性标记如 `【叮！】`
+
+- **章节衔接硬约束**
+  - Writer 第一场景强制注入 5 条衔接规则（禁止跳时间/空间/事件）
+  - 首场景上下文标签从"前文回顾"改为"上章结尾 — 必须从这里接续"
+  - 首场景上下文窗口从 4000 字扩大到 6000 字
+  - PlotPlanner 要求第一场景 title/summary 必须体现"承接上章"
+
+- **201 条防御性测试**
+  - `test_taskqueue_defensive.py` 线程安全 + key 白名单 + limit 边界
+  - `test_pipeline_defensive.py` 空 YAML + 音频/字幕不匹配 + 资源泄漏
+  - `test_llm_tts_defensive.py` Ollama SDK + 事件循环 TTS + LLM 错误
+  - `test_novel_pipeline_defensive.py` state 保持 + 章节去重 + 重写上限
+  - `test_novel_services_defensive.py` DB 缓存 + 搜索 .txt + 异常清理
+  - `test_media_defensive.py` Sora 重试 + 嵌套 JSON + 资源清理
+
+### 修复 — 全局 Bug 审查（30+ 处）
+
+- **线程安全** — `workers.py` `_env_lock` 保护环境变量，防止多任务并发时 API key 互相污染
+- **Worker env var 恢复** — 清理时恢复原值而非删除，防止启动时 export 的 key 被删
+- **LLM provider fallback** — `create_llm_client` 指定 provider 失败时自动回退到 auto-detect
+- **API key 白名单** — `helpers.py` 补齐 Kling/Seedance/MiniMax/Jimeng/Together 5 个视频 key
+- **TTS 事件循环** — FastAPI 内调用 `asyncio.run()` 改用 ThreadPoolExecutor 规避
+- **Ollama SDK 兼容** — 新版 `ChatResponse` 对象和旧版 dict 响应都支持
+- **Sora 下载重试** — 恢复 3 次指数退避重试逻辑
+- **JSON 解析** — `idea_planner` 支持嵌套 JSON + 捕获贪婪正则异常
+- **Pipeline 资源泄漏** — videogen 连接用 try/finally 关闭
+- **audio/srt 校验** — 断点续传时数量不匹配报错而非静默截断
+- **API limit 边界** — `list_tasks` 上限 200 防 DoS
+- **checkpoint O(n²) I/O** — TTS 阶段 `save=False` 减少完整 JSON 写入
+- **章节生成每章重复第 19 章开头** — `writer_node` 按 `chapter_number` 找前一章，不再用 `chapters_done[-1]`
+- **chapters 列表去重** — 新生成的章节替换旧条目（含 full_text），而非跳过
+- **ReAct 工具调用泄漏** — 截断的 tool-call JSON 请求重试而非当成最终输出
+- **章节标题垃圾** — `_sanitize_title` 过滤 `\n`、引号、prompt 指令片段
+- **规划任务"已提交"卡住** — `planMut.reset()` 清除成功状态 + 查询失效刷新
+- **Agent 对话错误不显示** — 修复 optimistic 合并逻辑，错误消息保留
+- **novel_memory close 丢失图谱** — `close()` 前自动 `save()`
+- **obligation_tracker 两次 DB 调用** — 合并为单事务
+- **continuity regex 跨句** — 限制在单句内匹配（`[^。！？\n]`）
+- **video_assembler SRT 路径特殊字符** — 复制到 tmp_dir 规避
+- **video_assembler drawtext 过度转义** — 从 4 层降为正确的 1 层
+- **plot_planner rhythm 越界** — 加保护 `rhythm[i] if i < len(rhythm) else rhythm[-1]`
+- **character_tracker 多角色同描述** — 用 `pop(0)` 按序分配
+
+### 通用化 — 移除所有硬编码的小说特定内容
+
+- `continuity_service` 死亡检测移除硬编码主角名，改为从角色列表自动提取
+- `state_writeback` 示例和地点词移除小说专属内容
+- `consistency_checker` / `character_service` / `agent_chat` 示例改为通用占位符
+- `pipeline` 大纲约束 prompt 不再引用特定小说角色名
+
+### 变更
+
+- 版本号从 1.1.0 升级至 1.2.0
+- 测试总数从 3420 → **3692**（+272 个新测试）
+
+---
+
 ## [1.1.0] - 2026-04-01
 
 ### 新增

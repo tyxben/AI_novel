@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.1.0-orange)]()
+[![Version](https://img.shields.io/badge/version-v1.2.0-orange)]()
 
 ---
 
@@ -21,13 +21,20 @@
 
 ### AI 长篇小说
 - **9 Agent 协作** — 导演/世界观/角色/情节/写手/一致性/风格/质量/反馈，全自动 10 万字小说
-- **叙事状态驱动** `NEW` — ContinuityService 聚合上下文，每章写前生成连续性约束（人物状态/未决线索/禁止断裂项）
-- **向量语义一致性检查** `NEW` — Chroma 向量检索替代 BM25，每章自动检查矛盾（角色复活/失踪/事件重复）
-- **智能会话记忆** `NEW` — Agent Chat 自动恢复对话历史 + 工作记忆注入，多轮协作不再"每轮重新开始"
-- **ReAct 推理模式** `NEW` — Writer 支持 ReAct 工具链推理，Prompt Registry 管理提示词版本与质量
-- **两段式章节编排** `NEW` — 写前大纲修订(dynamic_outline) + 写后状态回写(state_writeback)，对话型 Agent Chat 助手
-- **叙事债务追踪** `NEW` — ObligationTracker 追踪未解决线索 + VolumeSettlement 卷末自动收束
-- **LLM 分阶段配置** `NEW` — 大纲用 GPT-4、写作用 DeepSeek，按创作阶段选配最优模型
+- **全书状态监控** `NEW v1.2` — GlobalDirector 持续监控卷进度/阶段/活跃弧线，自动预警场景重复并强制切换
+- **角色弧线追踪** `NEW v1.2` — CharacterArcTracker 自动识别角色成长阶段，约束行为与成长一致，长期未出场自动预警
+- **章末钩子优化** `NEW v1.2` — HookGenerator 评分弱结尾并 LLM 重写为强悬念（问句/突发/打断/省略）
+- **死亡角色检测** `NEW v1.2` — 从章节摘要自动识别已死亡角色，禁止作为活人出现，势力改用"余部/残部"
+- **自动摘要补全** `NEW v1.2` — 项目加载时自动补全历史章节的实际摘要，确保后续规划基于真实剧情
+- **章节衔接硬约束** `NEW v1.2` — 第一场景强制注入衔接规则，禁止跳时间/空间/事件，首场景上下文扩大到 6000 字
+- **内容过滤器** `NEW v1.2` — 自动过滤系统 UI 泄漏（【检测到】/忠诚度+8），保留故事性标记
+- **叙事状态驱动** — ContinuityService 聚合上下文，每章写前生成连续性约束（人物状态/未决线索/禁止断裂项）
+- **向量语义一致性检查** — Chroma 向量检索替代 BM25，每章自动检查矛盾（角色复活/失踪/事件重复）
+- **智能会话记忆** — Agent Chat 自动恢复对话历史 + 工作记忆注入，多轮协作不再"每轮重新开始"
+- **ReAct 推理模式** — Writer 支持 ReAct 工具链推理，Prompt Registry 管理提示词版本与质量
+- **两段式章节编排** — 写前大纲修订(dynamic_outline) + 写后状态回写(state_writeback)，对话型 Agent Chat 助手
+- **叙事债务追踪** — ObligationTracker 追踪未解决线索 + VolumeSettlement 卷末自动收束
+- **LLM 分阶段配置** — 大纲用 GPT-4、写作用 DeepSeek，按创作阶段选配最优模型
 - **读者反馈系统** — 分析反馈影响范围，自动重写受影响章节，反馈约束同时注入 one-shot 和 ReAct 写作路径
 - **风格预设** — 玄幻爽文 / 都市 / 武侠 / 仙侠 / 文学 / 轻小说 6 大类
 
