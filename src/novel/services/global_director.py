@@ -53,24 +53,27 @@ class GlobalDirector:
     def _calculate_position(self, chapter_number: int) -> dict[str, Any]:
         """Find which volume and what % of it the chapter is in."""
         for vol in self.volumes:
+            # Support two schemas: explicit chapters list OR start_chapter/end_chapter
+            start = 0
+            end = 0
             chs = vol.get("chapters", [])
-            if not chs:
-                continue
-            # chs may be a list of ints or a range. Handle both.
-            if isinstance(chs, list) and chs:
-                start = min(chs) if all(isinstance(c, int) for c in chs) else 0
-                end = max(chs) if all(isinstance(c, int) for c in chs) else 0
-                if start <= chapter_number <= end:
-                    progress = (chapter_number - start + 1) / (end - start + 1) if end > start else 1.0
-                    return {
-                        "volume_number": vol.get("volume_number", 0),
-                        "volume_title": vol.get("title", ""),
-                        "volume_theme": vol.get("theme", ""),
-                        "chapter_in_volume": chapter_number - start + 1,
-                        "volume_total": end - start + 1,
-                        "progress_pct": round(progress * 100, 1),
-                        "chapters_remaining_in_volume": end - chapter_number,
-                    }
+            if isinstance(chs, list) and chs and all(isinstance(c, int) for c in chs):
+                start = min(chs)
+                end = max(chs)
+            else:
+                start = vol.get("start_chapter", 0) or 0
+                end = vol.get("end_chapter", 0) or 0
+            if start and end and start <= chapter_number <= end:
+                progress = (chapter_number - start + 1) / (end - start + 1) if end > start else 1.0
+                return {
+                    "volume_number": vol.get("volume_number", 0),
+                    "volume_title": vol.get("title", ""),
+                    "volume_theme": vol.get("theme", ""),
+                    "chapter_in_volume": chapter_number - start + 1,
+                    "volume_total": end - start + 1,
+                    "progress_pct": round(progress * 100, 1),
+                    "chapters_remaining_in_volume": end - chapter_number,
+                }
         # Fallback: rough estimate based on total
         return {
             "volume_number": 0,

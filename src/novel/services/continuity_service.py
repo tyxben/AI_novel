@@ -430,12 +430,24 @@ class ContinuityService:
         if not chapters:
             return
 
-        # Death-indicating patterns
+        # Death-indicating patterns — capture must be a noun (2-4 chars), not a verb phrase
+        # Use sentence boundary anchors to avoid greedy matches across action descriptions
         death_patterns = [
-            re.compile(r"([\u4e00-\u9fa5]{2,8})(?:被)?(?:处决|处死|杀死|杀掉|斩杀|斩首|击杀|身亡|阵亡|死亡|毙命|身死|咽气|气绝|没了声息)"),
-            re.compile(r"([\u4e00-\u9fa5]{2,8})(?:已)?(?:死|亡)(?:了|去)?"),
-            re.compile(r"林辰(?:亲手)?(?:杀了|处决了|斩了)([\u4e00-\u9fa5]{2,8})"),
+            # 主语 + 被 + 处决类 (需要前置词或句首)
+            re.compile(r"(?:^|[，。、])([\u4e00-\u9fa5]{2,4})(?:被)?(?:处决|处死|杀死|斩杀|斩首|击杀|阵亡|毙命|身死|咽气|气绝)"),
+            # 林辰 + 动作 + 宾语
+            re.compile(r"林辰(?:亲手)?(?:杀了|处决了|斩了|斩杀了)([\u4e00-\u9fa5]{2,4})"),
+            # X 已死亡
+            re.compile(r"(?:^|[，。、])([\u4e00-\u9fa5]{2,4})已死亡"),
         ]
+
+        # Pronouns/common words that should never be flagged as character names
+        _bad_names = {
+            "林辰", "他", "她", "他们", "她们", "那人", "众人", "敌人",
+            "大家", "所有", "村民", "矿工", "士兵", "下属", "部下",
+            "村长", "敌方", "对方", "对手", "无人", "几人", "人员",
+            "本章", "事件", "事情", "人马",
+        }
 
         dead_chars: set[str] = set()
 
@@ -449,13 +461,17 @@ class ContinuityService:
             for pattern in death_patterns:
                 for m in pattern.finditer(summary):
                     name = m.group(1).strip()
-                    # Filter out common verbs/words that aren't names
-                    if name and len(name) >= 2 and name not in ("林辰", "他", "她", "那人", "众人", "敌人", "大家", "所有"):
-                        # Skip captures that contain the protagonist's name
-                        # (e.g. "林辰差点" from "林辰差点死在敌人手里")
-                        if "林辰" in name:
-                            continue
-                        dead_chars.add(name)
+                    if not name or len(name) < 2:
+                        continue
+                    if name in _bad_names:
+                        continue
+                    # Skip if contains protagonist or pronouns
+                    if any(bad in name for bad in ("林辰", "他", "她", "无", "了", "的", "几", "成", "伤")):
+                        continue
+                    # Skip if starts with verb characters
+                    if name[0] in "且暂而把就让被使因如":
+                        continue
+                    dead_chars.add(name)
 
         if dead_chars:
             for name in dead_chars:
