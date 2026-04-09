@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Literal, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -68,7 +68,7 @@ class Chapter(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat(),
         description="生成时间 ISO 格式",
     )
-    quality_score: float = Field(0.0, ge=0.0, le=10.0)
+    quality_score: Optional[float] = Field(None, ge=0.0, le=10.0)
 
     # 状态
     status: Literal["draft", "reviewed", "finalized"] = Field(

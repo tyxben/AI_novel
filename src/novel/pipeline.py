@@ -1250,13 +1250,12 @@ class NovelPipeline:
                 except Exception as exc:
                     log.warning("钩子生成失败 (非关键): %s", exc)
 
-                ch_data = {
-                    "chapter_number": ch_num,
-                    "title": ch_title,
-                    "full_text": chapter_text,
-                    "word_count": count_words(chapter_text),
-                    "status": "draft",
-                }
+                ch_data = self._build_chapter_record(
+                    state=state,
+                    ch_num=ch_num,
+                    ch_title=ch_title,
+                    chapter_text=chapter_text,
+                )
                 fm.save_chapter(novel_id, ch_num, ch_data)
 
                 # Backfill outline for placeholder chapters
@@ -2059,6 +2058,17 @@ class NovelPipeline:
                     "full_text": new_text,
                     "word_count": len(new_text),
                     "status": "draft",
+                    # Rewriting invalidates any previous quality scoring — the
+                    # old scores were computed against the old text. Explicitly
+                    # null them so downstream code knows this chapter needs to
+                    # be re-scored, rather than silently dropping the fields
+                    # (which would make them look "never scored").
+                    "quality_score": None,
+                    "quality_scores": None,
+                    "retention_scores": None,
+                    "rule_passed": True,
+                    "rule_checked": False,
+                    "scored_by_llm": False,
                 }
                 # Extract better title if current is placeholder
                 if ch_json["title"] == f"第{ch_num}章":
@@ -2066,12 +2076,19 @@ class NovelPipeline:
                 fm.save_chapter(novel_id, ch_num, ch_json)
                 chapter_texts[ch_num] = new_text  # update for subsequent chapters' context
 
-                # Also update state chapters list
+                # Also update state chapters list (keep in sync with disk —
+                # stale quality fields here would survive checkpointing).
                 for ch_data in state.get("chapters") or []:
                     if ch_data.get("chapter_number") == ch_num:
                         ch_data["full_text"] = new_text
                         ch_data["word_count"] = len(new_text)
                         ch_data["title"] = ch_json["title"]
+                        ch_data["quality_score"] = None
+                        ch_data["quality_scores"] = None
+                        ch_data["retention_scores"] = None
+                        ch_data["rule_passed"] = True
+                        ch_data["rule_checked"] = False
+                        ch_data["scored_by_llm"] = False
                         break
 
                 result["rewritten_chapters"].append(
@@ -2952,6 +2969,70 @@ class NovelPipeline:
         if not summaries:
             return "（尚未生成任何章节）"
         return "\n".join(summaries)
+
+    @staticmethod
+    def _build_chapter_record(
+        state: dict,
+        ch_num: int,
+        ch_title: str,
+        chapter_text: str,
+    ) -> dict:
+        """Build the ch_data dict persisted for a chapter.
+
+        Extracts the quality report from ``state["current_chapter_quality"]`` and
+        merges it into the chapter record. Distinguishes four cases via two
+        orthogonal flags (``rule_checked``, ``scored_by_llm``):
+
+        +-----------------+--------------+---------------+
+        | case            | rule_checked | scored_by_llm |
+        +-----------------+--------------+---------------+
+        | LLM-scored      | True         | True          |
+        | Budget mode     | True         | False         |
+        | Reviewer crash  | False        | False         |
+        | Non-dict report | False        | False         |
+        +-----------------+--------------+---------------+
+
+        ``rule_checked=False`` is the only signal that the reviewer never
+        produced a structured report. Downstream code that wants to re-score
+        a chapter must check this flag, not ``scored_by_llm``.
+
+        The helper is defensive against malformed reviewer output: any field
+        that is not the expected dict type is treated as missing, and the
+        ch_data dict is still built without raising.
+        """
+        raw_report = state.get("current_chapter_quality")
+        quality_report = raw_report if isinstance(raw_report, dict) else {}
+
+        scores_raw = quality_report.get("scores")
+        scores = scores_raw if isinstance(scores_raw, dict) else {}
+
+        retention_raw = quality_report.get("retention_scores")
+        retention = retention_raw if isinstance(retention_raw, dict) else {}
+
+        rule_check_raw = quality_report.get("rule_check")
+        rule_check = rule_check_raw if isinstance(rule_check_raw, dict) else {}
+
+        # Average only numeric values; silently drop strings/None/etc. so one
+        # bad entry doesn't poison the whole score.
+        quality_score: float | None = None
+        if scores:
+            numeric = [v for v in scores.values() if isinstance(v, (int, float))]
+            if numeric:
+                quality_score = sum(numeric) / len(numeric)
+
+        return {
+            "chapter_number": ch_num,
+            "title": ch_title,
+            "full_text": chapter_text,
+            "word_count": count_words(chapter_text),
+            "status": "draft",
+            "quality_score": quality_score,
+            "quality_scores": scores or None,
+            "retention_scores": retention or None,
+            "rule_passed": rule_check.get("passed", True),
+            "rule_checked": bool(rule_check),
+            "scored_by_llm": bool(scores),
+        }
 
     @staticmethod
     def _extract_character_snapshot(char_name: str, text: str) -> dict[str, str]:
