@@ -4,67 +4,81 @@
 
 ### 1.1 系统定位
 
-叙事节奏控制 v2 是对现有小说生成系统的 **非侵入式增强层**，通过三个并行机制在现有 Agent 流程的关键决策点注入约束和引导信号，无需重写核心 Agent 逻辑。
+叙事节奏控制 v2 是对现有小说生成系统的 **非侵入式增强层**，通过四个并行机制在现有 Agent 流程的关键决策点注入约束和引导信号，无需重写核心 Agent 逻辑。
 
-### 1.2 三机制协同架构
+**实施阶段**：
+- **Phase 1（立即实施）**：干预 A（卷进度预算）+ 干预 D（写手风格锚定） — 解决阻塞性问题（进度卡死 + 风格漂移）
+- **Phase 2（ch40-50 后）**：干预 B（系统能力状态机）+ 干预 C（策略复杂度阶梯） — 增强内容丰富性（张力 + 多样性）
+
+### 1.2 四机制协同架构
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    NovelDirector（大纲生成阶段）                   │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐     │
-│  │ 生成卷大纲     │  │ 生成系统失效   │  │ 分配策略 Tier  │     │
-│  │ + 里程碑       │  │ 排程           │  │ 范围           │     │
-│  └───────┬────────┘  └───────┬────────┘  └───────┬────────┘     │
-│          │                   │                   │              │
-│          └───────────────────┴───────────────────┘              │
-│                              │                                  │
-│                    写入 novel.json                              │
-└──────────────────────────────┼───────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────┐
-│              每章生成循环（PlotPlanner → Writer → Reviewers）      │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │ ContinuityService.generate_brief()                          ││
-│  │   - 读取当前卷进度（已完成/逾期里程碑）                       ││
-│  │   - 读取系统失效排程（本章是否失效）                          ││
-│  │   - 聚合为 continuity_brief                                 ││
-│  └────────────────────┬────────────────────────────────────────┘│
-│                       │                                         │
-│  ┌────────────────────▼────────────────────────────────────────┐│
-│  │ PlotPlanner.decompose_chapter()                             ││
-│  │   - 读取 volume_progress → 判断是否需要加速里程碑            ││
-│  │   - 读取系统状态 → 规划"系统失效"场景                        ││
-│  │   - 抽取策略元素 → 注入 required_strategy_elements          ││
-│  │   - 生成场景计划（scenes）                                   ││
-│  └────────────────────┬────────────────────────────────────────┘│
-│                       │                                         │
-│  ┌────────────────────▼────────────────────────────────────────┐│
-│  │ Writer.write_scene()                                        ││
-│  │   - 读取系统状态 → 禁用功能列表注入 prompt                   ││
-│  │   - 读取策略元素 → 要求文本体现策略                          ││
-│  │   - 生成场景正文                                             ││
-│  └────────────────────┬────────────────────────────────────────┘│
-│                       │                                         │
-│  ┌────────────────────▼────────────────────────────────────────┐│
-│  │ ConsistencyChecker / QualityReviewer                        ││
-│  │   - 检查系统失效期间是否误用禁用功能                          ││
-│  │   - 检查策略元素是否在文本中体现                             ││
-│  └────────────────────┬────────────────────────────────────────┘│
-│                       │                                         │
-│  ┌────────────────────▼────────────────────────────────────────┐│
-│  │ 章节生成后勾子                                               ││
-│  │   - MilestoneTracker.check_completion()（检查里程碑）        ││
-│  │   - SystemStateTracker.advance_state()（推进系统状态）       ││
-│  │   - StrategyUsageTracker.record_usage()（记录策略使用）      ││
-│  └─────────────────────────────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────┐
-│                    卷边界勾子（VolumeSettlement）                  │
-│  - 生成卷完成度报告（里程碑完成率 / 继承 / 放弃）                  │
-│  - 继承未完成里程碑到下一卷                                        │
-│  - 生成策略使用统计报告                                            │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        NovelDirector（大纲生成阶段）                       │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │
+│  │生成卷大纲   │  │生成风格圣经 │  │生成系统失效 │  │分配策略Tier │   │
+│  │+ 里程碑(A) │  │(D)          │  │排程(B,P2)   │  │范围(C,P2)   │   │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘   │
+│         │                │                │                │          │
+│         └────────────────┴────────────────┴────────────────┘          │
+│                                  │                                    │
+│                        写入 novel.json                                │
+└──────────────────────────────────┼─────────────────────────────────────┘
+                                   │
+┌──────────────────────────────────▼─────────────────────────────────────┐
+│                每章生成循环（PlotPlanner → Writer → Reviewers）          │
+│  ┌───────────────────────────────────────────────────────────────────┐│
+│  │ ContinuityService.generate_brief()                                ││
+│  │   - 读取当前卷进度（已完成/逾期里程碑）(A)                          ││
+│  │   - 读取风格圣经（量化目标 + 范例文本）(D)                          ││
+│  │   - 读取系统失效排程（本章是否失效）(B,P2)                          ││
+│  │   - 聚合为 continuity_brief + style_brief                         ││
+│  └───────────────────────┬───────────────────────────────────────────┘│
+│                          │                                            │
+│  ┌───────────────────────▼───────────────────────────────────────────┐│
+│  │ PlotPlanner.decompose_chapter()                                   ││
+│  │   - 读取 volume_progress → 判断是否需要加速里程碑(A)              ││
+│  │   - 读取系统状态 → 规划"系统失效"场景(B,P2)                        ││
+│  │   - 抽取策略元素 → 注入 required_strategy_elements(C,P2)          ││
+│  │   - 生成场景计划（scenes）                                         ││
+│  └───────────────────────┬───────────────────────────────────────────┘│
+│                          │                                            │
+│  ┌───────────────────────▼───────────────────────────────────────────┐│
+│  │ Writer.write_scene()                                              ││
+│  │   - 读取 style_brief → 注入量化目标 + 范例文本(D)                  ││
+│  │   - 读取系统状态 → 禁用功能列表注入 prompt(B,P2)                   ││
+│  │   - 读取策略元素 → 要求文本体现策略(C,P2)                          ││
+│  │   - 生成场景正文                                                   ││
+│  └───────────────────────┬───────────────────────────────────────────┘│
+│                          │                                            │
+│  ┌───────────────────────▼───────────────────────────────────────────┐│
+│  │ [ConsistencyChecker ∥ StyleKeeper]                                ││
+│  │   - StyleKeeper: 量化检查风格偏差，偏差 > 阈值 → need_rewrite(D)   ││
+│  │   - ConsistencyChecker: 检查系统失效期间误用禁用功能(B,P2)         ││
+│  └───────────────────────┬───────────────────────────────────────────┘│
+│                          │                                            │
+│  ┌───────────────────────▼───────────────────────────────────────────┐│
+│  │ QualityReviewer                                                   ││
+│  │   - 读取 StyleKeeper 的 need_rewrite 标志(D)                       ││
+│  │   - 若 StyleKeeper 返回 True → 强制重写（无论内容质量）            ││
+│  │   - 检查策略元素是否在文本中体现(C,P2)                             ││
+│  └───────────────────────┬───────────────────────────────────────────┘│
+│                          │                                            │
+│  ┌───────────────────────▼───────────────────────────────────────────┐│
+│  │ 章节生成后勾子                                                     ││
+│  │   - MilestoneTracker.check_completion()（检查里程碑）(A)           ││
+│  │   - SystemStateTracker.advance_state()（推进系统状态）(B,P2)       ││
+│  │   - StrategyUsageTracker.record_usage()（记录策略使用）(C,P2)      ││
+│  └───────────────────────────────────────────────────────────────────┘│
+└────────────────────────────────────────────────────────────────────────┘
+                                   │
+┌──────────────────────────────────▼─────────────────────────────────────┐
+│                        卷边界勾子（VolumeSettlement）                    │
+│  - 生成卷完成度报告（里程碑完成率 / 继承 / 放弃）(A)                     │
+│  - 生成风格稳定性报告（卷内风格偏差统计）(D)                             │
+│  - 继承未完成里程碑到下一卷(A)                                          │
+│  - 生成策略使用统计报告(C,P2)                                           │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 1.3 数据流向
@@ -72,27 +86,30 @@
 ```
 大纲阶段（一次性）:
   novel.json 写入:
-    - volumes[].narrative_milestones
-    - system_failure_schedule
-    - volumes[].strategy_tier_range
-    - enable_strategy_ladder
+    - volumes[].narrative_milestones (A, Phase 1)
+    - style_bible (D, Phase 1)
+    - system_failure_schedule (B, Phase 2)
+    - volumes[].strategy_tier_range (C, Phase 2)
+    - enable_strategy_ladder (C, Phase 2)
 
 每章生成:
   读取:
-    novel.json → ContinuityService → continuity_brief
-    novel.json → PlotPlanner → chapter_brief (with strategy elements)
-    novel.json → Writer → system prompt (with constraints)
+    novel.json → ContinuityService → continuity_brief (A) + style_brief (D)
+    novel.json → PlotPlanner → chapter_brief (with strategy elements, C)
+    novel.json → Writer → system prompt (with style anchors D + system constraints B + strategy C)
   写入:
-    chapter.full_text → MilestoneTracker → novel.json (milestone.status)
-    chapter.full_text → StrategyUsageTracker → memory.db (strategy_usage table)
-    current_chapter → SystemStateTracker → novel.json (system_state.current_mode)
+    chapter.full_text → MilestoneTracker → novel.json (milestone.status, A)
+    chapter.full_text → StyleKeeper → 量化检查 → current_chapter_quality["style_need_rewrite"] (D)
+    chapter.full_text → StrategyUsageTracker → memory.db (strategy_usage table, C)
+    current_chapter → SystemStateTracker → novel.json (system_state.current_mode, B)
 
 卷边界:
   读取:
-    novel.json → VolumeSettlement → 汇总卷完成度
+    novel.json → VolumeSettlement → 汇总卷完成度 + 风格稳定性
   写入:
-    novel.json → volumes[].settlement_report
-    novel.json → 下一卷继承里程碑
+    novel.json → volumes[].settlement_report (A + D)
+    novel.json → 下一卷继承里程碑 (A)
+    novel.json → 卷内风格偏差统计 (D)
 ```
 
 ---
@@ -211,6 +228,42 @@ class StrategyTier(BaseModel):
     applicable_scales: str = Field(..., description="适用叙事尺度，如 '单人/小场景'")
 
 
+class StyleBible(BaseModel):
+    """风格圣经 - 项目专属风格锚定文档"""
+    quantitative_targets: dict[str, list[float] | float] = Field(
+        ...,
+        description="量化目标，如 {'avg_sentence_length': [8, 18], 'dialogue_ratio': [0.40, 0.60]}"
+    )
+    voice_description: str = Field(
+        ...,
+        min_length=20,
+        max_length=200,
+        description="文风描述（~50 字），如'短句快节奏，对话密集，避免长段心理独白'"
+    )
+    exemplar_paragraphs: list[str] = Field(
+        ...,
+        min_items=2,
+        max_items=5,
+        description="范例段落（2-3 段，每段 ~200 字），用作 Writer 的 few-shot 示范"
+    )
+    anti_patterns: list[str] = Field(
+        default_factory=list,
+        description="禁用模式列表，如 ['避免XX的XX气息堆叠', '禁止超过3行的心理独白']"
+    )
+    volume_overrides: dict[int, dict] | None = Field(
+        default=None,
+        description="卷级覆盖，可选，如 {2: {'dialogue_ratio': [0.50, 0.70]}}"
+    )
+    generated_at: str = Field(
+        default_factory=lambda: datetime.now().isoformat(),
+        description="生成时间戳"
+    )
+    based_on_chapters: list[int] | None = Field(
+        default=None,
+        description="若基于已生成章节分析，记录章节号列表（用于迁移场景）"
+    )
+
+
 class VolumeProgressReport(BaseModel):
     """卷完成度报告"""
     volume_number: int = Field(..., ge=1)
@@ -236,7 +289,30 @@ class VolumeProgressReport(BaseModel):
   "title": "...",
   "genre": "...",
   "theme": "...",
+  "style_name": "webnovel.shuangwen",
   "enable_strategy_ladder": true,  // 新增：是否启用策略阶梯
+  "style_bible": {  // 新增：风格圣经（Phase 1）
+    "quantitative_targets": {
+      "avg_sentence_length": [8, 18],
+      "dialogue_ratio": [0.40, 0.60],
+      "paragraph_length": [3, 5],
+      "sensory_density": [0.5, 1.0],
+      "exclamation_ratio": [0.05, 0.15]
+    },
+    "voice_description": "短句快节奏，对话密集，动作场面用电影镜头感，避免长段心理独白和诗意化景物描写",
+    "exemplar_paragraphs": [
+      "\"废物？\"\\n林凡嘴角微扬，随手一挥。\\n轰！\\n一股恐怖的气浪横扫全场，那几个嘲笑他的弟子直接被震飞出去，撞在墙壁上，口吐鲜血。\\n全场寂静。\\n所有人都傻了。",
+      "刀光一闪。\\n他还没看清对手出刀的轨迹，胸口已经多了一道血痕。\\n\"你太慢了。\"对面的女人收刀入鞘，语气像在点评一道不够火候的菜。"
+    ],
+    "anti_patterns": [
+      "避免'XX的XX气息'类感官堆叠超过1次/千字",
+      "禁止超过3行的心理独白",
+      "禁止诗意化景物描写（如'夜风裹挟着冷气从深处涌来，混杂着焦油的腥臭和矿泥的潮湿气息'）"
+    ],
+    "volume_overrides": null,
+    "generated_at": "2025-03-20T08:00:00Z",
+    "based_on_chapters": null
+  },
   "outline": {
     "volumes": [
       {
@@ -1913,59 +1989,731 @@ def _detect_strategy_theme(self, genre: str, theme: str) -> bool:
 
 ---
 
-## 6. 交互合力：三机制协同案例
+## 5.5. 机制 D：写手风格锚定详细设计
+
+### 5.5.1 风格圣经生成
+
+**触发时机**：`NovelDirector.generate_outline()` 完成后，在返回前生成风格圣经
+
+**生成逻辑**：
+
+新增模块：`src/novel/services/style_bible_generator.py`
+
+```python
+"""风格圣经生成服务"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from src.llm.llm_client import LLMClient
+from src.novel.models.narrative_control import StyleBible
+from src.novel.templates.style_presets import get_style
+
+log = logging.getLogger("novel.style_bible")
+
+_GENERATE_BIBLE_SYSTEM = """你是风格定义专家，负责为小说项目生成精确的风格圣经。
+
+你的任务：
+1. 基于题材、主题和风格预设，生成量化的风格目标（句长范围、对话占比等）
+2. 创作 2-3 段范例文本（每段 ~200 字），体现该风格的典型特征
+3. 列出该风格下的禁用模式（避免 AI 味过重、不符合风格的写法）
+
+输出格式：JSON
+"""
+
+_GENERATE_BIBLE_USER = """
+## 项目信息
+- 题材：{genre}
+- 主题：{theme}
+- 风格预设：{style_name}
+- 预设约束：{style_constraints}
+
+## 任务
+生成风格圣经，包含：
+
+1. **quantitative_targets**（量化目标，字典）：
+   - avg_sentence_length: 平均句长范围 [min, max]（字数）
+   - dialogue_ratio: 对话占比范围 [min, max]（0.0-1.0）
+   - paragraph_length: 段落平均句数范围 [min, max]
+   - sensory_density: 感官描述密度范围 [min, max]（次/千字）
+   - exclamation_ratio: 感叹句占比范围 [min, max]（0.0-1.0）
+   - (可选) classical_word_ratio: 古风词汇占比（仅古风题材）
+
+2. **voice_description**（文风描述，50字以内）：
+   简洁描述该风格的核心特征，如"短句快节奏，对话密集，避免长段心理独白"
+
+3. **exemplar_paragraphs**（范例段落，列表，2-3 段）：
+   每段 ~200 字，体现该风格的典型写法。必须符合题材和主题。
+
+4. **anti_patterns**（禁用模式，列表，3-5 项）：
+   该风格下应避免的写法，如"避免'XX的XX气息'堆叠""禁止超过3行的心理独白"
+
+输出 JSON：
+{{
+  "quantitative_targets": {{...}},
+  "voice_description": "...",
+  "exemplar_paragraphs": ["段落1", "段落2"],
+  "anti_patterns": ["禁用1", "禁用2", ...]
+}}
+"""
+
+
+class StyleBibleGenerator:
+    """风格圣经生成器"""
+
+    def __init__(self, llm_client: LLMClient):
+        self.llm = llm_client
+
+    def generate(
+        self,
+        genre: str,
+        theme: str,
+        style_name: str,
+    ) -> StyleBible:
+        """生成风格圣经。
+
+        Args:
+            genre: 题材
+            theme: 主题
+            style_name: 风格预设名称（如 "webnovel.shuangwen"）
+
+        Returns:
+            StyleBible 实例
+
+        Raises:
+            ValueError: 风格预设不存在
+            RuntimeError: LLM 生成失败
+        """
+        # 读取风格预设作为锚点
+        try:
+            preset = get_style(style_name)
+        except KeyError as exc:
+            raise ValueError(f"风格预设不存在: {style_name}") from exc
+
+        constraints = preset.get("constraints", {})
+
+        # 构建 LLM prompt
+        user_prompt = _GENERATE_BIBLE_USER.format(
+            genre=genre,
+            theme=theme,
+            style_name=style_name,
+            style_constraints=json.dumps(constraints, ensure_ascii=False, indent=2),
+        )
+
+        messages = [
+            {"role": "system", "content": _GENERATE_BIBLE_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # 调用 LLM
+        try:
+            resp = self.llm.chat(messages, temperature=0.7, json_mode=True)
+            data = json.loads(resp.content)
+        except Exception as exc:
+            log.warning(f"风格圣经生成失败，使用 fallback: {exc}")
+            # Fallback: 使用预设约束直接构建
+            data = self._fallback_bible(constraints, style_name)
+
+        # 构建 StyleBible
+        try:
+            bible = StyleBible(
+                quantitative_targets=data["quantitative_targets"],
+                voice_description=data["voice_description"],
+                exemplar_paragraphs=data["exemplar_paragraphs"],
+                anti_patterns=data.get("anti_patterns", []),
+                volume_overrides=None,
+                based_on_chapters=None,
+            )
+        except Exception as exc:
+            log.warning(f"风格圣经解析失败，使用 fallback: {exc}")
+            bible = self._fallback_bible(constraints, style_name, as_model=True)
+
+        log.info(f"风格圣经生成完成：{style_name}")
+        return bible
+
+    def _fallback_bible(
+        self,
+        constraints: dict[str, Any],
+        style_name: str,
+        as_model: bool = False,
+    ) -> dict | StyleBible:
+        """Fallback: 直接使用预设约束构建风格圣经。"""
+        data = {
+            "quantitative_targets": {
+                "avg_sentence_length": constraints.get("avg_sentence_length", [12, 20]),
+                "dialogue_ratio": constraints.get("dialogue_ratio", [0.30, 0.50]),
+                "paragraph_length": [
+                    constraints.get("max_paragraph_sentences", 6) * 0.6,
+                    constraints.get("max_paragraph_sentences", 6),
+                ],
+                "sensory_density": [0.5, 1.5],
+                "exclamation_ratio": constraints.get("exclamation_ratio", [0.03, 0.10]),
+            },
+            "voice_description": f"基于 {style_name} 的标准风格",
+            "exemplar_paragraphs": [
+                "（范例段落 1：由于 LLM 生成失败，此处为占位文本。建议用户手动编辑 novel.json 中的 style_bible 字段。）",
+                "（范例段落 2：由于 LLM 生成失败，此处为占位文本。建议用户手动编辑 novel.json 中的 style_bible 字段。）",
+            ],
+            "anti_patterns": [
+                "避免 AI 味过重的表达",
+                "禁止生硬的说教性语言",
+            ],
+        }
+
+        if as_model:
+            return StyleBible(
+                quantitative_targets=data["quantitative_targets"],
+                voice_description=data["voice_description"],
+                exemplar_paragraphs=data["exemplar_paragraphs"],
+                anti_patterns=data["anti_patterns"],
+            )
+        return data
+
+    def generate_from_existing_chapters(
+        self,
+        chapters: list[dict],
+        style_name: str,
+        genre: str,
+    ) -> StyleBible:
+        """基于已生成章节的实际基线生成风格圣经（用于迁移场景）。
+
+        Args:
+            chapters: 前 N 章（通常 5 章），每章包含 full_text
+            style_name: 风格预设名称
+            genre: 题材
+
+        Returns:
+            StyleBible 实例
+        """
+        from src.novel.tools.style_analysis_tool import StyleAnalysisTool
+
+        tool = StyleAnalysisTool()
+
+        # 分析前 N 章的实际风格
+        metrics_list = [tool.analyze(ch["full_text"]) for ch in chapters]
+
+        # 取平均值作为量化目标
+        avg_sentence_length = sum(m.avg_sentence_length for m in metrics_list) / len(metrics_list)
+        avg_dialogue_ratio = sum(m.dialogue_ratio for m in metrics_list) / len(metrics_list)
+        avg_para_length = sum(m.paragraph_length for m in metrics_list) / len(metrics_list)
+
+        # 构建量化目标（基于实际基线 ± 20%）
+        quantitative_targets = {
+            "avg_sentence_length": [avg_sentence_length * 0.85, avg_sentence_length * 1.15],
+            "dialogue_ratio": [max(0.0, avg_dialogue_ratio - 0.10), min(1.0, avg_dialogue_ratio + 0.10)],
+            "paragraph_length": [max(2.0, avg_para_length * 0.8), avg_para_length * 1.2],
+            "sensory_density": [0.5, 1.5],  # 默认
+            "exclamation_ratio": [0.03, 0.15],  # 默认
+        }
+
+        # 其余字段使用 LLM 生成或 fallback
+        preset = get_style(style_name)
+        voice_description = f"基于前 {len(chapters)} 章实际风格，句长 ~{avg_sentence_length:.1f}字，对话 ~{avg_dialogue_ratio:.1%}"
+        exemplar_paragraphs = [ch["full_text"][:300] for ch in chapters[:2]]  # 截取前 2 章的开头作为示范
+
+        bible = StyleBible(
+            quantitative_targets=quantitative_targets,
+            voice_description=voice_description,
+            exemplar_paragraphs=exemplar_paragraphs,
+            anti_patterns=preset.get("anti_patterns", []),
+            volume_overrides=None,
+            based_on_chapters=[ch["chapter_number"] for ch in chapters],
+        )
+
+        log.info(f"基于 ch{chapters[0]['chapter_number']}-{chapters[-1]['chapter_number']} 生成风格圣经")
+        return bible
+```
+
+**集成点**：`NovelDirector.generate_outline()` 返回前
+
+```python
+from src.novel.services.style_bible_generator import StyleBibleGenerator
+
+# 在 generate_outline() 末尾
+bible_gen = StyleBibleGenerator(self.llm)
+style_bible = bible_gen.generate(
+    genre=genre,
+    theme=theme,
+    style_name=style_name,
+)
+
+# 写入 novel.json
+novel_data["style_bible"] = style_bible.model_dump()
+```
+
+---
+
+### 5.5.2 风格圣经注入到 continuity_brief
+
+**目标**：每章生成时，将风格圣经的量化目标和范例文本注入 Writer 的系统提示
+
+**实现位置**：`ContinuityService.generate_brief()` 和 `format_for_prompt()`
+
+**修改**：
+
+```python
+# src/novel/services/continuity_service.py
+
+def generate_brief(
+    self,
+    chapter_number: int,
+    chapters: list[dict] | None = None,
+    chapter_brief: dict | None = None,
+    story_arcs: list[dict] | None = None,
+    characters: list | None = None,
+    protagonist_names: list[str] | None = None,
+    style_bible: dict | None = None,  # 新增参数
+    current_volume: int | None = None,  # 新增参数
+) -> dict[str, Any]:
+    """Generate a unified continuity brief for the given chapter.
+    
+    新增：
+        style_bible: 风格圣经字典（从 novel.json 读取）
+        current_volume: 当前卷号（用于检查 volume_overrides）
+    """
+    brief: dict[str, Any] = {
+        "chapter_number": chapter_number,
+        "must_continue": [],
+        "open_threads": [],
+        "character_states": [],
+        "active_arcs": [],
+        "forbidden_breaks": [],
+        "recommended_payoffs": [],
+        "style_brief": None,  # 新增字段
+    }
+
+    # ... 现有逻辑 ...
+
+    # 注入风格圣经
+    if style_bible:
+        brief["style_brief"] = self._extract_style_brief(style_bible, current_volume)
+
+    return brief
+
+def _extract_style_brief(self, style_bible: dict, current_volume: int | None) -> dict:
+    """从风格圣经提取本章的风格要求。"""
+    targets = dict(style_bible["quantitative_targets"])
+
+    # 检查卷级覆盖
+    if current_volume and style_bible.get("volume_overrides"):
+        overrides = style_bible["volume_overrides"].get(str(current_volume), {})
+        targets.update(overrides)
+
+    return {
+        "quantitative_targets": targets,
+        "voice_description": style_bible["voice_description"],
+        "exemplar_paragraphs": style_bible["exemplar_paragraphs"],
+        "anti_patterns": style_bible.get("anti_patterns", []),
+    }
+
+def format_for_prompt(self, brief: dict[str, Any]) -> str:
+    """Format the brief into a readable Chinese prompt block for Writer injection."""
+    sections: list[str] = []
+
+    # ... 现有逻辑（must_continue, open_threads, etc.）...
+
+    # 风格锚定要求
+    style_brief = brief.get("style_brief")
+    if style_brief:
+        sections.append("### 风格锚定要求\n")
+        sections.append("**量化目标**：")
+
+        targets = style_brief["quantitative_targets"]
+        if "avg_sentence_length" in targets:
+            r = targets["avg_sentence_length"]
+            sections.append(f"- 句长：{r[0]:.0f}-{r[1]:.0f} 字")
+        if "dialogue_ratio" in targets:
+            r = targets["dialogue_ratio"]
+            sections.append(f"- 对话占比：{r[0]*100:.0f}%-{r[1]*100:.0f}%")
+        if "paragraph_length" in targets:
+            r = targets["paragraph_length"]
+            sections.append(f"- 段落长度：{r[0]:.0f}-{r[1]:.0f} 句")
+        if "sensory_density" in targets:
+            r = targets["sensory_density"]
+            sections.append(f"- 感官描述：不超过 {r[1]:.1f} 次/千字")
+
+        sections.append("\n**风格示范**（请参考以下段落的节奏和语感）：")
+        for i, para in enumerate(style_brief["exemplar_paragraphs"][:2], 1):
+            sections.append(f"\n示范 {i}：\n{para}\n")
+
+        if style_brief["anti_patterns"]:
+            sections.append("**禁止模式**：")
+            for pattern in style_brief["anti_patterns"]:
+                sections.append(f"- {pattern}")
+            sections.append("")
+
+    return "\n".join(sections)
+```
+
+**集成点**：`NovelPipeline.generate_chapters()` 调用 `ContinuityService.generate_brief()` 时传入 `style_bible`
+
+```python
+from src.novel.storage.file_manager import FileManager
+
+fm = FileManager(project_path)
+novel_data = fm.load_novel()
+style_bible = novel_data.get("style_bible")
+current_volume = ... # 根据 chapter_number 计算当前卷号
+
+brief = continuity_service.generate_brief(
+    chapter_number=chapter_number,
+    chapters=chapters,
+    style_bible=style_bible,
+    current_volume=current_volume,
+)
+```
+
+---
+
+### 5.5.3 StyleKeeper 量化门槛检查
+
+**目标**：StyleKeeper 从"建议者"升级为"门卫"，偏差超过阈值时强制重写
+
+**修改位置**：`src/novel/agents/style_keeper.py`
+
+**新增方法**：
+
+```python
+def check_against_bible(
+    self,
+    text: str,
+    style_bible: dict,
+    current_volume: int | None = None,
+) -> tuple[bool, dict]:
+    """检查文本是否符合风格圣经的量化目标。
+
+    Args:
+        text: 章节文本
+        style_bible: 风格圣经字典
+        current_volume: 当前卷号（用于检查 volume_overrides）
+
+    Returns:
+        (need_rewrite, report):
+        - need_rewrite: True 表示偏差超过阈值，需要重写
+        - report: 偏差报告字典
+    """
+    # 分析实际风格
+    metrics = self.tool.analyze(text)
+
+    # 获取目标（考虑卷级覆盖）
+    targets = dict(style_bible["quantitative_targets"])
+    if current_volume and style_bible.get("volume_overrides"):
+        overrides = style_bible["volume_overrides"].get(str(current_volume), {})
+        targets.update(overrides)
+
+    # 检查偏差
+    deviations = []
+    need_rewrite = False
+
+    # 句长检查
+    if "avg_sentence_length" in targets:
+        target_min, target_max = targets["avg_sentence_length"]
+        actual = metrics.avg_sentence_length
+        if actual > target_max * 1.30:  # 超过上限 30%
+            deviations.append(f"句长超标 +{(actual / target_max - 1) * 100:.0f}%（实际 {actual:.1f}，目标 {target_max:.1f}）")
+            need_rewrite = True
+        elif actual < target_min * 0.70:  # 低于下限 30%
+            deviations.append(f"句长过短 -{(1 - actual / target_min) * 100:.0f}%（实际 {actual:.1f}，目标 {target_min:.1f}）")
+            need_rewrite = True
+
+    # 对话占比检查
+    if "dialogue_ratio" in targets:
+        target_min, target_max = targets["dialogue_ratio"]
+        actual = metrics.dialogue_ratio
+        if actual > target_max + 0.15:  # 超过上限 +15pp
+            deviations.append(f"对话占比过高 +{(actual - target_max) * 100:.0f}pp（实际 {actual*100:.0f}%，目标 {target_max*100:.0f}%）")
+            need_rewrite = True
+        elif actual < target_min - 0.15:  # 低于下限 -15pp
+            deviations.append(f"对话占比过低 -{(target_min - actual) * 100:.0f}pp（实际 {actual*100:.0f}%，目标 {target_min*100:.0f}%）")
+            need_rewrite = True
+
+    # 感官描述密度检查（针对"气息堆叠"问题）
+    if "sensory_density" in targets:
+        target_min, target_max = targets["sensory_density"]
+        # 简单检测：统计"XX的XX"模式出现次数
+        import re
+        pattern = re.compile(r"[\u4e00-\u9fa5]{1,4}的[\u4e00-\u9fa5]{1,4}")
+        matches = pattern.findall(text)
+        sensory_count = len([m for m in matches if any(k in m for k in ["气息", "味道", "声音", "光芒", "冷气", "热气"])])
+        text_length = len(text)
+        actual_density = sensory_count / (text_length / 1000.0)
+        if actual_density > target_max * 2.0:  # 超过上限 2 倍
+            deviations.append(f"感官描述过密 +{(actual_density / target_max - 1) * 100:.0f}%（实际 {actual_density:.1f} 次/千字，目标 {target_max:.1f}）")
+            need_rewrite = True
+
+    # 段落长度检查
+    if "paragraph_length" in targets:
+        target_min, target_max = targets["paragraph_length"]
+        actual = metrics.paragraph_length
+        if actual > target_max * 1.5:  # 超过上限 50%
+            deviations.append(f"段落过长 +{(actual / target_max - 1) * 100:.0f}%（实际 {actual:.1f} 句/段，目标 {target_max:.1f}）")
+            need_rewrite = True
+
+    report = {
+        "metrics": metrics.model_dump(),
+        "deviations": deviations,
+        "need_rewrite": need_rewrite,
+    }
+
+    return need_rewrite, report
+```
+
+**修改 `style_keeper_node()`**：
+
+```python
+def style_keeper_node(state: NovelState) -> dict[str, Any]:
+    """LangGraph 节点：StyleKeeper。
+
+    检查当前章节草稿的风格一致性。
+    """
+    decisions: list[Decision] = []
+    errors: list[dict] = []
+
+    chapter_text = state.get("current_chapter_text")
+    if not chapter_text:
+        return {
+            "errors": [{"agent": "StyleKeeper", "message": "当前章节文本为空，跳过风格检查"}],
+            "completed_nodes": ["style_keeper"],
+        }
+
+    # 获取风格圣经
+    style_bible = state.get("style_bible")
+    current_volume = state.get("current_volume")
+
+    llm_config = get_stage_llm_config(state, "style_rewrite")
+    try:
+        llm = create_llm_client(llm_config)
+    except Exception:
+        llm = None
+
+    keeper = StyleKeeper(llm)
+
+    # 分析风格
+    metrics = keeper.analyze_style(chapter_text)
+    decisions.append(
+        _make_decision(
+            step="analyze_style",
+            decision="风格分析完成",
+            reason=f"avg_sentence_length={metrics.avg_sentence_length}, dialogue_ratio={metrics.dialogue_ratio}",
+            data=metrics.model_dump(),
+        )
+    )
+
+    # 风格圣经量化检查
+    need_rewrite = False
+    deviations: list[str] = []
+
+    if style_bible:
+        need_rewrite, report = keeper.check_against_bible(
+            text=chapter_text,
+            style_bible=style_bible,
+            current_volume=current_volume,
+        )
+        deviations = report["deviations"]
+        decisions.append(
+            _make_decision(
+                step="check_against_bible",
+                decision=f"{'需要重写' if need_rewrite else '通过检查'}",
+                reason=f"偏差 {len(deviations)} 项" if deviations else "无偏差",
+                data=report,
+            )
+        )
+
+    result: dict[str, Any] = {
+        "decisions": decisions,
+        "errors": errors,
+        "completed_nodes": ["style_keeper"],
+    }
+
+    # 写入质量报告
+    quality = dict(state.get("current_chapter_quality") or {})
+    quality["style_metrics"] = metrics.model_dump()
+    quality["style_need_rewrite"] = need_rewrite
+    quality["style_deviations"] = deviations
+    result["current_chapter_quality"] = quality
+
+    return result
+```
+
+---
+
+### 5.5.4 QualityReviewer 协同决策
+
+**修改位置**：`src/novel/agents/quality_reviewer.py` 的 `quality_reviewer_node()`
+
+**修改逻辑**：
+
+```python
+def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
+    """LangGraph 节点：QualityReviewer。
+
+    汇总质量检查结果，决定是否需要重写。
+    """
+    quality = state.get("current_chapter_quality", {})
+
+    # 读取 StyleKeeper 的决策
+    style_need_rewrite = quality.get("style_need_rewrite", False)
+
+    # 若 StyleKeeper 判定需重写，强制重写
+    if style_need_rewrite:
+        return {
+            "need_rewrite": True,
+            "rewrite_reason": f"风格偏离（{', '.join(quality.get('style_deviations', []))}）",
+            "completed_nodes": ["quality_reviewer"],
+        }
+
+    # 否则，按现有逻辑判断（LLM 打分 / 一致性检查）
+    # ... 现有逻辑 ...
+
+    # 若内容质量也不达标，合并重写理由
+    if need_rewrite:
+        style_devs = quality.get("style_deviations", [])
+        if style_devs:
+            rewrite_reason += f" + 风格偏离（{', '.join(style_devs)}）"
+
+    return {
+        "need_rewrite": need_rewrite,
+        "rewrite_reason": rewrite_reason,
+        "completed_nodes": ["quality_reviewer"],
+    }
+```
+
+---
+
+### 5.5.5 迁移工具
+
+**新增脚本**：`src/novel/cli/migrate_style_bible.py`
+
+```python
+"""迁移工具：为已生成项目补充风格圣经"""
+from __future__ import annotations
+
+import logging
+
+from src.llm.llm_client import create_llm_client
+from src.novel.config import NovelConfig
+from src.novel.services.style_bible_generator import StyleBibleGenerator
+from src.novel.storage.file_manager import FileManager
+
+log = logging.getLogger("novel.migrate")
+
+
+def migrate_add_style_bible(project_path: str, config: NovelConfig) -> None:
+    """为已生成项目补充风格圣经。
+
+    Args:
+        project_path: 项目路径
+        config: 配置对象
+    """
+    fm = FileManager(project_path)
+    novel = fm.load_novel()
+
+    # 检查是否已有风格圣经
+    if "style_bible" in novel:
+        log.info("风格圣经已存在，跳过迁移")
+        return
+
+    # 读取已生成章节
+    chapters_data = fm.list_chapters()
+    if not chapters_data:
+        log.error("无已生成章节，无法基于实际基线生成风格圣经")
+        return
+
+    # 取前 5 章作为基线
+    baseline_chapters = chapters_data[:5]
+    chapters = []
+    for ch_num in baseline_chapters:
+        ch = fm.load_chapter(ch_num)
+        chapters.append({"chapter_number": ch_num, "full_text": ch.get("full_text", "")})
+
+    # 生成风格圣经
+    llm = create_llm_client(config.llm)
+    bible_gen = StyleBibleGenerator(llm)
+    style_bible = bible_gen.generate_from_existing_chapters(
+        chapters=chapters,
+        style_name=novel.get("style_name", "webnovel.shuangwen"),
+        genre=novel.get("genre", "unknown"),
+    )
+
+    # 写入 novel.json
+    novel["style_bible"] = style_bible.model_dump()
+    fm.save_novel(novel)
+
+    log.info(f"风格圣经迁移完成（基于 ch{baseline_chapters[0]}-{baseline_chapters[-1]}）")
+```
+
+---
+
+## 6. 交互合力：四机制协同案例
 
 ### 6.1 高潮章节的理想状态
 
 **案例**：第 1 卷高潮（ch24-25）攻占青云山门
 
-**三机制协同**：
+**四机制协同（Phase 1: A+D，Phase 2: B+C）**：
 
-1. **卷进度（机制 A）**：
+1. **卷进度（机制 A，Phase 1）**：
    - 里程碑"攻占青云山门"目标章节 [20, 25]，当前 ch24，接近目标上限
    - `volume_progress.progress_health = "behind_schedule"`（因为其他里程碑也未完成）
    - ContinuityService 注入提示："本章必须推进里程碑：攻占青云山门"
    - PlotPlanner 收到约束，强制生成"攻山门"相关场景
 
-2. **系统失效（机制 B）**：
+2. **风格锚定（机制 D，Phase 1）**：
+   - 高潮章节，StyleKeeper 门槛收紧（句长偏差 > 10% 即触发重写，而非常规的 > 30%）
+   - ContinuityService 注入风格提示：量化目标（句长 8-18 字，对话 40%-60%）+ 范例文本（爽文快节奏示范）
+   - Writer 生成草稿后，StyleKeeper 检测到：句长 22.5 字（超标 +25%），对话占比 28%（不足 -30%）
+   - StyleKeeper 返回 `need_rewrite = True`，QualityReviewer 强制重写
+   - 重写后：句长 16.8 字，对话占比 48%，通过检查
+   - **效果**：高潮章节保持爽文风格，不因情节复杂而变成冗长描写
+
+3. **系统失效（机制 B，Phase 2）**：
    - 系统失效排程：ch23 系统进入 `mode: degraded`，地图扫描范围缩小 70%
    - PlotPlanner 生成场景时，明确注入"系统扫描失效，林辰无法提前获知山门内部守军布局"
    - Writer 写作时，禁止使用"系统扫描显示敌军 50 人在 X 位置"，主角必须靠侦察兵 + 推测
 
-3. **策略升级（机制 C）**：
+4. **策略升级（机制 C，Phase 2）**：
    - 当前卷 Tier 范围 [1, 3]，高潮章节强制使用 Tier 3 策略
    - StrategySelector 抽取："粮道封锁""内部分化""地形优势利用"
    - PlotPlanner 生成场景：第 1 场景 = 切断山门粮道，第 2 场景 = 策反内部守卫，第 3 场景 = 利用山体地形伏击援军
    - Writer 写作时，自然融入"林辰派人绕道后山截断水源，守军三日后内乱"等情节
 
-**效果**：
-- 主角在系统受限情况下，必须依靠高级战术（Tier 3）完成关键里程碑，张力最大化
-- 读者感受："这章真难！系统失灵了还能赢，主角智商在线！"
+**协同效果**：
+- **A+D（Phase 1）**：关键里程碑在高潮章节完成，且文风稳定（爽文短句快节奏），读者爽感最大化
+- **B+C（Phase 2）**：主角在系统受限情况下，必须依靠高级战术（Tier 3）完成里程碑，张力最大化
+- 读者感受："这章真爽！打得精彩，节奏紧凑，系统失灵了还能靠智谋赢！"
 
 ### 6.2 日常章节的降级
 
 **案例**：第 2 卷中段（ch35）日常治理章节
 
-**三机制表现**：
+**四机制表现**：
 
-1. **卷进度**：
+1. **卷进度（A，Phase 1）**：
    - 第 2 卷里程碑"建立分封制度"已在 ch32 完成
    - 当前无逾期里程碑，`progress_health = "on_track"`
    - ContinuityService 提示："当前卷进度正常，本章可正常推进主线或适度展开支线"
    - PlotPlanner 有自由度，可生成日常场景
 
-2. **系统失效**：
+2. **风格锚定（D，Phase 1）**：
+   - 日常章节，StyleKeeper 使用常规门槛（句长偏差 > 30%，对话偏差 > 15pp）
+   - Writer 生成草稿：句长 15.2 字，对话占比 52%，均在风格圣经范围内
+   - StyleKeeper 返回 `need_rewrite = False`，直接通过
+   - **效果**：即使是日常章节，文风仍保持一致（不会突然变成文艺腔或大段描写）
+
+3. **系统失效（B，Phase 2）**：
    - 系统正常（`mode: full`）
    - PlotPlanner 和 Writer 无系统约束
 
-3. **策略升级**：
+4. **策略升级（C，Phase 2）**：
    - 当前卷 Tier 范围 [2, 4]，但日常章节可回到 Tier 2（允许降级放松节奏）
    - StrategySelector 抽取："小队巡逻""处理民事纠纷"
    - 场景：林辰巡视新占领的村镇，处理两家农户土地纠纷
 
 **效果**：
-- 高潮后适度放松，但策略 Tier 仍高于第 1 卷（第 1 卷日常用 Tier 1，第 2 卷日常用 Tier 2）
-- 整体升级趋势保持，但有节奏起伏
+- **A+D（Phase 1）**：进度正常 + 文风稳定，日常章节也不掉链子
+- **B+C（Phase 2）**：高潮后适度放松，但策略 Tier 仍高于第 1 卷（第 1 卷日常用 Tier 1，第 2 卷日常用 Tier 2），整体升级趋势保持
 
 ---
 
@@ -1984,7 +2732,7 @@ def _detect_strategy_theme(self, genre: str, theme: str) -> bool:
 
 ### 7.2 LangGraph 缺失
 
-**问题**：三机制依赖状态管理，LangGraph 缺失时如何降级
+**问题**：四机制依赖状态管理，LangGraph 缺失时如何降级
 
 **策略**：
 - 所有状态存储在 `novel.json`（文件系统），不依赖 LangGraph 的内存状态
@@ -2016,7 +2764,7 @@ def _detect_strategy_theme(self, genre: str, theme: str) -> bool:
   3. 为剩余 173 章重新排程系统失效（避开已生成的 27 章）
   4. 为剩余章节分配策略 Tier 范围
   5. 保存到 `novel.json`
-- 迁移后继续生成 ch28+，三机制立即生效
+- 迁移后继续生成 ch28+，四机制立即生效（Phase 1 优先）
 
 **实现**：新增 CLI 命令 `novel migrate-narrative-arc`
 
@@ -2112,7 +2860,7 @@ def test_overdue_milestone():
 
 ```python
 def test_full_pipeline_with_narrative_arc():
-    """测试完整流程（大纲 → 生成 10 章 → 验证三机制）"""
+    """测试完整流程（大纲 → 生成 10 章 → 验证四机制）"""
     # 创建项目
     pipeline = NovelPipeline(workspace="workspace_test")
     result = pipeline.create_novel(
@@ -2200,7 +2948,7 @@ src/novel/
 │   └── novel.py  # 修改：VolumeOutline 增加 narrative_milestones / strategy_tier_range 字段
 ├── storage/
 │   └── structured_db.py  # 修改：增加 strategy_usage 表
-└── pipeline.py  # 修改：集成三机制的追踪服务调用
+└── pipeline.py  # 修改：集成四机制的追踪服务调用
 
 main.py  # 修改：增加 novel migrate-narrative-arc 命令
 ```

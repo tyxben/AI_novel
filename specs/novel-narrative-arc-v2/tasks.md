@@ -2,10 +2,22 @@
 
 ## 任务组织原则
 
-1. **分阶段实施**：Phase 0（基础设施）→ Phase 1-3（三机制核心功能）→ Phase 4（集成测试）→ Phase 5（优化与迁移）
+1. **分阶段实施（已调整）**：
+   - **Phase 0**：基础设施（数据模型、模板、工具）
+   - **Phase 1（优先）**：干预 A（卷进度预算）+ 干预 D（写手风格锚定） — 解决阻塞性问题
+   - **Phase 2（延后）**：干预 B（系统能力状态机）+ 干预 C（策略复杂度阶梯） — 增强内容丰富性
+   - **Phase 3**：集成测试与迁移工具
+   - **Phase 4**：优化与文档
 2. **并行开发**：标注可并行的任务（不同机制、不同文件）
 3. **测试先行**：每个功能任务必须附带测试任务
 4. **增量验证**：每个 Phase 结束后跑一次集成测试，确保不破坏现有功能
+
+**实施优先级说明**：
+- 根据实际项目 `novel_12e1c974` 的观察，**Phase 1（A+D）必须优先实施**，因为：
+  - 问题 1（卷切换卡死）和问题 4（风格漂移）是当前**不可读性的主要原因**
+  - 解决 A+D 后，小说具备基本可读性（能推进 + 文风稳定）
+  - B+C 是增强型机制，Phase 1 稳定后再引入，避免复杂度失控
+- **Phase 2（B+C）** 在 ch40-50 后实施，届时卷一节奏问题已修复，可引入更多机制
 
 ---
 
@@ -23,13 +35,20 @@
 - `src/novel/models/narrative_control.py`（新建）
 
 **内容**：
-- 实现 6 个 Pydantic 模型：`NarrativeMilestone`, `SystemFailureEvent`, `SystemCapabilityState`, `StrategyElement`, `StrategyTier`, `VolumeProgressReport`
+- 实现 7 个 Pydantic 模型：`NarrativeMilestone`, `StyleBible`（新增）, `SystemFailureEvent`, `SystemCapabilityState`, `StrategyElement`, `StrategyTier`, `VolumeProgressReport`
+- **StyleBible 模型**（Phase 1 需要）：
+  - `quantitative_targets`: dict[str, list[float] | float]
+  - `voice_description`: str (min 20, max 200)
+  - `exemplar_paragraphs`: list[str] (min 2, max 5)
+  - `anti_patterns`: list[str]
+  - `volume_overrides`: dict[int, dict] | None
+  - `generated_at`, `based_on_chapters`: 可选字段
 - 所有字段使用 Pydantic 验证（min_length, ge, le, Literal 枚举）
 - 支持 `model_dump()` / `model_dump_json()` 序列化
 
 **验收条件**：
 - 所有模型可正常实例化
-- 字段验证规则生效（如 `priority` 只能是 `critical/high/normal`）
+- 字段验证规则生效（如 `priority` 只能是 `critical/high/normal`，`StyleBible.exemplar_paragraphs` 至少 2 项）
 - 无效数据抛出 `ValidationError`
 - JSON 序列化/反序列化一致性
 
@@ -155,7 +174,9 @@
 
 ---
 
-## Phase 1: 机制 A — 卷进度预算
+## Phase 1: 阻塞性问题修复（A + D，优先实施）
+
+### Phase 1A: 机制 A — 卷进度预算
 
 ### Task 1.1: 里程碑生成逻辑
 
@@ -334,7 +355,261 @@
 
 ---
 
-## Phase 2: 机制 B — 系统能力状态机
+### Phase 1D: 机制 D — 写手风格锚定
+
+#### Task 1D.1: 风格圣经生成服务
+
+**任务标题**：实现 `src/novel/services/style_bible_generator.py`
+
+**依赖**：Task 0.1（需要 `StyleBible` 模型）
+
+**并行**：可与 Task 1.1-1.5 并行
+
+**涉及文件**：
+- `src/novel/services/style_bible_generator.py`（新建）
+
+**内容**：
+- 实现 `StyleBibleGenerator` 类
+- `generate(genre, theme, style_name)` 方法：
+  - 从 `style_presets.py` 读取风格预设作为锚点
+  - 构建 LLM prompt，生成量化目标 + 范例段落 + 禁用模式
+  - 调用 LLM（json_mode=True），解析返回的 JSON
+  - Fallback: LLM 失败时，使用预设 `constraints` 直接构建
+- `generate_from_existing_chapters(chapters, style_name, genre)` 方法（用于迁移）：
+  - 使用 `StyleAnalysisTool` 分析前 N 章（通常 5 章）
+  - 取平均值作为量化目标（允许 ±20% 浮动）
+  - 截取前 2 章开头作为范例段落
+- 返回 `StyleBible` 实例
+
+**验收条件**：
+- 对 5 个不同题材 + 风格组合（玄幻+爽文、武侠+古典、科幻+硬核、言情+甜宠、历史+正剧），生成的风格圣经量化目标合理且互不相同
+- 生成的范例段落符合目标风格（人工审查，符合率 >= 80%）
+- LLM 生成失败时，fallback 机制生效，使用预设 `constraints` 作为量化目标
+- 基于已生成章节的迁移方法正常工作（量化目标与实际基线偏差 < 20%）
+
+**预估复杂度**：M
+
+---
+
+#### Task 1D.2: ContinuityService 注入风格圣经
+
+**任务标题**：修改 `ContinuityService` 支持风格圣经注入
+
+**依赖**：Task 1D.1
+
+**并行**：可与 Task 1D.3 并行
+
+**涉及文件**：
+- `src/novel/services/continuity_service.py`（修改）
+
+**内容**：
+- `generate_brief()` 新增参数：`style_bible: dict | None`, `current_volume: int | None`
+- `brief` dict 新增字段：`style_brief`
+- 实现 `_extract_style_brief(style_bible, current_volume)` 方法：
+  - 提取量化目标（考虑卷级覆盖）
+  - 提取 voice_description, exemplar_paragraphs, anti_patterns
+- `format_for_prompt()` 增加风格锚定提示块：
+  - "### 风格锚定要求"
+  - 量化目标（句长、对话占比、段落长度、感官密度）
+  - 风格示范（展示 2 段范例文本）
+  - 禁止模式（列出禁用模式）
+- 提示块长度控制在 < 400 字（~300 tokens）
+
+**验收条件**：
+- `generate_brief()` 正确处理 `style_bible` 参数
+- `format_for_prompt()` 输出的提示块包含量化目标、范例文本、禁用模式
+- 提示块长度 < 500 字
+- 卷级覆盖正确生效（若 `current_volume=2` 且存在 `volume_overrides[2]`，则目标被覆盖）
+
+**预估复杂度**：S
+
+---
+
+#### Task 1D.3: StyleKeeper 量化门槛检查
+
+**任务标题**：升级 `StyleKeeper` 为风格门控
+
+**依赖**：Task 0.1（需要 `StyleBible` 模型）
+
+**并行**：可与 Task 1D.2 并行
+
+**涉及文件**：
+- `src/novel/agents/style_keeper.py`（修改）
+
+**内容**：
+- 实现 `check_against_bible(text, style_bible, current_volume)` 方法：
+  - 使用 `StyleAnalysisTool` 分析文本实际指标
+  - 与风格圣经的 `quantitative_targets` 对比（考虑卷级覆盖）
+  - 检查偏差阈值：
+    - 句长偏差 > 30% → `need_rewrite = True`
+    - 对话占比偏差 > ±15pp → `need_rewrite = True`
+    - 感官描述密度 > 目标上限的 2 倍 → `need_rewrite = True`
+    - 段落平均句数 > 目标上限的 1.5 倍 → `need_rewrite = True`
+  - 返回 `(need_rewrite, report)`，report 包含具体偏差描述
+- 修改 `style_keeper_node()` 函数：
+  - 读取 `state["style_bible"]` 和 `state["current_volume"]`
+  - 调用 `check_against_bible()`
+  - 将 `need_rewrite` 写入 `current_chapter_quality["style_need_rewrite"]`
+  - 将 `deviations` 写入 `current_chapter_quality["style_deviations"]`
+
+**验收条件**：
+- 对人工构造的偏离文本（句长 +50%、对话占比 -30%），`check_against_bible()` 返回 `need_rewrite = True`（准确率 100%）
+- 对符合风格圣经的文本，返回 `need_rewrite = False`（误报率 < 5%）
+- `style_keeper_node()` 正确将结果写入 `current_chapter_quality`
+- 量化检查延迟 < 5 秒/章（纯文本分析，无 LLM 调用）
+
+**预估复杂度**：M
+
+---
+
+#### Task 1D.4: QualityReviewer 强制重写逻辑
+
+**任务标题**：修改 `QualityReviewer` 响应 StyleKeeper 的重写信号
+
+**依赖**：Task 1D.3
+
+**并行**：无（必须等 Task 1D.3 完成）
+
+**涉及文件**：
+- `src/novel/agents/quality_reviewer.py`（修改）
+
+**内容**：
+- `quality_reviewer_node()` 函数：
+  - 读取 `state["current_chapter_quality"]["style_need_rewrite"]`
+  - 若为 `True`，**强制**设置 `need_rewrite = True`，无论内容质量得分如何
+  - 若 StyleKeeper 和 QualityReviewer 都判定需重写，合并重写理由："风格偏离（句长超标 +37%，对话占比不足 -20pp）+ 内容质量不足（得分 6.2/10）"
+  - 重写次数上限仍为 2 次，2 次后仍不达标则记录警告但接受
+
+**验收条件**：
+- 当 `style_need_rewrite = True` 时，`quality_reviewer_node()` 返回 `need_rewrite = True`（执行率 100%）
+- 重写理由中包含 StyleKeeper 的偏差描述
+- 2 次重写后仍不达标时，生成警告日志并继续（不卡死流程）
+
+**预估复杂度**：S
+
+---
+
+#### Task 1D.5: NovelDirector 集成风格圣经生成
+
+**任务标题**：修改 `NovelDirector.generate_outline()` 生成风格圣经
+
+**依赖**：Task 1D.1
+
+**并行**：无（必须等 Task 1D.1 完成）
+
+**涉及文件**：
+- `src/novel/agents/novel_director.py`（修改）
+
+**内容**：
+- `generate_outline()` 方法在生成卷大纲后，调用 `StyleBibleGenerator.generate()`
+- 传入 `genre`, `theme`, `style_name`（从 `state` 或参数读取）
+- 将生成的 `style_bible.model_dump()` 写入 `novel.json["style_bible"]`
+- LLM 生成失败时，fallback 机制生效，仍能继续
+
+**验收条件**：
+- 创建新小说项目时，`novel.json` 自动生成 `style_bible` 字段
+- 风格圣经包含所有必需子字段（quantitative_targets, voice_description, exemplar_paragraphs, anti_patterns）
+- LLM 生成失败时，使用 fallback 风格圣经（基于预设 constraints）
+
+**预估复杂度**：S
+
+---
+
+#### Task 1D.6: NovelPipeline 传递 style_bible
+
+**任务标题**：修改 `NovelPipeline.generate_chapters()` 传递风格圣经
+
+**依赖**：Task 1D.2, 1D.5
+
+**并行**：可与 Task 1D.7 并行
+
+**涉及文件**：
+- `src/novel/pipeline.py`（修改）
+
+**内容**：
+- `generate_chapters()` 方法：
+  - 从 `novel.json` 读取 `style_bible`
+  - 计算当前章节对应的 `current_volume`
+  - 调用 `ContinuityService.generate_brief()` 时传入 `style_bible` 和 `current_volume`
+  - 将 `style_bible` 和 `current_volume` 写入 `state`（供 StyleKeeper 读取）
+
+**验收条件**：
+- `state["style_bible"]` 和 `state["current_volume"]` 正确设置
+- `continuity_brief` 包含 `style_brief` 字段
+- Writer 的系统提示中出现风格锚定提示块（检查生成日志）
+
+**预估复杂度**：S
+
+---
+
+#### Task 1D.7: 迁移工具 — 风格圣经补充
+
+**任务标题**：实现 `migrate_add_style_bible()` 迁移函数
+
+**依赖**：Task 1D.1
+
+**并行**：可与 Task 1D.6 并行
+
+**涉及文件**：
+- `src/novel/cli/migrate_style_bible.py`（新建）
+
+**内容**：
+- 实现 `migrate_add_style_bible(project_path, config)` 函数：
+  - 检查 `novel.json` 是否已有 `style_bible`，有则跳过
+  - 读取已生成章节，取前 5 章
+  - 调用 `StyleBibleGenerator.generate_from_existing_chapters()`
+  - 将生成的风格圣经写入 `novel.json["style_bible"]`
+- CLI 入口：`python main.py novel migrate-style-bible <project_path>`
+
+**验收条件**：
+- 对 `novel_12e1c974`（已生成 27 章）运行迁移命令，成功生成 `style_bible` 字段
+- 风格圣经的量化目标与 ch1-5 实际基线偏差 < 15%
+- 迁移后生成 ch28-30，StyleKeeper 门槛正常触发
+
+**预估复杂度**：S
+
+---
+
+#### Task 1D.8: 测试 — 风格圣经生成与检查
+
+**任务标题**：编写 `tests/novel/test_style_bible.py`
+
+**依赖**：Task 1D.1, 1D.2, 1D.3
+
+**并行**：无
+
+**涉及文件**：
+- `tests/novel/test_style_bible.py`（新建）
+
+**内容**：
+- 测试 `StyleBibleGenerator.generate()`:
+  - Mock LLM 返回标准 JSON，验证 `StyleBible` 正确构建
+  - Mock LLM 返回无效 JSON，验证 fallback 机制生效
+  - 测试 5 个不同题材，生成的量化目标互不相同
+- 测试 `StyleBibleGenerator.generate_from_existing_chapters()`:
+  - 构造 5 个模拟章节（不同句长、对话占比）
+  - 验证生成的量化目标与实际基线偏差 < 20%
+- 测试 `StyleKeeper.check_against_bible()`:
+  - 构造符合/不符合风格圣经的文本
+  - 验证偏差检测准确率 >= 95%
+  - 测试边界条件（句长刚好 +30%、对话占比刚好 -15pp）
+- 测试 `ContinuityService` 风格注入:
+  - 验证 `style_brief` 正确生成
+  - 验证卷级覆盖生效
+  - 验证提示块长度 < 500 字
+
+**验收条件**：
+- 所有测试通过
+- 覆盖正常路径 + 边界条件 + 错误路径（LLM 失败、无效数据）
+- Mock LLM 返回格式错误时，fallback 机制生效
+
+**预估复杂度**：M
+
+---
+
+## Phase 2: 内容丰富性增强（B + C，待 ch40-50 后实施）
+
+### Phase 2A: 机制 B — 系统能力状态机
 
 ### Task 2.1: 系统失效排程生成
 
@@ -502,7 +777,7 @@
 
 ---
 
-## Phase 3: 机制 C — 策略复杂度阶梯
+### Phase 2B: 机制 C — 策略复杂度阶梯
 
 ### Task 3.1: 策略元素选择服务
 
@@ -715,7 +990,7 @@
 
 ---
 
-## Phase 4: 集成与测试
+## Phase 3: 集成与测试
 
 ### Task 4.1: Pipeline 集成三机制
 
@@ -761,7 +1036,7 @@
 - `tests/novel/integration/test_narrative_arc.py`（新建）
 
 **内容**：
-- `test_full_pipeline_with_narrative_arc()`: 创建项目 → 生成 10 章 → 验证三机制
+- `test_full_pipeline_with_narrative_arc()`: 创建项目 → 生成 10 章 → 验证四机制（Phase 1: A+D 必测，Phase 2: B+C 可选）
 - 验证点：
   - 大纲阶段：里程碑、失效排程、Tier 范围生成
   - 生成阶段：里程碑完成检查、系统状态转移、策略使用记录
@@ -770,7 +1045,7 @@
 
 **验收条件**：
 - 测试通过
-- 覆盖完整流程：大纲 → 生成 10 章 → 验证三机制数据正确
+- 覆盖完整流程：大纲 → 生成 10 章 → 验证四机制数据正确（Phase 1: 里程碑 + 风格圣经必有，Phase 2: 失效排程 + 策略 Tier 可选）
 
 **预估复杂度**：L
 
@@ -801,9 +1076,9 @@
 
 ---
 
-### Task 4.4: 三机制协同触发验证
+### Task 3.4: 四机制协同触发验证
 
-**任务标题**：验证高潮章节三机制协同触发
+**任务标题**：验证高潮章节四机制协同触发（Phase 1: A+D，Phase 2: B+C）
 
 **依赖**：Task 4.1
 
@@ -811,22 +1086,26 @@
 - `tests/novel/integration/test_narrative_arc.py`（扩展）
 
 **内容**：
-- `test_synergy_at_climax()`: 创建项目 → 生成到卷高潮章节 → 验证三机制协同
+- `test_synergy_at_climax()`: 创建项目 → 生成到卷高潮章节 → 验证四机制协同
 - 验证点：
-  - 高潮前 2-5 章有系统失效
-  - 高潮章节有最高 Tier 策略元素
-  - 高潮前有待完成的 `critical` 里程碑
-- 人工审查生成的高潮章节，张力评分
+  - **Phase 1（A+D，必验证）**：
+    - 高潮前有待完成的 `critical` 里程碑
+    - 高潮章节风格偏差 < 10%（门槛收紧）
+  - **Phase 2（B+C，可选）**：
+    - 高潮前 2-5 章有系统失效
+    - 高潮章节有最高 Tier 策略元素
+- 人工审查生成的高潮章节，张力 + 文风稳定性评分
 
 **验收条件**：
-- 高潮章节满足"系统失效 + 高 Tier 策略 + 里程碑待完成"三条件
-- 人工阅读高潮章节，张力评分 >= 7/10
+- **Phase 1**: 高潮章节满足"里程碑待完成 + 风格偏差 < 10%"
+- **Phase 2**: 高潮章节满足"系统失效 + 高 Tier 策略"
+- 人工阅读高潮章节，综合评分 >= 7/10
 
 **预估复杂度**：M
 
 ---
 
-## Phase 5: 优化与迁移
+## Phase 4: 优化与迁移
 
 ### Task 5.1: Token 消耗优化
 
@@ -937,7 +1216,7 @@
 
 ---
 
-## Phase 6: 文档与验收
+## Phase 5: 文档与验收
 
 ### Task 6.1: 更新用户文档
 
@@ -986,80 +1265,100 @@
 
 ## 任务总结
 
-**总任务数**：34
+**总任务数**：42（新增 8 个 D 任务）
 
 **预估复杂度分布**：
-- S（简单）：16 个
-- M（中等）：14 个
+- S（简单）：22 个（+6 个 D 任务）
+- M（中等）：16 个（+2 个 D 任务）
 - L（复杂）：4 个
 
 **并行度**：
 - Phase 0: 5 个任务可完全并行
-- Phase 1: Task 1.1-1.3 可并行，Task 1.4-1.5 可并行
-- Phase 2: Task 2.1-2.2 可并行，Task 2.3-2.5 可并行
-- Phase 3: Task 3.1-3.7 大部分可并行
-- Phase 4: 顺序执行（集成测试）
-- Phase 5: Task 5.1-5.3 可并行
+- **Phase 1（A+D，优先）**:
+  - Phase 1A: Task 1.1-1.3 可并行，Task 1.4-1.5 可并行
+  - Phase 1D: Task 1D.1-1D.3 可并行，Task 1D.7 可并行
+  - Phase 1A 和 1D 之间可完全并行
+- **Phase 2（B+C，延后）**:
+  - Phase 2A: Task 2.1-2.2 可并行，Task 2.3-2.5 可并行
+  - Phase 2B: Task 3.1-3.7 大部分可并行
+  - Phase 2A 和 2B 之间可完全并行
+- Phase 3: 顺序执行（集成测试）
+- Phase 4: Task 5.1-5.3 可并行
 
-**关键路径**：
-Task 0.1 → Task 1.1 → Task 1.2 → Task 1.3 → Task 4.1 → Task 6.2
+**Phase 1（A+D）关键路径**：
+Task 0.1 → Task 1.1 → Task 1.2 → Task 1.3 → Task 1D.1 → Task 1D.2 → Task 1D.6 → Task 3.1 → Task 5.2
 
 **总预估工时**（假设 1 人顺序开发）：
 - Phase 0: 2 天
-- Phase 1: 3 天
-- Phase 2: 3 天
-- Phase 3: 4 天
-- Phase 4: 3 天
-- Phase 5: 3 天
-- Phase 6: 1 天
-- **总计**：约 19 天（1 人）
+- **Phase 1（A+D，优先）**: 5 天
+  - Phase 1A: 3 天
+  - Phase 1D: 2 天（与 1A 部分并行）
+- **Phase 2（B+C，延后）**: 7 天
+  - Phase 2A: 3 天
+  - Phase 2B: 4 天
+- Phase 3: 3 天（集成测试）
+- Phase 4: 3 天（优化与迁移）
+- Phase 5: 1 天（文档）
+- **总计**：约 21 天（1 人）
+  - **Phase 1 完成**：7 天（Phase 0 + Phase 1）— 可立即用于 ch28-40
+  - **Phase 2 完成**：14 天（再加 Phase 2）— 用于 ch40-50+
 
-**并行开发预估**（3 人团队，1 人负责 1 个机制）：
+**并行开发预估**（2 人团队，1 人 A，1 人 D）：
 - Phase 0: 1 天（共享基础设施）
-- Phase 1-3: 5 天（并行开发三机制）
-- Phase 4: 3 天（集成测试，顺序执行）
-- Phase 5: 2 天（并行优化）
-- Phase 6: 1 天
-- **总计**：约 12 天（3 人团队）
+- **Phase 1（A+D）**: 3 天（并行开发）
+- Phase 2（B+C）: 5 天（延后）
+- Phase 3: 3 天（集成测试）
+- Phase 4: 2 天（并行优化）
+- Phase 5: 1 天
+- **总计**：约 15 天（2 人团队）
+  - **Phase 1 完成**：4 天 — 阻塞性问题修复，立即可用
 
 ---
 
 ## 里程碑检查点
 
-**Milestone 1**：Phase 0 完成
-- 所有数据模型可用
+**Milestone 0**：Phase 0 完成
+- 所有数据模型可用（包括 StyleBible）
 - 模板文件生成
 - SQLite schema 扩展完成
 
-**Milestone 2**：Phase 1 完成（机制 A）
-- 里程碑追踪正常工作
-- 卷进度注入 continuity_brief
-- PlotPlanner 响应进度信号
-- 卷边界收束正常
+**Milestone 1（关键）**：Phase 1 完成（A + D，优先实施）
+- **Phase 1A（机制 A）**：
+  - 里程碑追踪正常工作
+  - 卷进度注入 continuity_brief
+  - PlotPlanner 响应进度信号
+  - 卷边界收束正常
+- **Phase 1D（机制 D）**：
+  - 风格圣经生成正常
+  - 风格圣经注入 Writer prompt
+  - StyleKeeper 量化门槛检查正常
+  - QualityReviewer 强制重写逻辑生效
+  - 迁移工具可为已生成项目补充风格圣经
+- **验收**：对 `novel_12e1c974` 运行迁移 + 生成 ch28-40，卷切换成功 + 风格偏差显著降低
 
-**Milestone 3**：Phase 2 完成（机制 B）
+**Milestone 2（延后）**：Phase 2A 完成（机制 B）
 - 系统失效排程生成
 - 系统状态追踪正常
 - PlotPlanner / Writer 响应系统约束
 - ConsistencyChecker 检查系统约束
 
-**Milestone 4**：Phase 3 完成（机制 C）
+**Milestone 3（延后）**：Phase 2B 完成（机制 C）
 - 策略元素选择器正常
 - PlotPlanner / Writer 使用策略元素
 - 策略使用追踪正常
 - 主题门控正常
 
-**Milestone 5**：Phase 4 完成（集成）
-- Pipeline 集成三机制
-- 端到端测试通过
-- 三机制协同触发验证通过
+**Milestone 4**：Phase 3 完成（集成）
+- Pipeline 集成四机制
+- 端到端测试通过（Phase 1: A+D 必测，Phase 2: B+C 可选）
+- 四机制协同触发验证通过
 
-**Milestone 6**：Phase 5 完成（优化）
+**Milestone 5**：Phase 4 完成（优化）
 - Token 消耗优化完成
 - 策略统计报告生成
 - 迁移功能正常
 
-**Milestone 7**：Phase 6 完成（发布）
+**Milestone 6**：Phase 5 完成（发布）
 - 文档更新
 - 最终验收测试通过
 - 准备发布
