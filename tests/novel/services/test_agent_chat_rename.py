@@ -185,14 +185,20 @@ class TestExtractTitleFromText:
         assert _extract_title_from_text("", 5) == "第5章"
         assert _extract_title_from_text("   \n  \n  ", 3) == "第3章"
 
-    def test_strips_quotes_from_title(self):
-        """Titles should have surrounding quotes stripped."""
-        # Use a sentence boundary so the quoted phrase is its own segment
+    def test_skips_dialogue_opener_line(self):
+        """Lines that start with a dialogue opener are skipped (Bug 2 fix).
+
+        Previously the helper stripped quotes and kept the content. That
+        produced bad "titles" like "没人说话" or "别开——" — dialogue
+        fragments rather than narrative summaries. Now such lines are
+        skipped in favor of the next narrative line or outline fallback.
+        """
         text = '"命运的转折"。改变了一切，世界不再相同。'
         title = _extract_title_from_text(text, 1)
-        # After splitting at 。, first segment is "\u201c命运的转折\u201d" (7 chars)
-        # stripped of quotes -> "命运的转折" (5 chars, in 4-12 range)
-        assert title == "命运的转折"
+        # Dialogue opener line is skipped; falls through to "改变了一切"
+        assert title != "命运的转折"
+        # Either extracts narrative or falls through to placeholder
+        assert title == "改变了一切" or title == "第1章"
 
     def test_all_lines_are_headers_returns_default(self):
         """If all first 5 lines are headers, should return default."""
@@ -209,10 +215,13 @@ class TestExtractTitleFromText:
         assert len(title) <= 12
 
     def test_fallback_to_truncation(self):
-        """Long lines without short sentences should be truncated."""
+        """Long lines without short sentences should be truncated.
+
+        After Bug 2 fix, the cap is 12 chars (relaxed from the old 10).
+        """
         text = "# 第1章 标题\n这是一段非常长的没有任何标点的文字内容需要被截断到合适的长度"
         title = _extract_title_from_text(text, 2)
-        assert len(title) <= 10
+        assert len(title) <= 12
         assert not title.startswith("#")
 
     # --- New sanitization tests ---
@@ -265,9 +274,17 @@ class TestSanitizeTitle:
     def test_strips_escaped_newlines(self):
         assert _sanitize_title("\\n\\n暗夜降临", 1) == "暗夜降临"
 
-    def test_strips_quotes(self):
-        assert _sanitize_title("\u201c命运之门\u201d", 1) == "命运之门"
-        assert _sanitize_title('"开端"', 1) == "开端"
+    def test_rejects_dialogue_opener_titles(self):
+        """After Bug 2 fix, titles starting with dialogue quotes are rejected.
+
+        Previously the helper stripped surrounding quotes and returned the
+        content as the title. That produced "titles" like "别开——" when the
+        LLM accidentally output a dialogue fragment. The new contract is to
+        treat dialogue-opener titles as invalid and let the downstream
+        fallback pick a narrative phrase or an outline-derived title.
+        """
+        assert _sanitize_title("\u201c命运之门\u201d", 1) == "第1章"
+        assert _sanitize_title('"开端"', 1) == "第1章"
 
     def test_rejects_prompt_keywords(self):
         assert _sanitize_title("字数控制在800", 5) == "第5章"
@@ -275,7 +292,17 @@ class TestSanitizeTitle:
         assert _sanitize_title("注意力集中", 2) == "第2章"
 
     def test_rejects_too_long(self):
-        assert _sanitize_title("这是一个超级长的标题不应该被用作章节名称因为太长了", 1) == "第1章"
+        """Cap relaxed from 15 to 25 chars (Bug 2 fix).
+
+        Legitimate Chinese chapter titles can run up to 15-20 chars — the
+        old 15-char cap rejected valid outputs. The new cap is 25 chars,
+        above which we assume a full sentence has leaked.
+        """
+        # 26 chars — now rejected
+        assert _sanitize_title("一" * 26, 1) == "第1章"
+        # 20 chars — now passes (used to be rejected)
+        mid_len = "一二三四五六七八九十一二三四五六七八九二"  # 20 chars
+        assert _sanitize_title(mid_len, 1) == mid_len
 
     def test_rejects_too_short(self):
         assert _sanitize_title("a", 1) == "第1章"

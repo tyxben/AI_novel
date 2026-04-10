@@ -91,6 +91,64 @@ def _make_decision(
     )
 
 
+# Prompt-leak / meta-text keywords that must NOT appear in a derived title.
+# Matches the (private) _BAD_PATTERNS list in pipeline._sanitize_title — kept
+# in sync manually because pipeline is a downstream import from here and we
+# don't want a circular dependency just to share a constant.
+_TITLE_BAD_PATTERNS = (
+    "字数", "场景", "目标", "要求", "注意", "提示", "格式",
+    "左右", "以上", "以下", "不超过", "大约",
+)
+
+
+def _derive_title_from_outline_fields(
+    goal: Any, key_events: Any
+) -> str | None:
+    """Derive a 4-8 char chapter title from outline ``goal`` / ``key_events``.
+
+    Called from ``NovelDirector._parse_outline`` when the LLM omits a title
+    or returns a placeholder like ``第N章``.  Pure local logic — no LLM call.
+    Returns ``None`` when no usable phrase can be extracted.
+
+    The returned candidate is pre-filtered against the same prompt-leak
+    keyword list that ``pipeline._sanitize_title`` uses, so a candidate
+    like "林辰的目标场景" (contains "目标"/"场景") never reaches the
+    downstream sanitizer to be silently rejected.
+    """
+    import re as _re_t
+
+    def _from_phrase(phrase: str) -> str | None:
+        if not phrase:
+            return None
+        # Cut at first natural boundary
+        head = _re_t.split(r"[，,。.！!？?；;、]", phrase)[0].strip()
+        # Strip quotation marks
+        head = head.strip("\"'\u201c\u201d\u300c\u300d\u300e\u300f")
+        if len(head) > 12:
+            head = head[:8]
+        if len(head) < 2:
+            return None
+        # Reject if the candidate contains any prompt-leak keyword — matches
+        # pipeline._sanitize_title's _BAD_PATTERNS filter.
+        if any(p in head for p in _TITLE_BAD_PATTERNS):
+            return None
+        return head
+
+    if isinstance(goal, str):
+        candidate = _from_phrase(goal)
+        if candidate:
+            return candidate
+
+    if isinstance(key_events, list) and key_events:
+        first = key_events[0]
+        if isinstance(first, str):
+            candidate = _from_phrase(first)
+            if candidate:
+                return candidate
+
+    return None
+
+
 def _extract_json_obj(text: str | None) -> dict | None:
     """从 LLM 输出中稳健提取 JSON 对象。"""
     if not text:
@@ -914,6 +972,23 @@ mood 可选值：蓄力、小爽、大爽、过渡、虐心、反转、日常。
                 # 确保 chapter_brief 存在且为 dict
                 if "chapter_brief" not in ch_data or not isinstance(ch_data.get("chapter_brief"), dict):
                     ch_data["chapter_brief"] = {}
+                # Title validation: if missing/empty/placeholder, try to
+                # derive a short phrase from goal or key_events[0].  Never
+                # call the LLM — that would blow up token cost.
+                ch_num_raw = ch_data.get("chapter_number") or len(chapters) + 1
+                title_raw = (ch_data.get("title") or "").strip()
+                placeholder = f"第{ch_num_raw}章"
+                if not title_raw or title_raw == placeholder:
+                    log.warning(
+                        "chapter %s 标题缺失或为占位符，尝试从 goal 派生",
+                        ch_num_raw,
+                    )
+                    fallback = _derive_title_from_outline_fields(
+                        ch_data.get("goal"),
+                        ch_data.get("key_events"),
+                    )
+                    if fallback:
+                        ch_data["title"] = fallback
                 chapters.append(ChapterOutline(**ch_data))
             except Exception:
                 log.warning("跳过无效 chapter 数据: %s", ch_data)

@@ -35,6 +35,14 @@ def _sanitize_title(title: str, ch_num: int) -> str:
     Applied to both extracted and outline-provided titles so that no
     garbage leaks into saved chapter metadata.
     """
+    # Check the raw input (pre-strip) for dialogue openers so we don't
+    # accidentally sanitize a stripped dialogue fragment into a "title".
+    # Uses the module-level _DIALOGUE_OPENERS (left quotes only).
+    _raw = title if isinstance(title, str) else ""
+    _raw_stripped = _raw.strip()
+    if _raw_stripped and _raw_stripped[0] in _DIALOGUE_OPENERS:
+        return f"第{ch_num}章"
+
     # Strip raw escape sequences that sometimes appear in LLM output
     title = title.replace("\\n", "").replace("\\t", "").replace("\\r", "")
     # Also strip actual whitespace / newlines
@@ -57,8 +65,16 @@ def _sanitize_title(title: str, ch_num: int) -> str:
     if "\n" in title or "\t" in title or "\r" in title:
         return f"第{ch_num}章"
 
-    # Reject overly long titles (likely a full sentence leaked through)
-    if len(title) > 15:
+    # Reject overly long titles (likely a full sentence leaked through).
+    # Relaxed from 15 to 25 chars: legitimate Chinese chapter titles can run
+    # up to 15-20 chars (e.g. "林辰首战定州之——群山开疆始"). Anything beyond
+    # 25 chars is almost certainly a full sentence leak.
+    if len(title) > 25:
+        return f"第{ch_num}章"
+
+    # Reject titles that are just punctuation
+    import re as _re_san
+    if _re_san.fullmatch(r"[\s\W_]+", title):
         return f"第{ch_num}章"
 
     # Reject too short or empty
@@ -68,59 +84,162 @@ def _sanitize_title(title: str, ch_num: int) -> str:
     return title
 
 
-def _extract_title_from_text(chapter_text: str, ch_num: int) -> str:
+# Only LEFT-quote openers count as "start of a dialogue line".  U+201D (right
+# double quote) and U+300D/U+300F (right corner brackets) at the start of a
+# paragraph usually mean a closing quote got orphaned by a line break —
+# typically a dialogue attribution fragment, not a new dialogue line.
+_DIALOGUE_OPENERS = ('"', "\u201c", "\u300c", "\u300e")
+
+
+def _is_dialogue_line(line: str) -> bool:
+    """Return True if the line looks like pure dialogue (starts with a quote)."""
+    s = line.strip()
+    if not s:
+        return False
+    if s[0] in _DIALOGUE_OPENERS:
+        return True
+    return False
+
+
+def _is_onomatopoeia(line: str) -> bool:
+    """Return True if the line is a short sound effect / exclamation.
+
+    e.g. "轰！", "咔嚓——", "砰！" — single/double Chinese char followed by
+    onomatopoeia-style punctuation, no narrative content.
+
+    NB: ``。`` (Chinese full stop) and ``…`` (ellipsis) are NOT sound-effect
+    punctuation — every narrative sentence ends in ``。``.  Including them
+    in the trigger set would misclassify short narrative lines like
+    "启程。" or "林辰死了。" as onomatopoeia.  Only ``！`` / ``!`` / ``——``
+    qualify.
+    """
+    import re as _re_o
+
+    s = line.strip().strip("——!！？?。.…\u3000 ")
+    if not s:
+        return False
+    # 1-3 Chinese chars only, plus trailing punctuation in the original
+    if len(s) <= 3 and _re_o.fullmatch(r"[\u4e00-\u9fa5]+", s):
+        # And the original line had trailing exclamation / dash punctuation
+        orig = line.strip()
+        if any(p in orig for p in ("！", "!", "——")):
+            return True
+    return False
+
+
+def _extract_title_from_text(
+    chapter_text: str, ch_num: int, ch_outline: dict | None = None
+) -> str:
     """Extract a short, meaningful title from chapter text.
 
     Uses heuristics: finds the most "interesting" short phrase from the
     first few paragraphs — a character action, a location reveal, or a
-    key event.  Falls back to first sentence truncated to 10 chars.
+    key event.
 
-    Skips markdown headers (lines starting with ``#``) and lines that
-    look like chapter-number headers (``第N章 ...``) to avoid picking up
-    wrong chapter numbers or ``#`` prefixes in the title.
+    Skips:
+    - markdown headers (lines starting with ``#``)
+    - chapter-number headers (``第N章 ...``)
+    - pure dialogue lines (start with ``"``, ``"``, ``「``, ``『``)
+    - short onomatopoeia / sound-effect lines (e.g. ``轰！``)
+
+    Fallback chain:
+    1. Narrative phrase from first ~5 lines (4-15 chars).
+    2. Phrase derived from ``ch_outline["goal"]`` or ``key_events[0]``.
+    3. Placeholder ``第N章`` as absolute last resort.
     """
     import re
 
+    if not chapter_text or not chapter_text.strip():
+        return _title_from_outline(ch_outline, ch_num)
+
     lines = [ln.strip() for ln in chapter_text.split("\n") if ln.strip()]
     if not lines:
-        return f"第{ch_num}章"
+        return _title_from_outline(ch_outline, ch_num)
 
-    # Try to find a short, punchy sentence in the first 5 lines
-    for line in lines[:5]:
-        # Skip markdown headers
+    # Pass 1: pick a narrative phrase from first 5 non-skipped lines.
+    narrative_lines: list[str] = []
+    for line in lines[:8]:
         if line.startswith("#"):
             continue
-        # Skip lines that look like chapter number headers
-        if re.match(r'^第\d+章', line):
+        if re.match(r"^第\d+章", line):
             continue
+        if _is_dialogue_line(line):
+            continue
+        if _is_onomatopoeia(line):
+            continue
+        if len(line) < 2:
+            continue
+        narrative_lines.append(line)
+        if len(narrative_lines) >= 5:
+            break
 
+    for line in narrative_lines:
         # Split into sentences
-        sentences = re.split(r'[。！？]', line)
+        sentences = re.split(r"[。！？]", line)
         for sent in sentences:
-            sent = sent.strip().strip('""\'\"\'')
-            # Good title: 4-12 chars, contains character action or place
-            if 4 <= len(sent) <= 12:
+            sent = sent.strip().strip("\"'\u201c\u201d\u300c\u300d\u300e\u300f")
+            # Good narrative title candidate: 4-15 chars
+            if 4 <= len(sent) <= 15:
                 candidate = _sanitize_title(sent, ch_num)
                 if candidate != f"第{ch_num}章":
                     return candidate
 
-    # Fallback: first non-header line truncated
-    for line in lines[:5]:
-        if line.startswith("#") or re.match(r'^第\d+章', line):
-            continue
+    # Pass 2: narrative line truncated at natural boundary.
+    for line in narrative_lines:
         if len(line) > 10:
-            # Cut at a natural boundary
             for sep in ("，", "。", "！", "？", "、"):
                 idx = line.find(sep)
-                if 3 <= idx <= 12:
+                if 3 <= idx <= 15:
                     candidate = _sanitize_title(line[:idx], ch_num)
                     if candidate != f"第{ch_num}章":
                         return candidate
-            candidate = _sanitize_title(line[:10], ch_num)
+            candidate = _sanitize_title(line[:12], ch_num)
             if candidate != f"第{ch_num}章":
                 return candidate
         if len(line) >= 4:
             candidate = _sanitize_title(line, ch_num)
+            if candidate != f"第{ch_num}章":
+                return candidate
+
+    # Pass 3: outline-derived fallback.
+    return _title_from_outline(ch_outline, ch_num)
+
+
+def _title_from_outline(ch_outline: dict | None, ch_num: int) -> str:
+    """Derive a short title from a chapter outline's goal or first key event.
+
+    Used as the final non-placeholder fallback before returning ``第N章``.
+    """
+    import re as _re_o
+
+    if not isinstance(ch_outline, dict):
+        return f"第{ch_num}章"
+
+    # Try goal first
+    goal = (ch_outline.get("goal") or "").strip()
+    if goal:
+        # Cut to first natural phrase
+        phrase = _re_o.split(r"[，,。.！!？?；;、]", goal)[0].strip()
+        if 2 <= len(phrase) <= 12:
+            candidate = _sanitize_title(phrase, ch_num)
+            if candidate != f"第{ch_num}章":
+                return candidate
+        # Or take first 8 chars of goal
+        candidate = _sanitize_title(goal[:8], ch_num)
+        if candidate != f"第{ch_num}章":
+            return candidate
+
+    # Try key_events[0]
+    key_events = ch_outline.get("key_events") or []
+    if isinstance(key_events, list) and key_events:
+        first = str(key_events[0] or "").strip()
+        if first:
+            phrase = _re_o.split(r"[，,。.！!？?；;、]", first)[0].strip()
+            if 2 <= len(phrase) <= 12:
+                candidate = _sanitize_title(phrase, ch_num)
+                if candidate != f"第{ch_num}章":
+                    return candidate
+            candidate = _sanitize_title(first[:8], ch_num)
             if candidate != f"第{ch_num}章":
                 return candidate
 
@@ -233,6 +352,120 @@ class NovelPipeline:
     # Checkpoint
     # ------------------------------------------------------------------
 
+    def _dedupe_chapters_list(self, chapters: list) -> list:
+        """Deduplicate ``state['chapters']`` by ``chapter_number``.
+
+        Background: earlier runs could append regenerated chapter records on
+        top of a stale list without upserting, leaving two or three entries
+        per chapter number in a single checkpoint file. This helper is the
+        single healing pass invoked on every checkpoint load and at the top
+        of ``generate_chapters``, so any historical duplication self-heals
+        automatically — it is idempotent and safe to run repeatedly.
+
+        Rules:
+        - Group entries by ``chapter_number``.
+        - When a group has more than one entry, keep the one with the highest
+          ``word_count`` (the most complete/most recently regenerated copy).
+        - Sort the deduped result by ``chapter_number`` ascending.
+        - Entries missing or with ``None`` ``chapter_number`` are preserved
+          unchanged at the end of the list (defensive — do not drop weird
+          data, just do not dedupe it).
+        - The input list is not mutated.
+        """
+        if not isinstance(chapters, list) or not chapters:
+            return list(chapters or [])
+
+        with_num: dict[int, dict] = {}
+        without_num: list = []
+
+        for entry in chapters:
+            if not isinstance(entry, dict):
+                without_num.append(entry)
+                continue
+            ch_num = entry.get("chapter_number")
+            if ch_num is None:
+                without_num.append(entry)
+                continue
+            existing = with_num.get(ch_num)
+            if existing is None:
+                with_num[ch_num] = entry
+                continue
+            existing_wc = existing.get("word_count") or 0
+            new_wc = entry.get("word_count") or 0
+            if new_wc > existing_wc:
+                with_num[ch_num] = entry
+
+        deduped = sorted(
+            with_num.values(),
+            key=lambda c: c.get("chapter_number") or 0,
+        )
+        result = deduped + without_num
+
+        before = len(chapters)
+        after = len(result)
+        if after < before:
+            log.info("chapters 列表去重：%d → %d 条", before, after)
+        return result
+
+    @staticmethod
+    def _upsert_rewritten_chapter(
+        existing_chapters: list,
+        ch_num: int,
+        new_text: str,
+        new_title: str,
+    ) -> list:
+        """Upsert a freshly-rewritten chapter into ``state['chapters']``.
+
+        Used by ``apply_feedback`` when a chapter is rewritten from reader
+        feedback. Wipes all existing entries for ``ch_num`` (defensively
+        handling stale duplicates), builds a canonical new entry with
+        invalidated quality fields, and returns a new sorted list.
+
+        If no pre-existing entry is found for ``ch_num`` (e.g. the chapter
+        exists on disk but ``state['chapters']`` was cleared/corrupted),
+        a fresh entry is still constructed so the rewrite lands in state.
+
+        Quality fields are explicitly nulled because the old scores were
+        computed against the old text — ``rule_checked=False`` marks the
+        chapter as "needs re-scoring".
+
+        This helper is pure: ``existing_chapters`` is not mutated.
+        """
+        # Preserve any carry-over fields from the first existing entry
+        # (e.g. chapter_id, generated_at), but we'll overwrite all the
+        # content/quality fields below.
+        new_entry: dict | None = None
+        for ch_data in existing_chapters or []:
+            if isinstance(ch_data, dict) and ch_data.get("chapter_number") == ch_num:
+                new_entry = dict(ch_data)
+                break
+        if new_entry is None:
+            new_entry = {"chapter_number": ch_num, "status": "draft"}
+            log.info("第%d章在 state.chapters 中无原记录，新建条目", ch_num)
+
+        new_entry["full_text"] = new_text
+        new_entry["word_count"] = len(new_text)
+        new_entry["title"] = new_title
+        new_entry["quality_score"] = None
+        new_entry["quality_scores"] = None
+        new_entry["retention_scores"] = None
+        new_entry["rule_passed"] = True
+        new_entry["rule_checked"] = False
+        new_entry["scored_by_llm"] = False
+
+        remaining = [
+            ch
+            for ch in (existing_chapters or [])
+            if not (isinstance(ch, dict) and ch.get("chapter_number") == ch_num)
+        ]
+        result = remaining + [new_entry]
+        result.sort(
+            key=lambda c: (c.get("chapter_number") or 0)
+            if isinstance(c, dict)
+            else 0
+        )
+        return result
+
     def _save_checkpoint(self, novel_id: str, state: dict) -> None:
         """Save pipeline state as checkpoint JSON (atomic write)."""
         ckpt_path = self._checkpoint_path(novel_id)
@@ -284,6 +517,9 @@ class NovelPipeline:
             data["retry_counts"] = {
                 int(k): v for k, v in data["retry_counts"].items()
             }
+        # Heal any historical duplication in the chapters list on every load.
+        if "chapters" in data and isinstance(data["chapters"], list):
+            data["chapters"] = self._dedupe_chapters_list(data["chapters"])
         return data
 
     # ------------------------------------------------------------------
@@ -817,6 +1053,10 @@ class NovelPipeline:
         # ★ Refresh settings from novel.json (edit_service writes there)
         self._refresh_state_from_novel(state, fm.load_novel(novel_id))
 
+        # Heal any duplicates from in-memory state built outside checkpoint.
+        if "chapters" in state and isinstance(state["chapters"], list):
+            state["chapters"] = self._dedupe_chapters_list(state["chapters"])
+
         outline = state.get("outline")
         if not outline:
             raise ValueError("项目大纲不存在，请先运行 create_novel")
@@ -1219,11 +1459,37 @@ class NovelPipeline:
             if chapter_text:
                 # Get title: prefer revised outline title, fallback to extraction
                 revised_outline = state.get("current_chapter_outline", ch_outline)
-                ch_title = revised_outline.get("title", "") if isinstance(revised_outline, dict) else ch_outline.get("title", "")
+                _outline_for_title = (
+                    revised_outline
+                    if isinstance(revised_outline, dict)
+                    else ch_outline if isinstance(ch_outline, dict) else None
+                )
+                ch_title = _outline_for_title.get("title", "") if _outline_for_title else ""
                 # Always sanitize outline-provided titles
                 ch_title = _sanitize_title(ch_title, ch_num) if ch_title else ""
                 if not ch_title or ch_title == f"第{ch_num}章":
-                    ch_title = _extract_title_from_text(chapter_text, ch_num)
+                    ch_title = _extract_title_from_text(
+                        chapter_text, ch_num, _outline_for_title
+                    )
+
+                # Uniqueness: avoid identical titles across previously
+                # generated chapters in this run. If a collision occurs,
+                # append a differentiator derived from the chapter number.
+                if ch_title and ch_title != f"第{ch_num}章":
+                    existing_titles = {
+                        (ch_prev.get("title") or "").strip()
+                        for ch_prev in (state.get("chapters") or [])
+                        if ch_prev.get("chapter_number") != ch_num
+                    }
+                    if ch_title in existing_titles:
+                        differentiated = f"{ch_title}·续"
+                        if differentiated in existing_titles:
+                            differentiated = f"{ch_title}·其{ch_num}"
+                        log.info(
+                            "第%d章标题与已有章节重复，已重命名：%s → %s",
+                            ch_num, ch_title, differentiated,
+                        )
+                        ch_title = differentiated
 
                 # --- Hook Generator: evaluate and improve chapter ending ---
                 try:
@@ -1249,6 +1515,15 @@ class NovelPipeline:
                             log.info("第%d章结尾已优化", ch_num)
                 except Exception as exc:
                     log.warning("钩子生成失败 (非关键): %s", exc)
+
+                # --- Surgical dedup: strip intra-chapter dialogue echo runs ---
+                try:
+                    from src.novel.services.dedup_dialogue import (
+                        strip_intra_chapter_dialogue_repeats,
+                    )
+                    chapter_text = strip_intra_chapter_dialogue_repeats(chapter_text)
+                except Exception as exc:
+                    log.warning("对白复读去重失败 (非关键): %s", exc)
 
                 ch_data = self._build_chapter_record(
                     state=state,
@@ -2050,6 +2325,15 @@ class NovelPipeline:
                     is_propagation=is_propagation,
                 )
 
+                # Surgical dedup: strip intra-chapter dialogue echo runs
+                try:
+                    from src.novel.services.dedup_dialogue import (
+                        strip_intra_chapter_dialogue_repeats,
+                    )
+                    new_text = strip_intra_chapter_dialogue_repeats(new_text)
+                except Exception as exc:
+                    log.warning("重写章节对白复读去重失败 (非关键): %s", exc)
+
                 # Save rewritten chapter (text + json metadata)
                 raw_title = ch_outline_data.get("title", f"第{ch_num}章")
                 ch_json = {
@@ -2072,24 +2356,23 @@ class NovelPipeline:
                 }
                 # Extract better title if current is placeholder
                 if ch_json["title"] == f"第{ch_num}章":
-                    ch_json["title"] = _extract_title_from_text(new_text, ch_num)
+                    ch_json["title"] = _extract_title_from_text(
+                        new_text, ch_num, ch_outline_data
+                    )
                 fm.save_chapter(novel_id, ch_num, ch_json)
                 chapter_texts[ch_num] = new_text  # update for subsequent chapters' context
 
                 # Also update state chapters list (keep in sync with disk —
                 # stale quality fields here would survive checkpointing).
-                for ch_data in state.get("chapters") or []:
-                    if ch_data.get("chapter_number") == ch_num:
-                        ch_data["full_text"] = new_text
-                        ch_data["word_count"] = len(new_text)
-                        ch_data["title"] = ch_json["title"]
-                        ch_data["quality_score"] = None
-                        ch_data["quality_scores"] = None
-                        ch_data["retention_scores"] = None
-                        ch_data["rule_passed"] = True
-                        ch_data["rule_checked"] = False
-                        ch_data["scored_by_llm"] = False
-                        break
+                # The helper wipes ALL entries for this chapter_number,
+                # builds a canonical new entry with quality fields nulled,
+                # and handles the zero-entry case defensively.
+                state["chapters"] = self._upsert_rewritten_chapter(
+                    existing_chapters=state.get("chapters") or [],
+                    ch_num=ch_num,
+                    new_text=new_text,
+                    new_title=ch_json["title"],
+                )
 
                 result["rewritten_chapters"].append(
                     {
@@ -3200,7 +3483,7 @@ class NovelPipeline:
             title = _sanitize_title(title, ch_num) if title else ""
             if not title or title == f"第{ch_num}章":
                 # Extract a short title from the chapter text
-                title = _extract_title_from_text(chapter_text, ch_num)
+                title = _extract_title_from_text(chapter_text, ch_num, cur_outline or ch)
             ch["title"] = title
 
             # chapter_summary: short preview for display purposes only
