@@ -97,3 +97,7 @@ class NovelState(TypedDict, total=False):
 
     # === 当前章重写反馈 ===
     current_chapter_rewrite_prompt: str  # Rewrite-specific feedback from QualityReviewer
+
+    # === 风格锚定 (Intervention D) ===
+    style_bible: dict | None  # StyleBible.model_dump() — per-project style anchoring
+    current_volume: int | None  # Current volume number (for volume_overrides)

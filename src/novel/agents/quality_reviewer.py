@@ -250,6 +250,12 @@ class QualityReviewer:
         if not rule_check.get("passed", True):
             return True
 
+        # Style bible gate (Intervention D): if StyleKeeper's quantitative
+        # check flagged need_rewrite, force rewrite regardless of scores.
+        style_bible_check = report.get("style_bible_check", {})
+        if style_bible_check.get("need_rewrite", False):
+            return True
+
         # LLM 评分低于阈值 -> 重写
         scores = report.get("scores", {})
         if scores:
@@ -352,6 +358,13 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         existing_style_check=existing_style_check,
     )
 
+    # Inject style bible gate results from StyleKeeper (Intervention D)
+    if existing_quality.get("style_need_rewrite") is not None:
+        report["style_bible_check"] = {
+            "need_rewrite": existing_quality.get("style_need_rewrite", False),
+            "deviations": existing_quality.get("style_bible_deviations", []),
+        }
+
     need_rewrite = reviewer.should_rewrite(
         report,
         threshold=state.get("auto_approve_threshold", 6.0),
@@ -428,6 +441,13 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
                     rewrite_parts.append(f"风格偏差：{dev.get('description', dev)}")
                 else:
                     rewrite_parts.append(f"风格偏差：{dev}")
+
+        # Style bible gate deviations (Intervention D)
+        bible_check = report.get("style_bible_check", {})
+        bible_devs = bible_check.get("deviations", [])
+        if bible_devs:
+            for dev in bible_devs[:5]:
+                rewrite_parts.append(f"风格圣经偏差：{dev}")
 
         # Suggestions
         suggestions = report.get("suggestions", [])

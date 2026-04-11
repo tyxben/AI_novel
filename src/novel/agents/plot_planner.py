@@ -106,6 +106,7 @@ _DECOMPOSE_USER = """\
 - 预估字数: {estimated_words}
 {chapter_brief_section}
 {main_storyline_section}
+{volume_progress_section}\
 ## 卷上下文
 {volume_context}
 
@@ -173,6 +174,7 @@ class PlotPlanner:
         generation_config: dict | None = None,
         continuity_brief: str = "",
         debt_summary: str = "",
+        volume_progress: dict | None = None,
     ) -> list[dict]:
         """将章大纲分解为场景计划列表。
 
@@ -192,6 +194,9 @@ class PlotPlanner:
         debt_summary:
             未了结叙事义务，可选。来自叙事债务追踪器的摘要，
             用于提醒场景规划需要解决的遗留问题。
+        volume_progress:
+            卷进度数据字典，可选。来自 MilestoneTracker.compute_volume_progress()，
+            包含 progress_health / milestones_pending / milestones_overdue 等。
         """
         gen_cfg = generation_config or {}
 
@@ -296,6 +301,11 @@ class PlotPlanner:
         if debt_summary:
             debt_section = f"\n## 未了结叙事义务\n{debt_summary}\n"
 
+        # Build volume progress constraint section (Intervention A)
+        volume_progress_section = self._build_volume_progress_section(
+            volume_progress
+        )
+
         # Build words_per_scene guidance for the prompt
         words_per_scene_section = ""
         wps = gen_cfg.get("words_per_scene")
@@ -318,6 +328,7 @@ class PlotPlanner:
             estimated_words=effective_estimated_words,
             chapter_brief_section=chapter_brief_section,
             main_storyline_section=main_storyline_section,
+            volume_progress_section=volume_progress_section,
             volume_context=volume_ctx_str,
             characters_info=characters_info,
             foreshadowing_info=foreshadowing_info,
@@ -453,6 +464,42 @@ class PlotPlanner:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _build_volume_progress_section(
+        volume_progress: dict | None,
+    ) -> str:
+        """Build a volume progress constraint block for the PlotPlanner prompt.
+
+        Returns an empty string when no actionable constraint exists (on_track
+        or missing data).
+        """
+        if not volume_progress:
+            return ""
+
+        health = volume_progress.get("progress_health", "on_track")
+        if health == "on_track":
+            return ""
+
+        lines: list[str] = ["\n## 卷进度约束"]
+
+        if health == "behind_schedule":
+            pending = volume_progress.get("milestones_pending", [])
+            top3 = ", ".join(pending[:3])
+            lines.append(
+                f"**卷进度落后警告**：以下里程碑待完成：{top3}。"
+                f"本章必须优先推进以上里程碑，避免引入与里程碑无关的新支线。"
+            )
+        elif health == "critical":
+            overdue = volume_progress.get("milestones_overdue", [])
+            lines.append(
+                f"**严重警告**：以下里程碑已逾期：{', '.join(overdue)}。"
+                f"本章必须有至少 1 个场景直接推进其中一个逾期里程碑，"
+                f"不允许与里程碑无关的场景。"
+            )
+
+        lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
     def _validate_scenes(
         scenes_raw: list[dict], total_words: int
     ) -> list[dict]:
@@ -546,6 +593,7 @@ def plot_planner_node(state: dict) -> dict:
     # Read continuity constraints from state
     continuity_brief = state.get("continuity_brief", "")
     debt_summary = state.get("debt_summary", "")
+    volume_progress = state.get("volume_progress")
 
     try:
         scene_plans = planner.decompose_chapter(
@@ -557,6 +605,7 @@ def plot_planner_node(state: dict) -> dict:
             generation_config=generation_cfg,
             continuity_brief=continuity_brief,
             debt_summary=debt_summary,
+            volume_progress=volume_progress,
         )
 
         decisions.append({

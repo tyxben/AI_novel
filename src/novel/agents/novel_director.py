@@ -1151,10 +1151,36 @@ def novel_director_node(state: NovelState) -> dict[str, Any]:
             "completed_nodes": ["novel_director"],
         }
 
+    # --- Style Bible generation (Intervention D) ---
+    style_bible_data = None
+    try:
+        from src.novel.services.style_bible_generator import StyleBibleGenerator
+
+        bible_gen = StyleBibleGenerator(llm)
+        style_bible = bible_gen.generate(
+            genre=genre,
+            theme=theme,
+            style_name=style_name,
+        )
+        style_bible_data = style_bible.model_dump()
+        decisions.append(
+            _make_decision(
+                step="generate_style_bible",
+                decision="风格圣经生成完成",
+                reason=f"基于风格预设 {style_name} 生成量化目标",
+                data={"voice_description": style_bible.voice_description},
+            )
+        )
+        log.info("风格圣经生成完成: %s", style_name)
+    except Exception as exc:
+        log.warning("风格圣经生成失败（非阻塞）: %s", exc)
+        errors.append({"agent": "NovelDirector", "message": f"风格圣经生成失败: {exc}"})
+
     return {
         "outline": outline.model_dump(),
         "template": template_name,
         "style_name": style_name,
+        "style_bible": style_bible_data,
         "total_chapters": len(outline.chapters),
         "current_chapter": 0,
         "should_continue": True,

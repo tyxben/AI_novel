@@ -100,6 +100,110 @@ class StyleKeeper:
         # 对比
         return self.tool.compare(metrics, reference)
 
+    def check_against_bible(
+        self,
+        text: str,
+        style_bible: dict,
+        current_volume: int | None = None,
+    ) -> tuple[bool, dict]:
+        """Check chapter text against the style bible's quantitative targets.
+
+        Pure text analysis -- zero LLM cost.  Can run every chapter.
+
+        Thresholds:
+        - sentence_length exceeds target_max by >30% or below target_min by >30% -> rewrite
+        - dialogue_ratio exceeds target range by >15pp -> rewrite
+        - sensory_density exceeds target_max by >2x -> rewrite
+
+        Args:
+            text: Chapter text to check.
+            style_bible: Style bible dict (from novel.json).
+            current_volume: Current volume number (for volume_overrides).
+
+        Returns:
+            ``(need_rewrite, report)`` where *report* has keys:
+            ``deviations`` (list[str]), ``need_rewrite`` (bool),
+            ``metrics`` (dict of actual measured values).
+        """
+        from src.novel.services.style_bible_generator import (
+            compute_avg_sentence_length,
+            compute_dialogue_ratio,
+            compute_sensory_density,
+        )
+
+        # Resolve targets with volume overrides
+        targets = dict(style_bible.get("quantitative_targets", {}))
+        if current_volume and style_bible.get("volume_overrides"):
+            overrides = style_bible["volume_overrides"].get(
+                str(current_volume), {}
+            )
+            targets.update(overrides)
+
+        # Compute actual metrics
+        actual_sl = compute_avg_sentence_length(text)
+        actual_dr = compute_dialogue_ratio(text)
+        actual_sd = compute_sensory_density(text)
+
+        deviations: list[str] = []
+        need_rewrite = False
+
+        # Sentence length check
+        if "avg_sentence_length" in targets:
+            target_min, target_max = targets["avg_sentence_length"]
+            if target_max > 0 and actual_sl > target_max * 1.30:
+                pct = (actual_sl / target_max - 1) * 100
+                deviations.append(
+                    f"句长超标 +{pct:.0f}%（实际 {actual_sl:.1f}，目标上限 {target_max:.1f}）"
+                )
+                need_rewrite = True
+            elif target_min > 0 and actual_sl < target_min * 0.70:
+                pct = (1 - actual_sl / target_min) * 100
+                deviations.append(
+                    f"句长过短 -{pct:.0f}%（实际 {actual_sl:.1f}，目标下限 {target_min:.1f}）"
+                )
+                need_rewrite = True
+
+        # Dialogue ratio check
+        if "dialogue_ratio" in targets:
+            target_min, target_max = targets["dialogue_ratio"]
+            if actual_dr > target_max + 0.15:
+                pp = (actual_dr - target_max) * 100
+                deviations.append(
+                    f"对话占比过高 +{pp:.0f}pp（实际 {actual_dr*100:.0f}%，"
+                    f"目标上限 {target_max*100:.0f}%）"
+                )
+                need_rewrite = True
+            elif actual_dr < target_min - 0.15:
+                pp = (target_min - actual_dr) * 100
+                deviations.append(
+                    f"对话占比过低 -{pp:.0f}pp（实际 {actual_dr*100:.0f}%，"
+                    f"目标下限 {target_min*100:.0f}%）"
+                )
+                need_rewrite = True
+
+        # Sensory density check
+        if "sensory_density" in targets:
+            _target_min, target_max = targets["sensory_density"]
+            if target_max > 0 and actual_sd > target_max * 2.0:
+                pct = (actual_sd / target_max - 1) * 100
+                deviations.append(
+                    f"感官描述过密 +{pct:.0f}%（实际 {actual_sd:.1f} 次/千字，"
+                    f"目标上限 {target_max:.1f}）"
+                )
+                need_rewrite = True
+
+        report = {
+            "metrics": {
+                "avg_sentence_length": round(actual_sl, 2),
+                "dialogue_ratio": round(actual_dr, 4),
+                "sensory_density": round(actual_sd, 2),
+            },
+            "deviations": deviations,
+            "need_rewrite": need_rewrite,
+        }
+
+        return need_rewrite, report
+
     def suggest_improvements(self, text: str, deviations: list[str]) -> list[str]:
         """根据风格偏差生成改进建议（规则驱动）。
 
@@ -250,6 +354,32 @@ def style_keeper_node(state: NovelState) -> dict[str, Any]:
         except KeyError as exc:
             errors.append({"agent": "StyleKeeper", "message": f"风格预设不存在: {exc}"})
 
+    # --- Style Bible quantitative gate (Intervention D) ---
+    style_bible = state.get("style_bible")
+    current_volume = state.get("current_volume")
+    bible_need_rewrite = False
+    bible_deviations: list[str] = []
+
+    if style_bible:
+        try:
+            bible_need_rewrite, bible_report = keeper.check_against_bible(
+                text=chapter_text,
+                style_bible=style_bible,
+                current_volume=current_volume,
+            )
+            bible_deviations = bible_report.get("deviations", [])
+            decisions.append(
+                _make_decision(
+                    step="check_against_bible",
+                    decision="需要重写" if bible_need_rewrite else "通过检查",
+                    reason=f"偏差 {len(bible_deviations)} 项" if bible_deviations else "无偏差",
+                    data=bible_report,
+                )
+            )
+        except Exception as exc:
+            log.warning("StyleKeeper 风格圣经检查失败: %s", exc)
+            errors.append({"agent": "StyleKeeper", "message": f"风格圣经检查失败: {exc}"})
+
     result: dict[str, Any] = {
         "decisions": decisions,
         "errors": errors,
@@ -263,6 +393,9 @@ def style_keeper_node(state: NovelState) -> dict[str, Any]:
         quality["style_similarity"] = similarity
         quality["style_deviations"] = deviations
         quality["style_suggestions"] = suggestions
+    # Style bible gate results
+    quality["style_need_rewrite"] = bible_need_rewrite
+    quality["style_bible_deviations"] = bible_deviations
     result["current_chapter_quality"] = quality
 
     return result

@@ -81,6 +81,9 @@ class ContinuityService:
         story_arcs: list[dict] | None = None,
         characters: list | None = None,
         protagonist_names: list[str] | None = None,
+        style_bible: dict | None = None,
+        current_volume: int | None = None,
+        novel_data: dict | None = None,
     ) -> dict[str, Any]:
         """Generate a unified continuity brief for the given chapter.
 
@@ -99,6 +102,11 @@ class ContinuityService:
                 ``arc_id``, ``name``, ``chapters``, ``phase``, ``status``).
             characters: List of ``CharacterProfile`` (Pydantic models or
                 plain dicts with ``character_id``, ``name``, ``status``).
+            style_bible: Style bible dict (from novel.json, optional).
+            current_volume: Current volume number (for volume_overrides).
+            novel_data: Full novel.json dict (optional).  When provided,
+                volume progress (milestone tracking) is extracted and
+                included in the brief.
 
         Returns:
             A continuity brief dict ready for ``format_for_prompt()``.
@@ -111,6 +119,8 @@ class ContinuityService:
             "active_arcs": [],
             "forbidden_breaks": [],
             "recommended_payoffs": [],
+            "style_brief": None,
+            "volume_progress": {},
         }
 
         # Auto-derive protagonist names from characters if not provided
@@ -124,6 +134,14 @@ class ContinuityService:
         self._extract_dead_characters(brief, chapters or [], chapter_number, protagonist_names)
         self._derive_forbidden_breaks(brief)
         self._extract_recommended_payoffs(brief, chapter_brief, chapter_number)
+
+        # Inject style bible (Intervention D)
+        if style_bible:
+            brief["style_brief"] = self._extract_style_brief(style_bible, current_volume)
+
+        # Volume progress (Intervention A: milestone tracking)
+        if novel_data:
+            self._extract_volume_progress(brief, chapter_number, novel_data)
 
         return brief
 
@@ -204,6 +222,81 @@ class ContinuityService:
                 sections.append(f"- {item}")
             sections.append("")
 
+        # Style anchoring section (Intervention D)
+        style_brief = brief.get("style_brief")
+        if style_brief:
+            sections.append("### 风格锚定要求\n")
+            sections.append("**量化目标**：")
+
+            targets = style_brief.get("quantitative_targets", {})
+            if "avg_sentence_length" in targets:
+                r = targets["avg_sentence_length"]
+                sections.append(f"- 句长：{r[0]:.0f}-{r[1]:.0f} 字")
+            if "dialogue_ratio" in targets:
+                r = targets["dialogue_ratio"]
+                sections.append(f"- 对话占比：{r[0]*100:.0f}%-{r[1]*100:.0f}%")
+            if "sensory_density" in targets:
+                r = targets["sensory_density"]
+                sections.append(f"- 感官描述：不超过 {r[1]:.1f} 次/千字")
+
+            exemplars = style_brief.get("exemplar_paragraphs", [])
+            if exemplars:
+                sections.append("\n**风格示范**（请参考以下段落的节奏和语感）：")
+                # Show at most 2, rotate by chapter number to vary
+                ch_num = brief.get("chapter_number", 1)
+                start_idx = (ch_num - 1) % max(len(exemplars), 1)
+                for i in range(min(2, len(exemplars))):
+                    idx = (start_idx + i) % len(exemplars)
+                    sections.append(f"\n示范 {i + 1}：\n{exemplars[idx]}\n")
+
+            anti = style_brief.get("anti_patterns", [])
+            if anti:
+                sections.append("**禁止模式**：")
+                for pattern in anti[:5]:
+                    sections.append(f"- {pattern}")
+                sections.append("")
+
+        # Volume progress (Intervention A)
+        vp = brief.get("volume_progress", {})
+        if vp:
+            sections.append("### 当前卷进度摘要")
+            vol = vp.get("current_volume", {})
+            total_ch = vp.get("chapters_consumed", 0) + vp.get("chapters_remaining", 0)
+            sections.append(
+                f"- 卷：第 {vol.get('number', '?')} 卷"
+                f"「{vol.get('title', '?')}」"
+                f"（已用 {vp.get('chapters_consumed', 0)}/{total_ch} 章，"
+                f"剩余 {vp.get('chapters_remaining', 0)} 章）"
+            )
+
+            completed = vp.get("milestones_completed", [])
+            if completed:
+                sections.append(
+                    f"- 已完成里程碑：{'、'.join(completed)}"
+                )
+
+            pending = vp.get("milestones_pending", [])
+            if pending:
+                display = ", ".join(pending[:3])
+                if len(pending) > 3:
+                    display += "..."
+                sections.append(f"- 待完成里程碑：{display}")
+
+            overdue = vp.get("milestones_overdue", [])
+            if overdue:
+                sections.append(f"- **逾期里程碑**：{', '.join(overdue)}")
+
+            health = vp.get("progress_health", "")
+            health_text = {
+                "on_track": "进度正常",
+                "behind_schedule": "进度落后，需加速推进",
+                "critical": "有逾期里程碑，本章必须推进",
+            }.get(health, "")
+            if health_text:
+                sections.append(f"- 进度状态：{health_text}")
+
+            sections.append("")
+
         # If only the header was added, return empty
         if len(sections) <= 1:
             return ""
@@ -213,6 +306,31 @@ class ContinuityService:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_style_brief(
+        style_bible: dict, current_volume: int | None
+    ) -> dict[str, Any]:
+        """Extract style brief from the style bible for prompt injection.
+
+        Applies volume-level overrides when *current_volume* matches a key
+        in ``style_bible["volume_overrides"]``.
+        """
+        targets = dict(style_bible.get("quantitative_targets", {}))
+
+        # Apply volume overrides
+        if current_volume and style_bible.get("volume_overrides"):
+            overrides = style_bible["volume_overrides"].get(
+                str(current_volume), {}
+            )
+            targets.update(overrides)
+
+        return {
+            "quantitative_targets": targets,
+            "voice_description": style_bible.get("voice_description", ""),
+            "exemplar_paragraphs": style_bible.get("exemplar_paragraphs", []),
+            "anti_patterns": style_bible.get("anti_patterns", []),
+        }
 
     def _extract_continuation_hooks(
         self,
@@ -530,6 +648,23 @@ class ContinuityService:
                 brief["forbidden_breaks"].append(
                     f"{name} 已死亡（前文章节中），不可作为活人出现，只能以'{name}余部'、'{name}残部'、'{name}的旧部'等形式提及"
                 )
+
+    def _extract_volume_progress(
+        self,
+        brief: dict[str, Any],
+        chapter_number: int,
+        novel_data: dict,
+    ) -> None:
+        """Extract volume progress from milestone data in novel_data."""
+        try:
+            from src.novel.services.milestone_tracker import MilestoneTracker
+
+            tracker = MilestoneTracker(novel_data)
+            progress = tracker.compute_volume_progress(chapter_number)
+            if progress:
+                brief["volume_progress"] = progress
+        except Exception:
+            log.warning("卷进度提取失败", exc_info=True)
 
     def _extract_recommended_payoffs(
         self,

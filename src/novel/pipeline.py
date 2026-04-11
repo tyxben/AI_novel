@@ -558,6 +558,10 @@ class NovelPipeline:
         if "style_name" in novel_data:
             state["style_name"] = novel_data["style_name"]
 
+        # Refresh style_bible (Intervention D)
+        if "style_bible" in novel_data:
+            state["style_bible"] = novel_data["style_bible"]
+
         return state
 
     # ------------------------------------------------------------------
@@ -742,6 +746,7 @@ class NovelPipeline:
             "characters": state.get("characters", []),
             "world_setting": state.get("world_setting"),
             "style_name": state.get("style_name", style),
+            "style_bible": state.get("style_bible"),
             "template": state.get("template", template),
             "author_name": author_name,
             "target_audience": target_audience,
@@ -951,6 +956,8 @@ class NovelPipeline:
                     chapter_brief=ch_outline.get("chapter_brief", {}),
                     story_arcs=state.get("story_arcs", []),
                     characters=state.get("characters", []),
+                    style_bible=state.get("style_bible"),
+                    current_volume=state.get("current_volume"),
                 )
                 state["continuity_brief"] = continuity_svc.format_for_prompt(continuity_brief)
             except Exception as exc:
@@ -1136,6 +1143,54 @@ class NovelPipeline:
         # Pass writer mode flags into state
         state["react_mode"] = react_mode
         state["budget_mode"] = budget_mode
+
+        # --- Style Bible migration (Intervention D) ---
+        # If no style_bible exists yet (legacy project), auto-generate one
+        # from the first 5 existing chapters.
+        if not state.get("style_bible"):
+            try:
+                existing_chapters = state.get("chapters") or []
+                style_name = state.get("style_name", "webnovel.shuangwen")
+                genre = state.get("genre", "")
+                # Ensure chapters have full_text
+                _chapters_text = state.get("chapters_text", {})
+                chapters_with_text = []
+                for ch in existing_chapters:
+                    ch_copy = dict(ch)
+                    if not ch_copy.get("full_text"):
+                        ch_copy["full_text"] = _chapters_text.get(
+                            ch_copy.get("chapter_number", 0), ""
+                        )
+                    if ch_copy.get("full_text") and len(ch_copy["full_text"]) > 100:
+                        chapters_with_text.append(ch_copy)
+
+                if chapters_with_text:
+                    # Use first 5 chapters for baseline
+                    sample = sorted(
+                        chapters_with_text, key=lambda c: c.get("chapter_number", 0)
+                    )[:5]
+                    from src.novel.services.style_bible_generator import StyleBibleGenerator
+                    from src.llm.llm_client import create_llm_client as _create_llm_sb
+
+                    _llm_cfg = get_stage_llm_config(state, "outline_generation")
+                    _llm_sb = _create_llm_sb(_llm_cfg)
+                    bible_gen = StyleBibleGenerator(_llm_sb)
+                    bible = bible_gen.generate_from_existing_chapters(
+                        chapters=sample,
+                        style_name=style_name,
+                        genre=genre,
+                    )
+                    state["style_bible"] = bible.model_dump()
+                    # Persist to novel.json
+                    novel_data_sb = fm.load_novel(novel_id) or {}
+                    novel_data_sb["style_bible"] = state["style_bible"]
+                    fm.save_novel(novel_id, novel_data_sb)
+                    log.info("风格圣经已从现有章节迁移生成 (ch%d-%d)",
+                             sample[0]["chapter_number"], sample[-1]["chapter_number"])
+                else:
+                    log.info("无现有章节，跳过风格圣经迁移（将在新项目创建时生成）")
+            except Exception as exc:
+                log.warning("风格圣经迁移生成失败（非阻塞）: %s", exc)
 
         # Initialize chapters_text from existing chapters in state
         if "chapters_text" not in state:
@@ -1359,17 +1414,35 @@ class NovelPipeline:
                         )
                     _chapters_for_brief.append(_bch_copy)
 
+                # Compute current_volume from chapter number and outline
+                _current_volume = self._chapter_to_volume(ch_num, outline)
+                state["current_volume"] = _current_volume
+
+                # Load novel_data for milestone tracking (Intervention A)
+                _novel_data_for_milestones = None
+                try:
+                    _novel_data_for_milestones = fm.load_novel(novel_id)
+                except Exception:
+                    pass
+
                 continuity_brief = continuity_svc.generate_brief(
                     chapter_number=ch_num,
                     chapters=_chapters_for_brief,
                     chapter_brief=ch_outline.get("chapter_brief", {}),
                     story_arcs=state.get("story_arcs", []),
                     characters=state.get("characters", []),
+                    style_bible=state.get("style_bible"),
+                    current_volume=_current_volume,
+                    novel_data=_novel_data_for_milestones,
                 )
                 state["continuity_brief"] = continuity_svc.format_for_prompt(continuity_brief)
+
+                # Store structured volume_progress for PlotPlanner (Intervention A)
+                state["volume_progress"] = continuity_brief.get("volume_progress", {})
             except Exception as exc:
                 log.warning("连续性摘要生成失败: %s", exc)
                 state["continuity_brief"] = ""
+                state["volume_progress"] = {}
 
             # --- Global Director: whole-book directorial guidance ---
             try:
@@ -1658,6 +1731,55 @@ class NovelPipeline:
                         self.memory.save()
                     except Exception as exc:
                         log.debug("章节向量索引失败: %s", exc)
+
+                # --- Milestone Tracking (Intervention A): check completion + overdue ---
+                try:
+                    from src.novel.services.milestone_tracker import MilestoneTracker
+
+                    _novel_data_mt = fm.load_novel(novel_id) or {}
+                    mt = MilestoneTracker(_novel_data_mt)
+                    _completed_ms = mt.check_milestone_completion(
+                        chapter_num=ch_num,
+                        chapter_text=chapter_text,
+                        chapter_summary=actual_summary or None,
+                    )
+                    if _completed_ms:
+                        log.info("Completed milestones at ch%d: %s", ch_num, _completed_ms)
+                    _overdue_ms = mt.mark_overdue_milestones(ch_num)
+                    if _overdue_ms:
+                        log.warning("Overdue milestones at ch%d: %s", ch_num, _overdue_ms)
+
+                    # Persist milestone status changes back to novel.json
+                    if _completed_ms or _overdue_ms:
+                        _novel_data_mt["outline"] = _novel_data_mt.get("outline", {})
+                        _novel_data_mt["outline"]["volumes"] = mt.volumes
+                        fm.save_novel(novel_id, _novel_data_mt)
+                        # Also update in-memory outline so next chapter sees changes
+                        outline["volumes"] = mt.volumes
+
+                    # Volume boundary: settle milestones when last chapter of volume
+                    _cur_vol = mt._get_volume_by_chapter(ch_num)
+                    if _cur_vol and ch_num == _cur_vol.get("end_chapter"):
+                        from src.novel.services.volume_settlement import VolumeSettlement as _VS
+                        _vs = _VS(
+                            db=self.memory.structured_db if getattr(self, "memory", None) and getattr(self.memory, "structured_db", None) else None,
+                            outline=outline if isinstance(outline, dict) else {},
+                        )
+                        _report = _vs.settle_volume_milestones(
+                            volume_number=_cur_vol["volume_number"],
+                            novel_data=_novel_data_mt,
+                        )
+                        if _report:
+                            log.info(
+                                "Volume %d milestone settlement: %s",
+                                _cur_vol["volume_number"],
+                                _report,
+                            )
+                            # Persist settlement report
+                            fm.save_novel(novel_id, _novel_data_mt)
+                            outline["volumes"] = _novel_data_mt.get("outline", {}).get("volumes", outline.get("volumes", []))
+                except Exception as exc:
+                    log.warning("里程碑追踪失败 (非关键): %s", exc)
 
                 chapters_generated.append(ch_num)
 
@@ -2806,6 +2928,25 @@ class NovelPipeline:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _chapter_to_volume(chapter_number: int, outline: dict) -> int | None:
+        """Determine which volume a chapter belongs to.
+
+        Scans ``outline["volumes"]`` for chapter range membership.
+        Returns ``None`` if no volume information is available.
+        """
+        volumes = outline.get("volumes", [])
+        if not volumes:
+            return None
+        for vol in volumes:
+            vol_num = vol.get("volume_number", 0)
+            ch_start = vol.get("start_chapter", 0)
+            ch_end = vol.get("end_chapter", 0)
+            if ch_start <= chapter_number <= ch_end:
+                return vol_num
+        # Fallback: assign based on position
+        return None
+
     def _get_chapter_outline(self, outline: dict, chapter_number: int) -> dict | None:
         """Get chapter outline by chapter number."""
         for ch in outline.get("chapters", []):
@@ -2813,7 +2954,6 @@ class NovelPipeline:
                 return ch
         return None
 
-    @staticmethod
     @staticmethod
     def _is_placeholder_outline(ch_outline: dict) -> bool:
         """Check if a chapter outline is a placeholder (not yet planned)."""

@@ -3,6 +3,9 @@
 Also provides arc phase auto-progression: as chapters advance, story arcs
 automatically transition through setup → escalation → climax → resolution.
 
+Intervention A adds milestone settlement logic: at the end of each volume,
+incomplete milestones are either inherited to the next volume or abandoned.
+
 Example::
 
     vs = VolumeSettlement(db=structured_db, outline=outline_dict)
@@ -13,12 +16,16 @@ Example::
 
     changed = vs.advance_arc_phases(current_chapter=15)
     arc_prompt = vs.get_arc_prompt(current_chapter=15)
+
+    # Milestone settlement at volume boundary
+    report = vs.settle_volume_milestones(volume_number=1, novel_data=novel_dict)
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 log = logging.getLogger("novel.services")
@@ -157,6 +164,24 @@ class VolumeSettlement:
 
         lines.append("\n请在本章中推进以上债务的解决，确保本卷结束时主要矛盾得到阶段性解决。")
 
+        # Milestone settlement warning (Intervention A)
+        milestones = vol.get("narrative_milestones", [])
+        critical_incomplete = [
+            m
+            for m in milestones
+            if m.get("priority") == "critical"
+            and m.get("status") != "completed"
+        ]
+        if critical_incomplete:
+            lines.append("\n【卷级里程碑警告】")
+            for m in critical_incomplete:
+                lines.append(
+                    f"  - 未完成关键里程碑：{m.get('description', '?')}"
+                )
+            lines.append(
+                "请在本卷结束前确保以上里程碑得到解决或明确标记为继承。"
+            )
+
         return {
             "is_settlement_zone": True,
             "volume": vol,
@@ -198,6 +223,97 @@ class VolumeSettlement:
             })
 
         return result
+
+    # ------------------------------------------------------------------
+    # Milestone settlement (Intervention A)
+    # ------------------------------------------------------------------
+
+    def settle_volume_milestones(
+        self,
+        volume_number: int,
+        novel_data: dict,
+    ) -> dict:
+        """Generate a milestone completion report and handle incomplete milestones.
+
+        At the end of each volume, this method:
+        1. Counts completed / overdue / pending milestones.
+        2. Inherits ``critical`` incomplete milestones to the next volume.
+        3. Marks the rest as ``abandoned`` if this is the last volume.
+        4. Stores a ``settlement_report`` dict on the volume.
+
+        Mutations are applied in-place to *novel_data* so the caller can
+        persist them back to ``novel.json``.
+
+        Returns:
+            A :class:`VolumeProgressReport`-shaped dict.
+        """
+        volumes = novel_data.get("outline", {}).get("volumes", [])
+        current_volume = next(
+            (v for v in volumes if v.get("volume_number") == volume_number),
+            None,
+        )
+        if not current_volume:
+            return {}
+
+        milestones = current_volume.get("narrative_milestones", [])
+        completed = [m for m in milestones if m.get("status") == "completed"]
+        overdue = [m for m in milestones if m.get("status") == "overdue"]
+        pending = [m for m in milestones if m.get("status") == "pending"]
+
+        # Treat both pending and overdue as incomplete for settlement
+        critical_incomplete = [
+            m
+            for m in (pending + overdue)
+            if m.get("priority") == "critical"
+        ]
+
+        inherited_count = 0
+        abandoned_count = 0
+
+        # Find the next volume (by volume_number, not list index)
+        next_volume = next(
+            (v for v in volumes if v.get("volume_number") == volume_number + 1),
+            None,
+        )
+
+        for m in critical_incomplete:
+            if next_volume is not None:
+                # Inherit to next volume
+                if "narrative_milestones" not in next_volume:
+                    next_volume["narrative_milestones"] = []
+                inherited_m = dict(m)
+                inherited_m["inherited_from_volume"] = volume_number
+                inherited_m["status"] = "pending"
+                next_volume["narrative_milestones"].insert(0, inherited_m)
+                inherited_count += 1
+                log.info(
+                    "Inherited milestone %s to volume %d",
+                    m.get("milestone_id", "?"),
+                    volume_number + 1,
+                )
+            else:
+                # Last volume -- mark as abandoned
+                m["status"] = "abandoned"
+                abandoned_count += 1
+                log.warning(
+                    "Abandoned milestone %s at last volume",
+                    m.get("milestone_id", "?"),
+                )
+
+        total = len(milestones)
+        report = {
+            "volume_number": volume_number,
+            "milestones_total": total,
+            "milestones_completed": len(completed),
+            "milestones_overdue": len(overdue),
+            "milestones_abandoned": abandoned_count,
+            "milestones_inherited_to_next": inherited_count,
+            "completion_rate": len(completed) / max(total, 1),
+            "settlement_timestamp": datetime.now().isoformat(),
+        }
+
+        current_volume["settlement_report"] = report
+        return report
 
     # ------------------------------------------------------------------
     # Arc phase progression
