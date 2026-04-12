@@ -604,6 +604,122 @@ class NovelDirector:
         return parsed_chapters
 
     # ------------------------------------------------------------------
+    # 4b. 里程碑自动生成（Intervention A 补全）
+    # ------------------------------------------------------------------
+
+    def generate_volume_milestones(
+        self,
+        volume: dict,
+        chapter_outlines: list[dict],
+        genre: str = "",
+    ) -> list[dict]:
+        """为一卷自动生成叙事里程碑。
+
+        Args:
+            volume: Volume dict with volume_number, title, core_conflict, resolution.
+            chapter_outlines: Chapter outlines belonging to this volume.
+            genre: Novel genre for context.
+
+        Returns:
+            list[dict]: NarrativeMilestone-shaped dicts ready for storage.
+        """
+        vol_num = volume.get("volume_number", 1)
+        vol_title = volume.get("title", f"第{vol_num}卷")
+        core_conflict = volume.get("core_conflict", "")
+        resolution = volume.get("resolution", "")
+        start_ch = volume.get("start_chapter") or (
+            min((c.get("chapter_number", 999) for c in chapter_outlines), default=1)
+        )
+        end_ch = volume.get("end_chapter") or (
+            max((c.get("chapter_number", 0) for c in chapter_outlines), default=start_ch)
+        )
+
+        # Summarise chapter goals for context
+        ch_goals = []
+        for ch in sorted(chapter_outlines, key=lambda c: c.get("chapter_number", 0)):
+            cn = ch.get("chapter_number", 0)
+            goal = ch.get("goal", "")
+            if goal and goal != "待规划":
+                ch_goals.append(f"第{cn}章: {goal}")
+        ch_goals_text = "\n".join(ch_goals[:15]) or "（章节目标暂无）"
+
+        prompt = f"""请为小说的第{vol_num}卷「{vol_title}」生成 3-5 个叙事里程碑。
+
+题材：{genre}
+本卷核心矛盾：{core_conflict}
+本卷解决方向：{resolution}
+章节范围：第{start_ch}章 - 第{end_ch}章
+
+【各章目标概览】
+{ch_goals_text}
+
+请严格按以下 JSON 格式返回：
+{{
+  "milestones": [
+    {{
+      "milestone_id": "vol{vol_num}_m1",
+      "description": "里程碑描述（10-50字，必须是可验证的叙事事件）",
+      "target_chapter_range": [{start_ch}, {end_ch}],
+      "verification_type": "auto_keyword",
+      "verification_criteria": ["关键词1", "关键词2"],
+      "priority": "critical"
+    }}
+  ]
+}}
+
+要求：
+1. milestone_id 格式: vol{vol_num}_m1, vol{vol_num}_m2, ...
+2. 第一个里程碑 priority 必须为 critical（本卷核心事件）
+3. target_chapter_range 必须在 [{start_ch}, {end_ch}] 范围内
+4. 里程碑应覆盖本卷开头、中段、结尾，确保主线推进可追踪
+5. verification_type 优先用 auto_keyword（免费），只有无法用关键词验证时才用 llm_review
+6. verification_criteria: auto_keyword 时为关键词列表，llm_review 时为验证问题字符串
+7. 里程碑描述必须是具体的叙事事件，不能是抽象目标
+"""
+
+        try:
+            response = self.llm.chat(
+                messages=[
+                    {"role": "system", "content": "你是一位资深网络小说策划编辑。请严格按照 JSON 格式返回里程碑。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.5,
+                json_mode=True,
+                max_tokens=2048,
+            )
+            data = _extract_json_obj(response.content)
+            if not data:
+                log.warning("里程碑生成 LLM 返回无效 JSON，使用空列表")
+                return []
+
+            raw_milestones = data.get("milestones", [])
+        except Exception as exc:
+            log.warning("里程碑自动生成失败: %s", exc)
+            return []
+
+        # Validate each milestone via the Pydantic model
+        from src.novel.models.narrative_control import NarrativeMilestone
+
+        valid: list[dict] = []
+        for m in raw_milestones:
+            try:
+                # Clamp range to volume boundaries
+                rng = m.get("target_chapter_range", [start_ch, end_ch])
+                if len(rng) >= 2:
+                    rng = [max(rng[0], start_ch), min(rng[1], end_ch)]
+                    m["target_chapter_range"] = rng
+                obj = NarrativeMilestone(**m)
+                valid.append(obj.model_dump())
+            except Exception:
+                log.warning("跳过无效里程碑: %s", m)
+
+        log.info(
+            "卷%d 自动生成 %d 个里程碑 (共 %d 个候选)",
+            vol_num, len(valid), len(raw_milestones),
+        )
+        return valid
+
+    # ------------------------------------------------------------------
     # 5. Story Arc 生成（叙事弧线）
     # ------------------------------------------------------------------
 

@@ -1144,6 +1144,28 @@ class NovelPipeline:
         state["react_mode"] = react_mode
         state["budget_mode"] = budget_mode
 
+        # Initialize chapters_text from existing chapters in state + disk
+        # Must happen BEFORE style bible migration which needs chapter text.
+        if "chapters_text" not in state:
+            state["chapters_text"] = {}
+        _chapters_text_init = state["chapters_text"]
+        # Populate from state["chapters"] metadata dicts (if they carry full_text)
+        for _ch_init in state.get("chapters") or []:
+            _ch_n_init = _ch_init.get("chapter_number")
+            _ch_t_init = _ch_init.get("full_text", "")
+            if _ch_n_init and _ch_t_init and _ch_n_init not in _chapters_text_init:
+                _chapters_text_init[_ch_n_init] = _ch_t_init
+        # Populate from disk for chapters not yet in memory
+        try:
+            _existing_on_disk = fm.list_chapters(novel_id)
+            for _ch_disk_n in _existing_on_disk:
+                if _ch_disk_n not in _chapters_text_init:
+                    _txt = fm.load_chapter_text(novel_id, _ch_disk_n)
+                    if _txt:
+                        _chapters_text_init[_ch_disk_n] = _txt
+        except Exception:
+            pass
+
         # --- Style Bible migration (Intervention D) ---
         # If no style_bible exists yet (legacy project), auto-generate one
         # from the first 5 existing chapters.
@@ -1191,15 +1213,6 @@ class NovelPipeline:
                     log.info("无现有章节，跳过风格圣经迁移（将在新项目创建时生成）")
             except Exception as exc:
                 log.warning("风格圣经迁移生成失败（非阻塞）: %s", exc)
-
-        # Initialize chapters_text from existing chapters in state
-        if "chapters_text" not in state:
-            state["chapters_text"] = {}
-            for ch in state.get("chapters") or []:
-                ch_n = ch.get("chapter_number")
-                ch_t = ch.get("full_text", "")
-                if ch_n and ch_t:
-                    state["chapters_text"][ch_n] = ch_t
 
         # --- Initialize NovelMemory for vector indexing + character snapshots ---
         try:
@@ -1321,6 +1334,15 @@ class NovelPipeline:
                 })
                 continue
 
+            # Detect stale outline and regenerate
+            if not self._is_placeholder_outline(ch_outline) and self._is_stale_outline(ch_outline, ch_num, state):
+                log.info("第%d章大纲已陈旧（引用过时上下文），自动重新规划...", ch_num)
+                ch_outline = self._fill_placeholder_outline(state, ch_outline, ch_num)
+                for i, ch in enumerate(outline.get("chapters", [])):
+                    if ch.get("chapter_number") == ch_num:
+                        outline["chapters"][i] = ch_outline
+                        break
+
             state["current_chapter"] = ch_num
             state["current_chapter_outline"] = ch_outline
             state["current_chapter_text"] = None
@@ -1425,6 +1447,36 @@ class NovelPipeline:
                 except Exception:
                     pass
 
+                # --- Auto-generate milestones if current volume has none ---
+                if _novel_data_for_milestones and _current_volume:
+                    try:
+                        _outline_for_ms = _novel_data_for_milestones.get("outline", {})
+                        for _vol_ms in _outline_for_ms.get("volumes", []):
+                            if _vol_ms.get("volume_number") == _current_volume:
+                                if not _vol_ms.get("narrative_milestones"):
+                                    from src.novel.agents.novel_director import NovelDirector as _ND
+                                    _llm_ms_cfg = get_stage_llm_config(state, "outline_generation")
+                                    from src.llm.llm_client import create_llm_client
+                                    _llm_ms = create_llm_client(_llm_ms_cfg)
+                                    _nd_ms = _ND(_llm_ms)
+                                    _vol_chapters = [
+                                        c for c in _outline_for_ms.get("chapters", [])
+                                        if c.get("chapter_number", 0) >= _vol_ms.get("start_chapter", 0)
+                                        and c.get("chapter_number", 0) <= _vol_ms.get("end_chapter", 999)
+                                    ]
+                                    _new_ms = _nd_ms.generate_volume_milestones(
+                                        volume=_vol_ms,
+                                        chapter_outlines=_vol_chapters,
+                                        genre=state.get("genre", ""),
+                                    )
+                                    if _new_ms:
+                                        _vol_ms["narrative_milestones"] = _new_ms
+                                        fm.save_novel(novel_id, _novel_data_for_milestones)
+                                        log.info("卷%d 首章自动生成 %d 个里程碑", _current_volume, len(_new_ms))
+                                break
+                    except Exception as exc:
+                        log.warning("首章里程碑自动生成失败 (非关键): %s", exc)
+
                 continuity_brief = continuity_svc.generate_brief(
                     chapter_number=ch_num,
                     chapters=_chapters_for_brief,
@@ -1494,6 +1546,29 @@ class NovelPipeline:
                     )
             except Exception as exc:
                 log.warning("角色弧线追踪失败: %s", exc)
+
+            # --- Milestone enforcement: inject hard constraint before graph runs ---
+            _vp = state.get("volume_progress", {})
+            if _vp.get("progress_health") == "critical":
+                _overdue_descs = _vp.get("milestones_overdue", [])
+                if _overdue_descs:
+                    _enforce_text = (
+                        "\n\n## 【强制里程碑约束 — 系统级，不可忽略】\n"
+                        f"以下里程碑已逾期，本章**必须**安排至少一个场景直接推进：\n"
+                    )
+                    for _od in _overdue_descs[:3]:
+                        _enforce_text += f"  - {_od}\n"
+                    _enforce_text += (
+                        "PlotPlanner 必须将第一个场景设定为推进上述里程碑。\n"
+                        "Writer 必须在该场景中产出实质性进展，不能仅提及。\n"
+                    )
+                    # Inject into both debt_summary (PlotPlanner reads) and continuity_brief (Writer reads)
+                    state["debt_summary"] = (state.get("debt_summary", "") or "") + _enforce_text
+                    state["continuity_brief"] = (state.get("continuity_brief", "") or "") + _enforce_text
+                    log.warning(
+                        "里程碑强制约束注入: %d 个逾期里程碑写入 PlotPlanner+Writer 约束",
+                        len(_overdue_descs[:3]),
+                    )
 
             # Run chapter graph
             try:
@@ -2975,6 +3050,64 @@ class NovelPipeline:
             return True
         return False
 
+    @staticmethod
+    def _is_stale_outline(ch_outline: dict, ch_num: int, state: dict) -> bool:
+        """Check if a chapter outline is stale (references outdated context).
+
+        Detects:
+        1. Outline explicitly references chapter numbers far behind current progress
+        2. Outline's storyline_progress or goal references events from much earlier
+        """
+        import re
+
+        # Combine text fields for analysis
+        text_fields = " ".join(filter(None, [
+            ch_outline.get("goal", ""),
+            ch_outline.get("storyline_progress", ""),
+            ch_outline.get("chapter_summary", ""),
+            str(ch_outline.get("chapter_brief", {}).get("main_conflict", "")),
+        ]))
+
+        if not text_fields:
+            return False
+
+        # Detect references to chapter numbers far behind
+        refs = re.findall(r"(?:承接|接续|延续|紧接|上接|第)(\d+)章", text_fields)
+        if refs:
+            max_ref = max(int(r) for r in refs)
+            # If the outline references a chapter more than 5 chapters behind, it's stale
+            if max_ref > 0 and ch_num - max_ref > 5:
+                return True
+
+        # Detect if actual_summary exists on prior chapters that contradict outline assumptions
+        # (lightweight: just check if outline was never updated after actual writing)
+
+        # If this chapter's outline references the previous chapter but that chapter
+        # has actual_summary that diverges significantly, mark as stale
+        outline_data = state.get("outline", {})
+        prev_ch_outline = None
+        for c in outline_data.get("chapters", []):
+            if c.get("chapter_number") == ch_num - 1:
+                prev_ch_outline = c
+                break
+
+        if prev_ch_outline and prev_ch_outline.get("actual_summary"):
+            # Previous chapter has been written - check if our outline assumes
+            # something about the previous chapter that's contradicted
+            prev_goal = prev_ch_outline.get("goal", "")
+            prev_actual = prev_ch_outline.get("actual_summary", "")
+            # If prev chapter had a goal that's completely different from actual,
+            # and our outline references it, it's likely stale
+            if prev_goal and prev_actual and ch_outline.get("goal", ""):
+                # Simple heuristic: if outline goal starts with "承接" and prev
+                # chapter's actual outcome differs from its planned goal
+                if any(kw in text_fields for kw in ["承接", "延续", "紧接"]):
+                    # Check if the referenced content matches actual or planned
+                    if prev_goal not in text_fields and prev_actual not in text_fields:
+                        return True
+
+        return False
+
     def _fill_placeholder_outline(self, state: dict, ch_outline: dict, ch_num: int) -> dict:
         """Use LLM to fill in a placeholder chapter outline with proper details.
 
@@ -3174,7 +3307,7 @@ class NovelPipeline:
                 max_tokens=1024,
             )
 
-            from src.novel.agents.utils import extract_json_obj
+            from src.agents.utils import extract_json_obj
             result = extract_json_obj(response.content)
             if result:
                 title = result.get("title") or ch_outline.get("title") or f"第{ch_num}章"
@@ -3341,6 +3474,44 @@ class NovelPipeline:
                 volume_number=next_volume,
                 previous_summary=previous_summary,
             )
+
+            # --- Auto-generate milestones for the new volume ---
+            try:
+                # Find the volume dict for next_volume
+                _vol_for_ms = None
+                for _v in outline.get("volumes", []):
+                    if _v.get("volume_number") == next_volume:
+                        _vol_for_ms = _v
+                        break
+                if _vol_for_ms is None:
+                    # Build minimal volume dict from new_chapters
+                    _nc_nums = [c.get("chapter_number", 0) for c in new_chapters]
+                    _vol_for_ms = {
+                        "volume_number": next_volume,
+                        "title": f"第{next_volume}卷",
+                        "start_chapter": min(_nc_nums) if _nc_nums else outline_max + 1,
+                        "end_chapter": max(_nc_nums) if _nc_nums else outline_max + chapters_per_volume,
+                    }
+                if not _vol_for_ms.get("narrative_milestones"):
+                    _ms = director.generate_volume_milestones(
+                        volume=_vol_for_ms,
+                        chapter_outlines=new_chapters,
+                        genre=novel_data.get("genre", ""),
+                    )
+                    if _ms:
+                        _vol_for_ms["narrative_milestones"] = _ms
+                        # Update in outline volumes list (or append if not found)
+                        _ms_found = False
+                        for _vi, _vv in enumerate(outline.get("volumes", [])):
+                            if _vv.get("volume_number") == next_volume:
+                                outline["volumes"][_vi] = _vol_for_ms
+                                _ms_found = True
+                                break
+                        if not _ms_found:
+                            outline.setdefault("volumes", []).append(_vol_for_ms)
+                        log.info("卷%d 自动生成 %d 个里程碑", next_volume, len(_ms))
+            except Exception as exc:
+                log.warning("卷%d 里程碑自动生成失败 (非关键): %s", next_volume, exc)
 
             # Append to outline chapters
             existing_nums = {ch.get("chapter_number", 0) for ch in chapters}
