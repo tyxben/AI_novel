@@ -119,8 +119,7 @@ class ForeshadowingService:
         for plant in planned_plants:
             if not plant or not isinstance(plant, str):
                 continue
-            keywords = self._extract_keywords(plant)
-            if any(kw in chapter_text for kw in keywords):
+            if self._fuzzy_verify(plant, chapter_text):
                 result["plants_confirmed"].append(plant)
             else:
                 result["plants_missing"].append(plant)
@@ -129,8 +128,7 @@ class ForeshadowingService:
         for collect in planned_collects:
             if not collect or not isinstance(collect, str):
                 continue
-            keywords = self._extract_keywords(collect)
-            if any(kw in chapter_text for kw in keywords):
+            if self._fuzzy_verify(collect, chapter_text):
                 result["collects_confirmed"].append(collect)
             else:
                 result["collects_missing"].append(collect)
@@ -162,6 +160,20 @@ class ForeshadowingService:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _fuzzy_verify(self, desc: str, chapter_text: str, min_hits: int = 2) -> bool:
+        """宽松验证：描述中的关键词在文本中命中 >= min_hits 个即视为确认。
+
+        比严格的 all-keywords 匹配更合理，因为 Writer 经常换一种
+        表述来执行同一个伏笔。
+        """
+        keywords = self._extract_keywords(desc, top_n=0)  # 0 = 不限数量
+        if not keywords:
+            return True  # 没关键词就算通过
+        hits = sum(1 for kw in keywords if kw in chapter_text)
+        # 关键词少于 min_hits 个时，命中 1 个就算
+        threshold = min(min_hits, max(1, len(keywords) // 3))
+        return hits >= threshold
+
     def _find_matching_foreshadowing(self, collect_desc: str) -> dict | None:
         """模糊匹配待回收伏笔（基于内容相似度）。
 
@@ -180,7 +192,7 @@ class ForeshadowingService:
                 best_score = score
                 best_match = foreshadow
 
-        if best_score >= 0.5:
+        if best_score >= 0.3:
             return best_match
         return None
 

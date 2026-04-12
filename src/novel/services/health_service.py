@@ -382,11 +382,12 @@ class HealthService:
 
         缺失维度（依赖不存在导致值为默认 0）使用中性值 0.5。
         """
-        # Foreshadowing: use neutral if no foreshadowing data available
+        # Foreshadowing: use neutral if no data; floor at 0.2 so having
+        # data (even imperfect) never scores worse than having none
         if self.graph is None or metrics.foreshadowing_total == 0:
             fs_score = self._NEUTRAL
         else:
-            fs_score = metrics.foreshadowing_collection_rate
+            fs_score = max(0.2, metrics.foreshadowing_collection_rate)
 
         # Milestone
         if metrics.milestone_total == 0:
@@ -421,8 +422,8 @@ class HealthService:
             + dt_score * self._WEIGHT_DEBT
         ) * 100
 
-        # Penalty: each forgotten foreshadowing -2 points (max -20)
-        penalty = min(20, metrics.foreshadowing_forgotten * 2)
+        # Penalty: each forgotten foreshadowing -0.5 points (max -10)
+        penalty = min(10, metrics.foreshadowing_forgotten * 0.5)
         score = max(0.0, score - penalty)
 
         return round(score, 1)
