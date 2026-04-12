@@ -1807,6 +1807,28 @@ class NovelPipeline:
                     except Exception as exc:
                         log.debug("章节向量索引失败: %s", exc)
 
+                # --- Entity extraction (P0: Entity Registry) ---
+                try:
+                    from src.novel.services.entity_service import EntityService
+                    _entity_db = self.memory.structured_db if getattr(self, "memory", None) and getattr(self.memory, "structured_db", None) else None
+                    if _entity_db:
+                        entity_svc = EntityService(_entity_db)
+                        _entity_result = entity_svc.extract_and_register(
+                            chapter_text=chapter_text,
+                            chapter_number=ch_num,
+                            use_llm=False,
+                        )
+                        if _entity_result.get("new_count", 0) > 0:
+                            log.info("第%d章实体提取: %d 新实体, %d 更新", ch_num, _entity_result["new_count"], _entity_result["updated_count"])
+
+                        # 每5章做一次别名清理
+                        if ch_num % 5 == 0:
+                            _merged = entity_svc.merge_aliases(dry_run=False)
+                            if _merged > 0:
+                                log.info("实体别名合并: %d 组", _merged)
+                except Exception as exc:
+                    log.debug("实体提取失败（非阻塞）: %s", exc)
+
                 # --- Milestone Tracking (Intervention A): check completion + overdue ---
                 try:
                     from src.novel.services.milestone_tracker import MilestoneTracker

@@ -122,6 +122,7 @@ class StructuredDB:
         self._ensure_chapter_debts_table()
         self._ensure_story_units_table()
         self._ensure_conversations_table()
+        self._ensure_entities_table()
 
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Cursor, None, None]:
@@ -869,3 +870,221 @@ class StructuredDB:
                 "UPDATE conversations SET title = ? WHERE session_id = ?",
                 (title, session_id),
             )
+
+    # ========== entities / entity_mentions tables ==========
+
+    def _ensure_entities_table(self) -> None:
+        """创建实体注册表 + 实体提及记录表（知识图谱 P0）"""
+        with self.transaction() as cur:
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS entities (
+                    entity_id TEXT PRIMARY KEY,
+                    canonical_name TEXT NOT NULL,
+                    aliases TEXT NOT NULL DEFAULT '[]',
+                    entity_type TEXT NOT NULL,
+                    first_mention_chapter INTEGER NOT NULL,
+                    definition TEXT DEFAULT '',
+                    metadata TEXT DEFAULT '{}',
+                    mention_count INTEGER DEFAULT 0,
+                    last_mention_chapter INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS entity_mentions (
+                    mention_id TEXT PRIMARY KEY,
+                    entity_id TEXT NOT NULL,
+                    chapter INTEGER NOT NULL,
+                    mentioned_name TEXT NOT NULL,
+                    context TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (entity_id) REFERENCES entities(entity_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_entities_type
+                    ON entities(entity_type);
+                CREATE INDEX IF NOT EXISTS idx_entities_canonical
+                    ON entities(canonical_name);
+                CREATE INDEX IF NOT EXISTS idx_entity_mentions_chapter
+                    ON entity_mentions(chapter);
+                CREATE INDEX IF NOT EXISTS idx_entity_mentions_entity
+                    ON entity_mentions(entity_id);
+            """)
+
+    def insert_entity(self, entity_data: dict) -> None:
+        """插入实体
+
+        Args:
+            entity_data: Entity.model_dump() 产出的 dict
+        """
+        with self.transaction() as cur:
+            cur.execute(
+                """INSERT INTO entities
+                   (entity_id, canonical_name, aliases, entity_type,
+                    first_mention_chapter, definition, metadata,
+                    mention_count, last_mention_chapter, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(entity_id) DO NOTHING
+                """,
+                (
+                    entity_data["entity_id"],
+                    entity_data["canonical_name"],
+                    json.dumps(entity_data.get("aliases", []), ensure_ascii=False),
+                    entity_data["entity_type"],
+                    entity_data["first_mention_chapter"],
+                    entity_data.get("definition", ""),
+                    json.dumps(entity_data.get("metadata", {}), ensure_ascii=False),
+                    entity_data.get("mention_count", 0),
+                    entity_data.get("last_mention_chapter", 0),
+                    entity_data.get("created_at", datetime.now(timezone.utc).isoformat()),
+                ),
+            )
+
+    def get_entity_by_name(self, name: str) -> dict[str, Any] | None:
+        """根据规范名称查询实体（返回第一个匹配）"""
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM entities WHERE canonical_name = ?",
+                (name,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["aliases"] = json.loads(result.get("aliases", "[]"))
+            result["metadata"] = json.loads(result.get("metadata", "{}"))
+            return result
+
+    def get_entity_by_name_and_type(
+        self, name: str, entity_type: str
+    ) -> dict[str, Any] | None:
+        """根据名称 + 类型查询实体"""
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT * FROM entities WHERE canonical_name = ? AND entity_type = ?",
+                (name, entity_type),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["aliases"] = json.loads(result.get("aliases", "[]"))
+            result["metadata"] = json.loads(result.get("metadata", "{}"))
+            return result
+
+    def get_all_entities(self) -> list[dict[str, Any]]:
+        """获取所有实体"""
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            cur.execute("SELECT * FROM entities ORDER BY first_mention_chapter ASC")
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                row["aliases"] = json.loads(row.get("aliases", "[]"))
+                row["metadata"] = json.loads(row.get("metadata", "{}"))
+            return rows
+
+    def query_entities_by_chapter_range(
+        self, from_chapter: int, to_chapter: int
+    ) -> list[dict[str, Any]]:
+        """查询章节范围内出现的实体（首次出现或最后提及在范围内）"""
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            cur.execute(
+                """SELECT DISTINCT * FROM entities
+                   WHERE (first_mention_chapter >= ? AND first_mention_chapter <= ?)
+                      OR (last_mention_chapter >= ? AND last_mention_chapter <= ?)
+                   ORDER BY first_mention_chapter ASC
+                """,
+                (from_chapter, to_chapter, from_chapter, to_chapter),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            for row in rows:
+                row["aliases"] = json.loads(row.get("aliases", "[]"))
+                row["metadata"] = json.loads(row.get("metadata", "{}"))
+            return rows
+
+    def update_entity_mention(self, entity_id: str, chapter: int) -> None:
+        """更新实体提及次数和最后提及章节"""
+        with self.transaction() as cur:
+            cur.execute(
+                """UPDATE entities
+                   SET mention_count = mention_count + 1,
+                       last_mention_chapter = MAX(last_mention_chapter, ?)
+                   WHERE entity_id = ?
+                """,
+                (chapter, entity_id),
+            )
+
+    def merge_entity_as_alias(
+        self, primary_id: str, secondary_id: str
+    ) -> None:
+        """将 secondary 合并为 primary 的别名
+
+        - secondary 的 canonical_name 追加到 primary 的 aliases
+        - secondary 的 mention_count 累加到 primary
+        - 删除 secondary 记录
+        """
+        with self.transaction() as cur:
+            # 读取 secondary
+            cur.execute(
+                "SELECT canonical_name, mention_count FROM entities WHERE entity_id = ?",
+                (secondary_id,),
+            )
+            sec_row = cur.fetchone()
+            if not sec_row:
+                return
+            secondary_name = sec_row["canonical_name"]
+            secondary_mentions = sec_row["mention_count"] or 0
+
+            # 读取 primary 的 aliases
+            cur.execute(
+                "SELECT aliases, mention_count FROM entities WHERE entity_id = ?",
+                (primary_id,),
+            )
+            pri_row = cur.fetchone()
+            if not pri_row:
+                return
+            aliases = json.loads(pri_row["aliases"])
+            if secondary_name not in aliases:
+                aliases.append(secondary_name)
+
+            # 更新 primary
+            cur.execute(
+                """UPDATE entities
+                   SET aliases = ?,
+                       mention_count = mention_count + ?
+                   WHERE entity_id = ?
+                """,
+                (
+                    json.dumps(aliases, ensure_ascii=False),
+                    secondary_mentions,
+                    primary_id,
+                ),
+            )
+
+            # 将 secondary 的提及记录迁移到 primary
+            cur.execute(
+                "UPDATE entity_mentions SET entity_id = ? WHERE entity_id = ?",
+                (primary_id, secondary_id),
+            )
+
+            # 删除 secondary
+            cur.execute(
+                "DELETE FROM entities WHERE entity_id = ?",
+                (secondary_id,),
+            )
+
+    def get_entity_count_by_type(self) -> dict[str, int]:
+        """按类型统计实体数量"""
+        with self._lock:
+            assert self._conn is not None, "Database connection is closed"
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT entity_type, COUNT(*) as cnt FROM entities GROUP BY entity_type"
+            )
+            return {row["entity_type"]: row["cnt"] for row in cur.fetchall()}

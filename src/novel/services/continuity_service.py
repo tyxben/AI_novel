@@ -143,6 +143,9 @@ class ContinuityService:
         if novel_data:
             self._extract_volume_progress(brief, chapter_number, novel_data)
 
+        # Active entities (P0: Entity Registry)
+        self._extract_active_entities(brief, chapter_number)
+
         return brief
 
     def format_for_prompt(self, brief: dict[str, Any]) -> str:
@@ -295,6 +298,14 @@ class ContinuityService:
             if health_text:
                 sections.append(f"- 进度状态：{health_text}")
 
+            sections.append("")
+
+        # Active entities (P0: Entity Registry)
+        active_entities = brief.get("active_entities", {})
+        if active_entities:
+            sections.append("### 活跃实体（近期出现）")
+            for etype, names in active_entities.items():
+                sections.append(f"- {etype}: {', '.join(names[:10])}")
             sections.append("")
 
         # If only the header was added, return empty
@@ -665,6 +676,42 @@ class ContinuityService:
                 brief["volume_progress"] = progress
         except Exception:
             log.warning("卷进度提取失败", exc_info=True)
+
+    def _extract_active_entities(
+        self,
+        brief: dict[str, Any],
+        chapter_number: int,
+    ) -> None:
+        """Inject recently-active entities grouped by type.
+
+        Queries entities mentioned in the last 3 chapters from StructuredDB
+        and stores them under ``brief["active_entities"]`` keyed by entity type.
+        Degrades gracefully when the DB has no entity tables or data.
+        """
+        if not self.db:
+            return
+
+        try:
+            entities = self.db.query_entities_by_chapter_range(
+                from_chapter=max(1, chapter_number - 3),
+                to_chapter=chapter_number - 1,
+            )
+
+            if not entities:
+                return
+
+            # Group by entity type
+            by_type: dict[str, list[str]] = {}
+            for ent in entities:
+                t = ent.get("entity_type", "other")
+                name = ent.get("canonical_name", "")
+                if name:
+                    by_type.setdefault(t, []).append(name)
+
+            if by_type:
+                brief["active_entities"] = by_type
+        except Exception:
+            log.debug("活跃实体提取失败", exc_info=True)
 
     def _extract_recommended_payoffs(
         self,

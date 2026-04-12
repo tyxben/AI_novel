@@ -708,6 +708,37 @@ def _vector_check(
                                 "reason": f"当前章与第{sim_ch}章存在高度相似段落",
                             })
 
+        # --- Entity name consistency check (P0: Entity Registry) ---
+        try:
+            _ent_db = getattr(memory, "structured_db", None)
+            if _ent_db:
+                from src.novel.services.entity_service import EntityService
+                _ent_svc = EntityService(_ent_db)
+                # Extract entities from current chapter text
+                from src.novel.services.entity_extractor import RuleBasedExtractor
+                _rule_ext = RuleBasedExtractor()
+                _cur_entities = _rule_ext.extract_entities(chapter_text, chapter_number)
+                # Detect name conflicts against registered entities
+                _conflicts = _ent_svc.detect_name_conflicts(_cur_entities, threshold=0.7)
+                if _conflicts:
+                    for _c in _conflicts[:5]:
+                        contradictions.append({
+                            "layer": "entity_registry",
+                            "type": "entity_name_inconsistency",
+                            "fact": {
+                                "chapter": chapter_number,
+                                "content": _c.get("current_name", ""),
+                            },
+                            "conflicting_fact": {
+                                "chapter": _c.get("first_mention_chapter", 0),
+                                "content": _c.get("existing_name", ""),
+                            },
+                            "confidence": 0.5,
+                            "reason": f"实体名称疑似不一致: '{_c.get('current_name', '')}' vs 已有 '{_c.get('existing_name', '')}' (类型: {_c.get('type', '')})",
+                        })
+        except Exception:
+            pass
+
         return {
             "passed": len(contradictions) == 0,
             "contradictions": contradictions,

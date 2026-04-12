@@ -42,6 +42,7 @@ from src.novel.models.refinement import (
 )
 from src.novel.models.story_unit import ArcBrief, StoryUnit
 from src.novel.models.debt import ChapterDebt, DebtContext, DebtExtractionResult
+from src.novel.models.entity import Entity, EntityMention, EntityType
 from src.novel.models.validation import BriefFulfillmentReport, BriefItemResult
 from src.novel.models.world import PowerLevel, PowerSystem, WorldSetting
 
@@ -104,6 +105,10 @@ __all__ = [
     "ChapterDebt",
     "DebtExtractionResult",
     "DebtContext",
+    # entity.py
+    "Entity",
+    "EntityMention",
+    "EntityType",
     # validation.py
     "BriefItemResult",
     "BriefFulfillmentReport",
