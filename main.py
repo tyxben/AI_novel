@@ -340,6 +340,27 @@ def novel_status(project_path: str):
         raise click.Abort()
 
 
+@novel.command("health")
+@click.argument("project_path", type=click.Path(exists=True))
+def novel_health(project_path: str):
+    """显示小说项目健康度报告"""
+    try:
+        from src.novel.pipeline import NovelPipeline
+
+        pipe = NovelPipeline(workspace=str(Path(project_path).parent.parent))
+        result = pipe.get_health_report(project_path)
+
+        report = result.get("report", "")
+        if report:
+            # Use plain print — report is pre-formatted Unicode text
+            print(report)
+        else:
+            console.print("[yellow]健康度报告不可用[/]")
+    except Exception as e:
+        log.error("健康度报告失败: %s", e)
+        raise click.Abort()
+
+
 # ---------------------------------------------------------------------------
 # ppt 命令组 - AI PPT 生成
 # ---------------------------------------------------------------------------

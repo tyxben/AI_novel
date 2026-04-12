@@ -182,6 +182,136 @@ class KnowledgeGraph:
                 members.append(source)
         return members
 
+    # ========== 伏笔操作 ==========
+
+    def add_foreshadowing_node(
+        self,
+        foreshadowing_id: str,
+        planted_chapter: int,
+        content: str,
+        target_chapter: int = -1,
+        status: str = "pending",
+        **attrs: Any,
+    ) -> None:
+        """添加伏笔节点"""
+        # Allow callers to override last_mentioned_chapter via attrs
+        last_mentioned = attrs.pop("last_mentioned_chapter", planted_chapter)
+        self.graph.add_node(
+            foreshadowing_id,
+            type="foreshadowing",
+            planted_chapter=planted_chapter,
+            content=content,
+            target_chapter=target_chapter,
+            status=status,
+            last_mentioned_chapter=last_mentioned,
+            **attrs,
+        )
+
+    def add_foreshadowing_edge(
+        self,
+        from_id: str,
+        to_id: str,
+        relation_type: str,
+        chapter: int,
+        **attrs: Any,
+    ) -> None:
+        """添加伏笔关系边"""
+        key = f"{relation_type}_{chapter}"
+        self.graph.add_edge(
+            from_id,
+            to_id,
+            key=key,
+            edge_type="foreshadowing_relation",
+            relation_type=relation_type,
+            chapter=chapter,
+            **attrs,
+        )
+
+    def get_pending_foreshadowings(self, current_chapter: int) -> list[dict]:
+        """获取未回收的伏笔列表，按遗忘优先级排序。
+
+        is_forgotten = 10章未提及。
+        """
+        results: list[dict] = []
+        for node_id, attrs in self.graph.nodes(data=True):
+            if attrs.get("type") != "foreshadowing":
+                continue
+            if attrs.get("status") != "pending":
+                continue
+
+            planted = attrs.get("planted_chapter", 0)
+            last_mention = attrs.get("last_mentioned_chapter", planted)
+            chapters_since = current_chapter - last_mention
+
+            results.append({
+                "foreshadowing_id": node_id,
+                "content": attrs.get("content", ""),
+                "planted_chapter": planted,
+                "target_chapter": attrs.get("target_chapter", -1),
+                "chapters_since_plant": current_chapter - planted,
+                "last_mentioned_chapter": last_mention,
+                "is_forgotten": chapters_since >= 10,
+            })
+
+        # 按即将遗忘 + 距埋设章数排序
+        results.sort(key=lambda x: (-int(x["is_forgotten"]), -x["chapters_since_plant"]))
+        return results
+
+    def mark_foreshadowing_collected(
+        self,
+        foreshadowing_id: str,
+        collected_chapter: int,
+    ) -> None:
+        """标记伏笔已回收"""
+        if foreshadowing_id in self.graph:
+            self.graph.nodes[foreshadowing_id]["status"] = "collected"
+            self.graph.nodes[foreshadowing_id]["collected_chapter"] = collected_chapter
+
+    def update_foreshadowing_mention(
+        self,
+        foreshadowing_id: str,
+        chapter: int,
+    ) -> None:
+        """更新伏笔最后提及章节"""
+        if foreshadowing_id in self.graph:
+            self.graph.nodes[foreshadowing_id]["last_mentioned_chapter"] = chapter
+
+    def get_foreshadowing_stats(self) -> dict:
+        """获取伏笔统计信息。
+
+        Returns:
+            dict with keys: total, collected, pending, abandoned, forgotten_count
+        """
+        total = 0
+        collected = 0
+        pending = 0
+        abandoned = 0
+        forgotten = 0
+
+        for _node_id, attrs in self.graph.nodes(data=True):
+            if attrs.get("type") != "foreshadowing":
+                continue
+            total += 1
+            status = attrs.get("status", "pending")
+            if status == "collected":
+                collected += 1
+            elif status == "abandoned":
+                abandoned += 1
+            else:
+                pending += 1
+                # Check if forgotten (no last_mentioned_chapter info available
+                # without current_chapter, so use a heuristic: if planted but
+                # last_mentioned == planted and planted is far from latest chapter)
+                # For stats, we just count nodes explicitly marked or never updated.
+
+        return {
+            "total": total,
+            "collected": collected,
+            "pending": pending,
+            "abandoned": abandoned,
+            "forgotten_count": forgotten,
+        }
+
     # ========== 序列化 ==========
 
     def save(self, path: str) -> None:

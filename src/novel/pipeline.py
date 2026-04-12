@@ -949,6 +949,7 @@ class NovelPipeline:
                 continuity_svc = _ContinuityService(
                     db=getattr(_mem, "structured_db", None) if _mem else None,
                     obligation_tracker=obligation_tracker,
+                    knowledge_graph=getattr(_mem, "knowledge_graph", None) if _mem else None,
                 )
                 continuity_brief = continuity_svc.generate_brief(
                     chapter_number=ch_num,
@@ -1424,6 +1425,7 @@ class NovelPipeline:
                 continuity_svc = _ContinuityService(
                     db=getattr(_mem, "structured_db", None) if _mem else None,
                     obligation_tracker=obligation_tracker,
+                    knowledge_graph=getattr(_mem, "knowledge_graph", None) if _mem else None,
                 )
                 # Ensure chapters have full_text for continuity extraction
                 _chapters_for_brief = []
@@ -1829,6 +1831,32 @@ class NovelPipeline:
                 except Exception as exc:
                     log.debug("实体提取失败（非阻塞）: %s", exc)
 
+                # --- Foreshadowing graph update (P1) ---
+                try:
+                    if getattr(self, "memory", None) and hasattr(self.memory, "knowledge_graph"):
+                        from src.novel.services.foreshadowing_service import ForeshadowingService
+                        _fs = ForeshadowingService(self.memory.knowledge_graph)
+                        _ch_brief = ch_outline.get("chapter_brief", {}) if ch_outline else {}
+                        _fs.register_planned_foreshadowings(_ch_brief, ch_num)
+
+                        _plants = _ch_brief.get("foreshadowing_plant", [])
+                        _collects = _ch_brief.get("foreshadowing_collect", [])
+                        if _plants or _collects:
+                            _verify = _fs.verify_foreshadowings_in_text(
+                                chapter_text=chapter_text,
+                                chapter_number=ch_num,
+                                planned_plants=_plants if isinstance(_plants, list) else [_plants] if _plants else [],
+                                planned_collects=_collects if isinstance(_collects, list) else [_collects] if _collects else [],
+                            )
+                            if _verify.get("plants_missing"):
+                                log.warning("第%d章伏笔埋设缺失: %s", ch_num, _verify["plants_missing"])
+                            if _verify.get("collects_missing"):
+                                log.warning("第%d章伏笔回收缺失: %s", ch_num, _verify["collects_missing"])
+
+                        self.memory.knowledge_graph.save(str(self._novel_dir(novel_id) / "memory" / "knowledge_graph.json"))
+                except Exception as exc:
+                    log.debug("伏笔图谱更新失败（非阻塞）: %s", exc)
+
                 # --- Milestone Tracking (Intervention A): check completion + overdue ---
                 try:
                     from src.novel.services.milestone_tracker import MilestoneTracker
@@ -2010,6 +2038,81 @@ class NovelPipeline:
             status["decisions_count"] = len(ckpt.get("decisions", []))
 
         return status
+
+    # ------------------------------------------------------------------
+    # get_health_report
+    # ------------------------------------------------------------------
+
+    def get_health_report(self, project_path: str) -> dict:
+        """获取项目健康度报告。
+
+        Returns:
+            dict with ``metrics`` (HealthMetrics.model_dump()) and
+            ``report`` (formatted text string).
+        """
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+
+        # Load checkpoint for novel data
+        novel_data = self._load_checkpoint(novel_id) or {}
+        status_info = fm.load_status(novel_id) or {}
+        current_chapter = status_info.get(
+            "current_chapter", novel_data.get("current_chapter", 0)
+        )
+
+        # Initialise optional dependencies — each may fail independently
+        memory = None
+        try:
+            from src.novel.storage.novel_memory import NovelMemory
+
+            memory = NovelMemory(novel_id, self.workspace)
+        except Exception:
+            pass
+
+        obligation_tracker = None
+        try:
+            from src.novel.services.obligation_tracker import ObligationTracker
+
+            db = getattr(memory, "structured_db", None) if memory else None
+            if db is not None:
+                obligation_tracker = ObligationTracker(db)
+        except Exception:
+            pass
+
+        milestone_tracker = None
+        try:
+            from src.novel.services.milestone_tracker import MilestoneTracker
+
+            milestone_tracker = MilestoneTracker(novel_data)
+        except Exception:
+            pass
+
+        from src.novel.services.health_service import HealthService
+
+        svc = HealthService(
+            structured_db=(
+                getattr(memory, "structured_db", None) if memory else None
+            ),
+            knowledge_graph=(
+                getattr(memory, "knowledge_graph", None) if memory else None
+            ),
+            obligation_tracker=obligation_tracker,
+            milestone_tracker=milestone_tracker,
+        )
+        metrics = svc.compute_health_metrics(current_chapter, novel_data)
+        report_text = svc.format_report(metrics)
+
+        # Close memory resources if we opened them
+        if memory is not None:
+            try:
+                memory.close()
+            except Exception:
+                pass
+
+        return {
+            "metrics": metrics.model_dump(),
+            "report": report_text,
+        }
 
     # ------------------------------------------------------------------
     # polish_chapters

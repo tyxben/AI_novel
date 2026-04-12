@@ -56,3 +56,32 @@ class DetailEntry(BaseModel):
         "available", description="细节状态"
     )
     promoted_foreshadowing_id: str | None = None
+
+
+class ForeshadowingEdge(BaseModel):
+    """伏笔关系边"""
+
+    edge_id: str = Field(default_factory=lambda: str(uuid4()))
+    from_foreshadowing_id: str = Field(..., description="源伏笔ID")
+    to_foreshadowing_id: str = Field(..., description="目标伏笔ID")
+    relation_type: Literal["trigger", "collect", "parallel", "conflict"] = Field(
+        ..., description="触发/回收/并行/冲突"
+    )
+    description: str = Field("", description="关系描述")
+
+
+class ForeshadowingStatus(BaseModel):
+    """伏笔状态摘要（用于检查遗忘）"""
+
+    foreshadowing_id: str
+    planted_chapter: int
+    target_chapter: int
+    status: Literal["pending", "collected", "abandoned"]
+    content: str = Field("", description="伏笔内容")
+    chapters_since_plant: int = Field(..., description="距埋设已过多少章")
+    last_mentioned_chapter: int | None = Field(
+        None, description="最后被提及的章节"
+    )
+    is_forgotten: bool = Field(
+        False, description="是否即将遗忘（超过阈值未提及）"
+    )

@@ -12,6 +12,7 @@ from src.novel.models.character import (
     TurningPoint,
 )
 from src.novel.models.feedback import FeedbackAnalysis, FeedbackEntry, FeedbackType
+from src.novel.models.health import HealthMetrics
 from src.novel.models.foreshadowing import DetailEntry, Foreshadowing
 from src.novel.models.memory import (
     ChapterSummary,
@@ -89,6 +90,8 @@ __all__ = [
     # foreshadowing.py
     "Foreshadowing",
     "DetailEntry",
+    # health.py
+    "HealthMetrics",
     # feedback.py
     "FeedbackType",
     "FeedbackEntry",

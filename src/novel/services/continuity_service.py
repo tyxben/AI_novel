@@ -65,9 +65,11 @@ class ContinuityService:
         self,
         db: "StructuredDB | None" = None,
         obligation_tracker: "ObligationTracker | None" = None,
+        knowledge_graph: Any = None,
     ) -> None:
         self.db = db
         self.obligation_tracker = obligation_tracker
+        self.knowledge_graph = knowledge_graph
 
     # ------------------------------------------------------------------
     # Public API
@@ -145,6 +147,9 @@ class ContinuityService:
 
         # Active entities (P0: Entity Registry)
         self._extract_active_entities(brief, chapter_number)
+
+        # Pending / forgotten foreshadowings (P1: Foreshadowing Graph)
+        self._extract_pending_foreshadowings(brief, chapter_number)
 
         return brief
 
@@ -306,6 +311,28 @@ class ContinuityService:
             sections.append("### 活跃实体（近期出现）")
             for etype, names in active_entities.items():
                 sections.append(f"- {etype}: {', '.join(names[:10])}")
+            sections.append("")
+
+        # Forgotten foreshadowings (P1: Foreshadowing Graph)
+        forgotten = brief.get("forgotten_foreshadowings", [])
+        if forgotten:
+            sections.append("### ⚠️ 即将遗忘的伏笔（必须本章提及或回收）")
+            for f in forgotten:
+                sections.append(
+                    f"- 第{f['planted_chapter']}章埋设: {f['content']} "
+                    f"(已 {f['chapters_since_plant']} 章未提及)"
+                )
+            sections.append("")
+
+        # Pending foreshadowings (P1: Foreshadowing Graph)
+        pending_fs = brief.get("pending_foreshadowings", [])
+        if pending_fs:
+            sections.append("### 待回收伏笔")
+            for f in pending_fs:
+                target = f"→ 第{f['target_chapter']}章" if f.get("target_chapter", -1) > 0 else ""
+                sections.append(
+                    f"- 第{f['planted_chapter']}章: {f['content']} {target}"
+                )
             sections.append("")
 
         # If only the header was added, return empty
@@ -712,6 +739,30 @@ class ContinuityService:
                 brief["active_entities"] = by_type
         except Exception:
             log.debug("活跃实体提取失败", exc_info=True)
+
+    def _extract_pending_foreshadowings(
+        self,
+        brief: dict[str, Any],
+        chapter_number: int,
+    ) -> None:
+        """注入待回收/遗忘伏笔列表 (P1: Foreshadowing Graph)。
+
+        从 knowledge_graph 查询 pending 伏笔，分类为 forgotten 和 normal，
+        存入 brief["pending_foreshadowings"] 和 brief["forgotten_foreshadowings"]。
+        """
+        if self.knowledge_graph is None:
+            return
+
+        try:
+            pending = self.knowledge_graph.get_pending_foreshadowings(chapter_number)
+
+            forgotten = [f for f in pending if f.get("is_forgotten")]
+            normal = [f for f in pending if not f.get("is_forgotten")]
+
+            brief["pending_foreshadowings"] = normal[:5]
+            brief["forgotten_foreshadowings"] = forgotten[:3]
+        except Exception:
+            log.warning("伏笔图谱查询失败", exc_info=True)
 
     def _extract_recommended_payoffs(
         self,
