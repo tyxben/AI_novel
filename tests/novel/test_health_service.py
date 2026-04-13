@@ -489,23 +489,19 @@ class TestOverallScore:
         )
         score = svc._compute_overall_score(m)
         # Without forgotten: 0.25*1.0 + 0.25*0.5 + 0.20*0.5 + 0.15*0.5 + 0.15*0.5 = 0.625 -> 62.5
-        # Penalty: 3*2 = 6
-        assert score == pytest.approx(56.5)
+        # Penalty: min(10, 3*0.5) = 1.5
+        assert score == pytest.approx(61.0)
 
-    def test_penalty_capped_at_20(self):
+    def test_penalty_capped_at_10(self):
         kg = _make_graph_with_foreshadowings([
             ("fs1", {"type": "foreshadowing", "status": "pending", "planted_chapter": 1}),
         ])
         svc = HealthService(knowledge_graph=kg)
-        m = HealthMetrics(foreshadowing_forgotten=15)  # 15*2=30, capped at 20
+        m = HealthMetrics(foreshadowing_forgotten=25)  # 25*0.5=12.5, capped at 10
         score = svc._compute_overall_score(m)
-        # base = 0.25*0.5 + 0.25*0.5 + 0.20*0.5 + 0.15*0.5 + 0.15*0.5 = 50.0 with kg present but 0 total
-        # fs_score uses 0 rate since total=0 => neutral 0.5... wait, graph exists but total=0
-        # Actually graph is not None so fs_score depends on total: total=0 -> neutral
-        # No, total in HealthMetrics is 0 but foreshadowing_forgotten=15
         # fs_score = NEUTRAL (0.5) since total==0
-        # All neutral -> base 50. penalty = 20 (capped). score = 30.
-        assert score == pytest.approx(30.0)
+        # All neutral -> base 50. penalty = min(10, 25*0.5) = 10. score = 40.
+        assert score == pytest.approx(40.0)
 
     def test_score_floor_at_zero(self):
         kg = _make_graph_with_foreshadowings([

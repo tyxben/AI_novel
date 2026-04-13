@@ -437,11 +437,14 @@ class TestExtendOutline:
         outline = _make_long_outline_dict(30, 4)
         novel_id = self._create_project(outline)
 
-        # First call returns volume 2 (31-60), second returns volume 3 (61-90)
+        # Each volume expansion triggers: generate_volume_outline + generate_volume_milestones
+        _milestone_resp = FakeLLMResponse(content='{"milestones": []}')
         mock_llm = MagicMock()
         mock_llm.chat.side_effect = [
-            FakeLLMResponse(content=_make_volume_outline_response(31, 60)),
-            FakeLLMResponse(content=_make_volume_outline_response(61, 90)),
+            FakeLLMResponse(content=_make_volume_outline_response(31, 60)),  # vol 2 outline
+            _milestone_resp,  # vol 2 milestones
+            FakeLLMResponse(content=_make_volume_outline_response(61, 90)),  # vol 3 outline
+            _milestone_resp,  # vol 3 milestones
         ]
         mock_create_llm.return_value = mock_llm
 

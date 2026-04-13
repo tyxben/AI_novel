@@ -2,8 +2,8 @@
 
 # 全局 LLM 配置（分段和 Prompt 生成共用，可被模块级配置覆盖）
 llm:
-  provider: openai  # auto | openai | deepseek | gemini | ollama
-  model: gpt-5.4     # OpenAI GPT-5.4 (最新旗舰)
+  provider: deepseek  # auto | openai | deepseek | gemini | ollama
+  model: deepseek-chat  # DeepSeek V3
   # model: gpt-4o-mini          # openai 便宜
   # model: deepseek-chat         # deepseek 默认
   # model: gemini-2.0-flash-lite # gemini 默认
