@@ -13,6 +13,7 @@ from src.llm.llm_client import LLMClient, create_llm_client
 from src.novel.editors.character_editor import CharacterEditor
 from src.novel.editors.outline_editor import OutlineEditor
 from src.novel.editors.world_editor import WorldSettingEditor
+from src.novel.services.changelog_manager import ChangeLogManager
 from src.novel.services.intent_parser import IntentParser
 from src.novel.storage.file_manager import FileManager
 
@@ -38,9 +39,15 @@ class EditResult:
 class NovelEditService:
     """统一编辑入口，协调意图解析、编辑器、存储。"""
 
-    def __init__(self, workspace: str = "workspace", llm_client: LLMClient | None = None):
+    def __init__(
+        self,
+        workspace: str = "workspace",
+        llm_client: LLMClient | None = None,
+        changelog_manager: ChangeLogManager | None = None,
+    ):
         self.file_manager = FileManager(workspace)
         self._llm_client = llm_client
+        self._changelog_manager = changelog_manager
         self._editors: dict[str, Any] = {
             "character": CharacterEditor(),
             "outline": OutlineEditor(),
@@ -166,6 +173,24 @@ class NovelEditService:
                 "new_value": new_value,
             }
             self.file_manager.save_change_log(novel_id, entry)
+
+            # 12. 记录到 ChangeLogManager（如果已注入）
+            if self._changelog_manager is not None:
+                try:
+                    desc = instruction or f"{change_type} {entity_type}"
+                    self._changelog_manager.record(
+                        novel_id=novel_id,
+                        change_type=f"{change_type}_{entity_type}",
+                        entity_type=entity_type,
+                        description=desc,
+                        old_value=old_value,
+                        new_value=new_value,
+                        entity_id=entity_id,
+                        effective_from_chapter=effective_from,
+                        author="user" if instruction else "ai",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("ChangeLogManager 记录失败: %s", exc)
 
             return EditResult(
                 change_id=change_id,

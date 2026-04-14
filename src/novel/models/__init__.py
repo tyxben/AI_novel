@@ -1,5 +1,6 @@
 """小说模块数据模型 - 统一导出"""
 
+from src.novel.models.changelog import ChangeLogEntry
 from src.novel.models.chapter import Chapter, MoodTag, Scene
 from src.novel.models.character import (
     Appearance,
@@ -52,6 +53,8 @@ Novel.model_rebuild()
 Volume.model_rebuild()
 
 __all__ = [
+    # changelog.py
+    "ChangeLogEntry",
     # novel.py
     "Novel",
     "Outline",

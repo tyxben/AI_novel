@@ -307,7 +307,8 @@ def export_novel(project_path: str, output: str | None):
 
 @novel.command("status")
 @click.argument("project_path", type=click.Path(exists=True))
-def novel_status(project_path: str):
+@click.option("--verbose", "-v", is_flag=True, help="显示详细信息（角色列表、世界观摘要、最近决策）")
+def novel_status(project_path: str, verbose: bool):
     """查看小说项目状态"""
     try:
         from src.novel.pipeline import NovelPipeline
@@ -334,9 +335,192 @@ def novel_status(project_path: str):
         if "errors_count" in info:
             table.add_row("错误数", str(info["errors_count"]))
 
+        # Progress percentage
+        total_ch = info.get("total_chapters", 0)
+        current_ch = info.get("current_chapter", 0)
+        if total_ch > 0:
+            pct = current_ch / total_ch * 100
+            table.add_row("完成度", f"{pct:.1f}%")
+
         console.print(table)
+
+        # Verbose output: characters, world setting, decisions
+        if verbose:
+            import json as _json
+
+            novel_json = Path(project_path) / "novel.json"
+            if novel_json.exists():
+                with open(novel_json, encoding="utf-8") as f:
+                    novel_data = _json.load(f)
+
+                # Character list
+                characters = novel_data.get("characters", [])
+                if characters:
+                    ch_table = Table(title="角色列表")
+                    ch_table.add_column("名字", style="cyan")
+                    ch_table.add_column("角色", style="green")
+                    ch_table.add_column("描述", style="dim")
+                    for ch in characters[:10]:
+                        name = ch.get("name", "?")
+                        role = ch.get("role", ch.get("occupation", "?"))
+                        desc = ch.get("description", ch.get("background", ""))
+                        ch_table.add_row(name, str(role), str(desc)[:50])
+                    console.print(ch_table)
+
+                # World setting summary
+                ws = novel_data.get("world_setting")
+                if ws and isinstance(ws, dict):
+                    ws_table = Table(title="世界观摘要")
+                    ws_table.add_column("项目", style="cyan")
+                    ws_table.add_column("值", style="green")
+                    ws_table.add_row("时代", ws.get("era", "?"))
+                    ws_table.add_row("地域", ws.get("location", "?"))
+                    rules = ws.get("rules", [])
+                    if rules:
+                        ws_table.add_row("规则", "; ".join(str(r) for r in rules[:3]))
+                    console.print(ws_table)
+
+            # Recent decisions from checkpoint
+            ckpt_path = Path(project_path) / "checkpoint.json"
+            if ckpt_path.exists():
+                with open(ckpt_path, encoding="utf-8") as f:
+                    ckpt = _json.load(f)
+                decisions = ckpt.get("decisions", [])
+                if decisions:
+                    dec_table = Table(title="最近决策")
+                    dec_table.add_column("Agent", style="cyan")
+                    dec_table.add_column("步骤", style="white")
+                    dec_table.add_column("决策", style="green")
+                    for d in decisions[-5:]:
+                        dec_table.add_row(
+                            d.get("agent", "?"),
+                            d.get("step", "?"),
+                            d.get("decision", "?"),
+                        )
+                    console.print(dec_table)
     except Exception as e:
         log.error("状态查询失败: %s", e)
+        raise click.Abort()
+
+
+@novel.command("import")
+@click.option("--file", "file_path", required=True, type=click.Path(exists=True),
+              help="待导入的文本文件路径")
+@click.option("--genre", default="通用", help="题材（玄幻/都市/武侠/悬疑等）")
+@click.option("--auto-split/--no-auto-split", default=True, help="自动章节分割")
+@click.option("--workspace", "-w", type=click.Path(), default=None, help="工作目录")
+def import_novel(file_path: str, genre: str, auto_split: bool, workspace: str | None):
+    """导入已有小说稿件为项目"""
+    try:
+        from src.llm.llm_client import create_llm_client
+        from src.novel.config import load_novel_config
+        from src.novel.llm_utils import get_stage_llm_config
+        from src.novel.services.import_service import ImportService
+
+        cfg = load_novel_config()
+        llm_config = get_stage_llm_config(cfg.model_dump(), "outline_generation")
+        llm = create_llm_client(llm_config)
+        svc = ImportService(llm)
+
+        ws = workspace or "workspace"
+        console.print(f"\n[bold cyan]导入小说稿件...[/]")
+        console.print(f"  文件: {file_path}")
+        console.print(f"  题材: {genre}")
+        console.print(f"  自动分割: {'是' if auto_split else '否'}")
+
+        result = svc.import_existing_draft(
+            file_path=file_path,
+            genre=genre,
+            auto_split=auto_split,
+            workspace=ws,
+        )
+
+        console.print(f"\n[bold green]导入成功![/]")
+        console.print(f"  项目路径: {result['workspace']}")
+        console.print(f"  章节数: {result['total_chapters']}")
+        console.print(f"  总字数: {result['total_words']:,}")
+        console.print(f"  角色数: {len(result.get('characters', []))}")
+
+        if result.get("characters"):
+            for ch in result["characters"][:5]:
+                console.print(f"    - {ch.get('name', '?')} ({ch.get('role', '?')})")
+    except Exception as e:
+        log.error("导入失败: %s", e)
+        raise click.Abort()
+
+
+@novel.command("list")
+@click.option("--workspace", "-w", type=click.Path(), default=None, help="工作目录")
+def list_novels(workspace: str | None):
+    """列出所有小说项目"""
+    try:
+        ws = Path(workspace) if workspace else Path("workspace")
+        novels_dir = ws / "novels"
+        if not novels_dir.exists():
+            console.print("[yellow]没有找到任何小说项目[/]")
+            return
+
+        import json
+
+        projects: list[dict] = []
+        for d in novels_dir.iterdir():
+            if not d.is_dir():
+                continue
+            novel_json = d / "novel.json"
+            if not novel_json.exists():
+                continue
+            try:
+                with open(novel_json, encoding="utf-8") as f:
+                    data = json.load(f)
+                outline = data.get("outline", {})
+                total_chapters = (
+                    len(outline.get("chapters", []))
+                    if isinstance(outline, dict)
+                    else 0
+                )
+                projects.append({
+                    "novel_id": data.get("novel_id", d.name),
+                    "title": data.get("title", ""),
+                    "status": data.get("status", "unknown"),
+                    "current_chapter": data.get("current_chapter", 0),
+                    "total_chapters": total_chapters,
+                    "updated_at": data.get("updated_at", ""),
+                    "target_words": data.get("target_words", 0),
+                    "path": str(d),
+                })
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        # Sort by updated_at descending (most recent first)
+        projects.sort(key=lambda p: p.get("updated_at", ""), reverse=True)
+
+        if not projects:
+            console.print("[yellow]没有找到任何小说项目[/]")
+            return
+
+        table = Table(title="小说项目列表")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("标题", style="white")
+        table.add_column("状态", style="green")
+        table.add_column("进度", style="yellow")
+        table.add_column("目标字数", style="dim")
+        table.add_column("路径", style="dim")
+
+        for p in projects:
+            progress = f"{p['current_chapter']}/{p['total_chapters']}"
+            table.add_row(
+                p["novel_id"],
+                p["title"][:30],
+                p["status"],
+                progress,
+                f"{p['target_words']:,}",
+                p["path"],
+            )
+
+        console.print(table)
+        console.print(f"\n共 {len(projects)} 个项目")
+    except Exception as e:
+        log.error("列表查询失败: %s", e)
         raise click.Abort()
 
 

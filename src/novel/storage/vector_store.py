@@ -146,6 +146,27 @@ class VectorStore:
         )
         return results
 
+    def get_by_id(self, doc_id: str) -> dict[str, Any] | None:
+        """按 ID 获取单条记录
+
+        Returns:
+            {"id": str, "document": str, "metadata": dict} 或 None
+        """
+        self._ensure_collection()
+        result = self._collection.get(ids=[doc_id])
+        if result and result.get("ids") and result["ids"]:
+            return {
+                "id": result["ids"][0],
+                "document": result["documents"][0] if result.get("documents") else "",
+                "metadata": result["metadatas"][0] if result.get("metadatas") else {},
+            }
+        return None
+
+    def update_metadata(self, doc_id: str, metadata: dict[str, Any]) -> None:
+        """更新指定文档的 metadata"""
+        self._ensure_collection()
+        self._collection.update(ids=[doc_id], metadatas=[metadata])
+
     def count(self) -> int:
         """返回集合中的文档数量"""
         self._ensure_collection()
