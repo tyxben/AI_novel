@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import logging
+from collections import OrderedDict
 from typing import Any
 
 from src.llm.llm_client import LLMClient
@@ -52,8 +54,46 @@ _PARSER_USER_TEMPLATE = """\
 class IntentParser:
     """将自然语言指令解析为结构化编辑变更。"""
 
-    def __init__(self, llm_client: LLMClient):
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        enable_cache: bool = False,
+        cache_size: int = 32,
+    ):
         self.llm = llm_client
+        self._enable_cache = enable_cache
+        self._cache_size = max(1, cache_size) if enable_cache else 0
+        self._cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+    @staticmethod
+    def _cache_key(
+        instruction: str,
+        novel_context: dict[str, Any],
+        effective_from_chapter: int | None,
+    ) -> tuple:
+        """缓存键：仅包含稳定输入（不含角色列表），避免频繁失效。"""
+        return (
+            instruction.strip(),
+            novel_context.get("genre", ""),
+            novel_context.get("current_chapter", 0),
+            effective_from_chapter,
+        )
+
+    def cache_stats(self) -> dict[str, int]:
+        """返回缓存命中/未命中/当前大小。"""
+        return {
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+            "size": len(self._cache),
+            "capacity": self._cache_size,
+        }
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def parse(
         self,
@@ -82,6 +122,18 @@ class IntentParser:
         Raises:
             ValueError: 无法解析指令时
         """
+        cache_key = None
+        if self._enable_cache:
+            cache_key = self._cache_key(
+                instruction, novel_context, effective_from_chapter
+            )
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                self._cache_hits += 1
+                self._cache.move_to_end(cache_key)
+                return copy.deepcopy(cached)
+            self._cache_misses += 1
+
         user_prompt = self._build_user_prompt(
             instruction, novel_context, effective_from_chapter
         )
@@ -102,6 +154,11 @@ class IntentParser:
                 parsed = extract_json_from_llm(response.content)
                 self._validate(parsed)
                 result = self._postprocess(parsed, novel_context)
+                if self._enable_cache and cache_key is not None:
+                    self._cache[cache_key] = copy.deepcopy(result)
+                    self._cache.move_to_end(cache_key)
+                    while len(self._cache) > self._cache_size:
+                        self._cache.popitem(last=False)
                 return result
 
             except (ValueError, KeyError) as exc:

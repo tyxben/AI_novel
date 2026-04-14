@@ -571,3 +571,127 @@ class TestEdgeCases:
         result = parser.parse("删除药老", novel_context)
         assert result["change_type"] == "delete"
         assert result["entity_id"] == "char_002"
+
+
+# ========== 缓存测试 ==========
+
+
+def _update_char_response() -> LLMResponse:
+    return _make_response(
+        json.dumps(
+            {
+                "change_type": "update",
+                "entity_type": "character",
+                "entity_id": "char_001",
+                "data": {"age": 25},
+                "effective_from_chapter": 10,
+                "reasoning": "user asked to update age",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
+class TestIntentParserCache:
+    def test_cache_disabled_by_default(self, mock_llm, novel_context):
+        parser = IntentParser(llm_client=mock_llm)
+        mock_llm.chat.return_value = _update_char_response()
+
+        parser.parse("修改萧炎年龄为25", novel_context)
+        parser.parse("修改萧炎年龄为25", novel_context)
+
+        assert mock_llm.chat.call_count == 2
+        stats = parser.cache_stats()
+        assert stats["hits"] == 0
+        assert stats["misses"] == 0
+        assert stats["size"] == 0
+
+    def test_cache_hit_avoids_llm_call(self, mock_llm, novel_context):
+        parser = IntentParser(llm_client=mock_llm, enable_cache=True)
+        mock_llm.chat.return_value = _update_char_response()
+
+        r1 = parser.parse("修改萧炎年龄为25", novel_context)
+        r2 = parser.parse("修改萧炎年龄为25", novel_context)
+
+        assert mock_llm.chat.call_count == 1
+        assert r1 == r2
+        stats = parser.cache_stats()
+        assert stats["hits"] == 1
+        assert stats["misses"] == 1
+
+    def test_cache_isolates_different_effective_from(
+        self, mock_llm, novel_context
+    ):
+        parser = IntentParser(llm_client=mock_llm, enable_cache=True)
+        mock_llm.chat.return_value = _update_char_response()
+
+        parser.parse("修改萧炎", novel_context, effective_from_chapter=5)
+        parser.parse("修改萧炎", novel_context, effective_from_chapter=7)
+
+        assert mock_llm.chat.call_count == 2
+        assert parser.cache_stats()["size"] == 2
+
+    def test_cache_key_ignores_characters_list(
+        self, mock_llm, novel_context
+    ):
+        """角色列表变化不触发 cache miss（按 instruction+genre+chapter 键）。"""
+        parser = IntentParser(llm_client=mock_llm, enable_cache=True)
+        mock_llm.chat.return_value = _update_char_response()
+
+        parser.parse("修改萧炎", novel_context)
+
+        ctx2 = dict(novel_context)
+        ctx2["characters"] = novel_context["characters"] + [
+            {"character_id": "char_003", "name": "新人", "role": "配角"}
+        ]
+        parser.parse("修改萧炎", ctx2)
+
+        assert mock_llm.chat.call_count == 1
+        assert parser.cache_stats()["hits"] == 1
+
+    def test_cache_returns_deepcopy(self, mock_llm, novel_context):
+        """缓存命中返回独立副本，修改不污染缓存。"""
+        parser = IntentParser(llm_client=mock_llm, enable_cache=True)
+        mock_llm.chat.return_value = _update_char_response()
+
+        r1 = parser.parse("修改萧炎", novel_context)
+        r1["data"]["age"] = 999  # tamper
+
+        r2 = parser.parse("修改萧炎", novel_context)
+        assert r2["data"]["age"] == 25
+
+    def test_cache_eviction_lru(self, mock_llm, novel_context):
+        """缓存满后按 LRU 淘汰最旧条目。"""
+        parser = IntentParser(
+            llm_client=mock_llm, enable_cache=True, cache_size=2
+        )
+        mock_llm.chat.return_value = _update_char_response()
+
+        parser.parse("A", novel_context)
+        parser.parse("B", novel_context)
+        parser.parse("C", novel_context)  # evicts A
+
+        stats = parser.cache_stats()
+        assert stats["size"] == 2
+        assert mock_llm.chat.call_count == 3
+
+        # A 已被淘汰 → 再查 A 是 miss
+        parser.parse("A", novel_context)
+        assert mock_llm.chat.call_count == 4
+
+    def test_clear_cache(self, mock_llm, novel_context):
+        parser = IntentParser(llm_client=mock_llm, enable_cache=True)
+        mock_llm.chat.return_value = _update_char_response()
+
+        parser.parse("修改萧炎", novel_context)
+        parser.parse("修改萧炎", novel_context)
+        assert parser.cache_stats()["hits"] == 1
+
+        parser.clear_cache()
+        stats = parser.cache_stats()
+        assert stats["size"] == 0
+        assert stats["hits"] == 0
+        assert stats["misses"] == 0
+
+        parser.parse("修改萧炎", novel_context)
+        assert mock_llm.chat.call_count == 2

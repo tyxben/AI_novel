@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import logging
+import os
 import shutil
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("novel.file_manager")
+
+try:
+    import fcntl  # type: ignore[import-untyped]
+    _HAS_FCNTL = True
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+    _HAS_FCNTL = False
+
+
+class ConcurrentModificationError(RuntimeError):
+    """当另一个进程已持有同一小说的写锁时抛出。"""
 
 
 class FileManager:
@@ -43,6 +60,46 @@ class FileManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    # ========== 并发锁 ==========
+
+    @contextmanager
+    def _novel_lock(self, novel_id: str):
+        """独占写锁上下文管理器（Unix：fcntl.flock；其他平台：no-op）。
+
+        锁文件位于 ``{novel_dir}/.lock``。如果锁已被其他进程持有，立即
+        抛出 :class:`ConcurrentModificationError`（非阻塞）。
+
+        用法::
+
+            with self._novel_lock(novel_id):
+                # 写文件操作
+                ...
+        """
+        if not _HAS_FCNTL:
+            yield
+            return
+
+        lock_path = self._novel_dir(novel_id) / ".lock"
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    raise ConcurrentModificationError(
+                        f"小说 '{novel_id}' 正被其他进程编辑，请稍后重试"
+                    ) from exc
+                raise
+            try:
+                yield
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError as exc:  # pragma: no cover - defensive
+                    log.warning("释放文件锁失败 (%s): %s", lock_path, exc)
+        finally:
+            os.close(fd)
+
     # ========== Novel 操作 ==========
 
     def save_novel(self, novel_id: str, novel_data: dict[str, Any]) -> Path:
@@ -56,8 +113,9 @@ class FileManager:
             保存的文件路径
         """
         path = self._novel_dir(novel_id) / "novel.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(novel_data, f, ensure_ascii=False, indent=2)
+        with self._novel_lock(novel_id):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(novel_data, f, ensure_ascii=False, indent=2)
         return path
 
     def load_novel(self, novel_id: str) -> dict[str, Any] | None:
@@ -314,9 +372,9 @@ class FileManager:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         backup_path = rev_dir / f"novel_backup_{timestamp}.json"
 
-        shutil.copy2(novel_path, backup_path)
-
-        self._cleanup_old_backups(novel_id, keep=20)
+        with self._novel_lock(novel_id):
+            shutil.copy2(novel_path, backup_path)
+            self._cleanup_old_backups(novel_id, keep=20)
 
         return backup_path
 
@@ -359,8 +417,9 @@ class FileManager:
             raise ValueError(f"非法 change_id: {change_id}")
         log_dir = self._changelogs_dir(novel_id)
         path = log_dir / f"{change_id}.json"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(entry, f, ensure_ascii=False, indent=2)
+        with self._novel_lock(novel_id):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(entry, f, ensure_ascii=False, indent=2)
         return path
 
     def list_change_logs(
