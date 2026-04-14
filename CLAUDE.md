@@ -154,6 +154,48 @@ result = pipe.apply_feedback(
 "
 ```
 
+## 小说智能编辑（smart-editor）
+规划文档 `specs/novel-smart-editor/`，详细文档见 `docs/edit_examples.md`、
+`docs/mcp_edit_guide.md`、`docs/adr/0001-versioned-settings.md`。
+
+- `src/novel/services/edit_service.py` — `NovelEditService` 统一编辑入口
+- `src/novel/services/intent_parser.py` — 自然语言 → 结构化变更（opt-in LRU 缓存）
+- `src/novel/services/impact_analyzer.py` — 纯规则影响分析（无 LLM）
+- `src/novel/services/changelog_manager.py` — 变更历史
+- `src/novel/editors/` — Character / Outline / WorldSetting 编辑器
+- `src/novel/utils/setting_version.py` — 按章查询实体版本
+- `src/novel/storage/file_manager.py::_novel_lock` — fcntl 文件锁（Unix）
+
+实体版本字段：`effective_from_chapter`（闭）/ `deprecated_at_chapter`（开）/
+`version`（>=1）。旧项目自动补默认值；可跑迁移脚本标准化。
+
+```bash
+# 自然语言编辑（CLI）
+python main.py novel edit workspace/novels/novel_xxx \
+  -i "添加角色柳青鸾，第10章出场" --dry-run
+python main.py novel edit workspace/novels/novel_xxx \
+  -i "删除角色张三"
+
+# 变更历史
+python main.py novel history workspace/novels/novel_xxx --limit 20
+
+# 回滚（--force 绕过后续依赖检查）
+python main.py novel rollback workspace/novels/novel_xxx <change_id>
+
+# 老项目迁移（加版本字段；幂等，首次迁移落 novel.v1.json 备份）
+python scripts/migrate_novel_v1_to_v2.py --workspace workspace
+python scripts/migrate_novel_v1_to_v2.py --dry-run
+```
+
+MCP 工具（详见 `docs/mcp_edit_guide.md`）：`novel_edit_setting` /
+`novel_analyze_change_impact` / `novel_get_change_history`。
+
+批量编辑服务层 API（尚未暴露 CLI）：
+```python
+service.batch_edit(project_path, changes=[...], stop_on_failure=False)
+```
+每条独立 change_id + changelog 条目，保持回滚粒度。
+
 ## 开发注意事项
 - 重依赖 (torch, diffusers, edge_tts) 使用懒加载，避免import时报错
 - 图片尺寸 1024x1792 (竖屏9:16)
