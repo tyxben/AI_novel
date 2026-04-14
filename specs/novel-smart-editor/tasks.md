@@ -396,20 +396,24 @@ assert len(history) > 0
 **依赖**: 任务 5, 8, 9
 
 **子任务**:
-- [ ] 10.1 新增 `novel_edit_setting` MCP 工具
+- [x] 10.1 新增 `novel_edit_setting` MCP 工具
   - 参数：`project_path`, `instruction`, `effective_from_chapter`, `dry_run`
   - 调用 `NovelEditService.edit()`
   - 返回 `EditResult` 序列化
 
-- [ ] 10.2 新增 `novel_get_change_history` MCP 工具
+- [x] 10.2 新增 `novel_get_change_history` MCP 工具
   - 调用 `NovelEditService.get_history()`
 
-- [ ] 10.3 新增 `novel_analyze_change_impact` MCP 工具（dry_run 模式）
+- [x] 10.3 新增 `novel_analyze_change_impact` MCP 工具（dry_run 模式）
   - 调用 `edit(..., dry_run=True)`
+  - ImpactAnalyzer 集成到 NovelEditService.edit()，结果放在 EditResult.impact_report
+  - 编辑器层 (add/update/delete × character/outline/world_setting) 映射到 ImpactAnalyzer 的 change_type/entity_type
+  - ImpactAnalyzer 失败不阻塞 edit（warning + impact_report=None）
 
-- [ ] 10.4 MCP 测试
+- [x] 10.4 MCP 测试
   - 使用 `fastmcp` 测试框架
   - 验证工具可正常调用
+  - 新增 tests/test_mcp_novel_edit.py（19 测试）+ 补充 tests/novel/services/test_edit_service.py::TestImpactReportIntegration（8 测试）
 
 **验收标准**:
 ```python

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -16,54 +15,25 @@ from src.novel.models.character import (
     Personality,
     TurningPoint,
 )
+from src.novel.utils.json_extract import extract_json_array, extract_json_obj
 
 log = logging.getLogger("novel")
 
 
+# Backward-compat aliases — canonical implementation in
+# ``src.novel.utils.json_extract``. Kept so legacy imports continue to work.
 def _extract_json_obj(text: str | None) -> dict | None:
-    """从 LLM 输出中稳健提取 JSON 对象。"""
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+    """Deprecated: use :func:`src.novel.utils.json_extract.extract_json_obj`."""
+    return extract_json_obj(text)
 
 
 def _extract_json_array(text: str | None) -> list | None:
-    """从 LLM 输出中稳健提取 JSON 数组。"""
-    if not text:
-        return None
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict) and "characters" in result:
-            return result["characters"]
-        return None
-    except (json.JSONDecodeError, TypeError):
-        pass
-    # 尝试提取被包裹在对象中的数组
-    obj = _extract_json_obj(text)
-    if obj and "characters" in obj:
-        return obj["characters"]
-    # 尝试直接提取数组
-    start = text.find("[")
-    end = text.rfind("]")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+    """Deprecated: use :func:`src.novel.utils.json_extract.extract_json_array`.
+
+    Historical behaviour only unwrapped ``{"characters": [...]}``; we preserve
+    that by restricting ``unwrap_keys``.
+    """
+    return extract_json_array(text, unwrap_keys=("characters",))
 
 
 class CharacterService:
@@ -132,7 +102,9 @@ class CharacterService:
                     temperature=0.7,
                     json_mode=True,
                 )
-                characters = _extract_json_array(response.content)
+                characters = extract_json_array(
+                    response.content, unwrap_keys=("characters",)
+                )
                 if characters is not None and len(characters) > 0:
                     # 验证每个角色有 name 和 role
                     valid = []
@@ -235,7 +207,7 @@ class CharacterService:
                     temperature=0.8,
                     json_mode=True,
                 )
-                data = _extract_json_obj(response.content)
+                data = extract_json_obj(response.content)
                 if data is not None:
                     return self._parse_character_profile(data, name, role)
                 last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"

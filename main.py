@@ -545,6 +545,162 @@ def novel_health(project_path: str):
         raise click.Abort()
 
 
+def _edit_result_field(result, key: str, default=None):
+    """Safely read a field from an EditResult (dataclass) or dict-like result."""
+    if result is None:
+        return default
+    if isinstance(result, dict):
+        return result.get(key, default)
+    return getattr(result, key, default)
+
+
+@novel.command("edit")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--instruction", "-i", required=True, help="自然语言编辑指令")
+@click.option("--effective-from", "-e", type=int, default=None,
+              help="从第几章起生效（可选）")
+@click.option("--dry-run", "-n", is_flag=True, help="预览模式，不实际修改")
+def novel_edit(project_path: str, instruction: str,
+               effective_from: int | None, dry_run: bool):
+    """编辑小说设定（角色/世界观/大纲）"""
+    try:
+        from src.novel.services.edit_service import NovelEditService
+
+        workspace = str(Path(project_path).parent.parent)
+        svc = NovelEditService(workspace=workspace)
+        result = svc.edit(
+            project_path=project_path,
+            instruction=instruction,
+            effective_from_chapter=effective_from,
+            dry_run=dry_run,
+        )
+
+        status = _edit_result_field(result, "status", "")
+        change_id = _edit_result_field(result, "change_id", "")
+        change_type = _edit_result_field(result, "change_type", "")
+        entity_type = _edit_result_field(result, "entity_type", "")
+        entity_id = _edit_result_field(result, "entity_id")
+        effective_from_chapter = _edit_result_field(
+            result, "effective_from_chapter"
+        )
+        reasoning = _edit_result_field(result, "reasoning", "")
+        error = _edit_result_field(result, "error")
+        impact_report = _edit_result_field(result, "impact_report")
+
+        if status == "failed":
+            console.print(f"\n[bold red]❌ 编辑失败[/]")
+            if error:
+                console.print(f"  错误: {error}")
+            if change_id:
+                console.print(f"  变更 ID: {change_id}")
+            raise click.Abort()
+
+        # Success / Preview
+        if status == "preview" or dry_run:
+            console.print(f"\n[bold yellow]🔍 PREVIEW (dry-run)[/]")
+        else:
+            console.print(f"\n[bold green]✅ 编辑成功[/]")
+
+        table = Table(title="编辑结果")
+        table.add_column("项目", style="cyan")
+        table.add_column("值", style="green")
+
+        table.add_row("变更 ID", str(change_id))
+        table.add_row("状态", str(status))
+        table.add_row("变更类型", str(change_type))
+        table.add_row("实体类型", str(entity_type))
+        if entity_id:
+            table.add_row("实体 ID", str(entity_id))
+        if effective_from_chapter is not None:
+            table.add_row("生效章节", f"第 {effective_from_chapter} 章起")
+        if reasoning:
+            table.add_row("推理", str(reasoning)[:120])
+
+        console.print(table)
+
+        # Impact analysis (only shown if present)
+        if impact_report:
+            imp_table = Table(title="影响分析")
+            imp_table.add_column("项目", style="cyan")
+            imp_table.add_column("值", style="yellow")
+            if isinstance(impact_report, dict):
+                affected = impact_report.get("affected_chapters", [])
+                if affected:
+                    imp_table.add_row(
+                        "受影响章节",
+                        ", ".join(str(c) for c in affected[:20]),
+                    )
+                summary = impact_report.get("summary")
+                if summary:
+                    imp_table.add_row("摘要", str(summary)[:200])
+                severity = impact_report.get("severity")
+                if severity:
+                    imp_table.add_row("风险等级", str(severity))
+                conflicts = impact_report.get("conflicts", [])
+                if conflicts:
+                    imp_table.add_row(
+                        "冲突",
+                        "; ".join(str(c) for c in conflicts[:5]),
+                    )
+                warnings = impact_report.get("warnings", [])
+                if warnings:
+                    imp_table.add_row(
+                        "警告",
+                        "; ".join(str(w) for w in warnings[:5]),
+                    )
+            else:
+                imp_table.add_row("详情", str(impact_report)[:200])
+            console.print(imp_table)
+    except click.Abort:
+        raise
+    except Exception as e:
+        log.error("编辑失败: %s", e)
+        raise click.Abort()
+
+
+@novel.command("history")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--limit", "-n", type=int, default=20, help="返回条数上限（默认 20）")
+@click.option("--change-type", "-t", default=None,
+              help="按变更类型过滤（如 add_character）")
+def novel_history(project_path: str, limit: int,
+                  change_type: str | None):
+    """查询小说项目变更历史"""
+    try:
+        from src.novel.services.edit_service import NovelEditService
+
+        workspace = str(Path(project_path).parent.parent)
+        svc = NovelEditService(workspace=workspace)
+        entries = svc.get_history(
+            project_path=project_path, limit=limit, change_type=change_type
+        )
+
+        if not entries:
+            console.print("[yellow]该项目暂无变更历史[/]")
+            return
+
+        table = Table(title="变更历史")
+        table.add_column("时间", style="cyan", no_wrap=True)
+        table.add_column("类型", style="green")
+        table.add_column("实体", style="yellow")
+        table.add_column("描述", style="white")
+        table.add_column("作者", style="dim")
+
+        for e in entries:
+            ts = str(e.get("timestamp", ""))[:19]  # trim to second
+            ctype = str(e.get("change_type", ""))
+            etype = str(e.get("entity_type", ""))
+            desc = e.get("description") or e.get("instruction") or ""
+            author = str(e.get("author", ""))
+            table.add_row(ts, ctype, etype, str(desc)[:60], author)
+
+        console.print(table)
+        console.print(f"\n共 {len(entries)} 条记录")
+    except Exception as e:
+        log.error("历史查询失败: %s", e)
+        raise click.Abort()
+
+
 # ---------------------------------------------------------------------------
 # ppt 命令组 - AI PPT 生成
 # ---------------------------------------------------------------------------

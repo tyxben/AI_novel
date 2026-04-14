@@ -3432,7 +3432,7 @@ class NovelPipeline:
                 max_tokens=1024,
             )
 
-            from src.agents.utils import extract_json_obj
+            from src.novel.utils.json_extract import extract_json_obj
             result = extract_json_obj(response.content)
             if result:
                 title = result.get("title") or ch_outline.get("title") or f"第{ch_num}章"

@@ -323,7 +323,10 @@ def _infer_workspace(project_path: str) -> str:
     """
     parts = project_path.replace("\\", "/").split("/")
     if "novels" in parts:
-        idx = parts.index("novels")
+        # Use the LAST 'novels' segment — the path itself is the authoritative
+        # marker of where the workspace ends, and user home dirs may contain
+        # earlier 'novels' components (e.g. /Users/alice/novels/...).
+        idx = len(parts) - 1 - parts[::-1].index("novels")
         ws = "/".join(parts[:idx])
         return ws if ws else _DEFAULT_WORKSPACE
     return _DEFAULT_WORKSPACE
@@ -398,6 +401,55 @@ def novel_get_change_history(
         limit = max(1, min(limit, 100))
         changes = service.get_history(project_path=str(validated), limit=limit)
         return {"changes": changes, "total": len(changes)}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+@mcp.tool()
+def novel_analyze_change_impact(
+    project_path: str,
+    instruction: str,
+    effective_from_chapter: int | None = None,
+) -> dict[str, Any]:
+    """Analyze the impact of a proposed change without applying it.
+
+    Runs the edit service in dry_run mode and returns the impact analysis
+    (affected chapters, severity, conflicts, warnings) produced by
+    ImpactAnalyzer. No changes are written to disk.
+
+    Args:
+        project_path: Path to the novel project directory
+            (e.g. "workspace/novels/novel_abc12345").
+        instruction: Natural language edit instruction to analyze.
+        effective_from_chapter: Chapter from which the change takes effect
+            (None = auto-infer as current_chapter + 1).
+
+    Returns:
+        Dict with change metadata and impact_report
+        {affected_chapters, severity, conflicts, warnings, summary}.
+        On failure returns {"status": "failed", "error": ...}.
+    """
+    try:
+        if not instruction or not instruction.strip():
+            return {
+                "status": "failed",
+                "error": "instruction 不能为空",
+            }
+
+        validated = _validate_project_path(project_path)
+        from dataclasses import asdict
+
+        from src.novel.services.edit_service import NovelEditService
+
+        workspace = _infer_workspace(str(validated))
+        service = NovelEditService(workspace=workspace)
+        result = service.edit(
+            project_path=str(validated),
+            instruction=instruction,
+            effective_from_chapter=effective_from_chapter,
+            dry_run=True,
+        )
+        return asdict(result)
     except Exception as e:
         return {"status": "failed", "error": str(e)}
 

@@ -14,6 +14,11 @@ from src.novel.editors.character_editor import CharacterEditor
 from src.novel.editors.outline_editor import OutlineEditor
 from src.novel.editors.world_editor import WorldSettingEditor
 from src.novel.services.changelog_manager import ChangeLogManager
+from src.novel.services.impact_analyzer import (
+    ChangeRequest,
+    ImpactAnalyzer,
+    ImpactResult,
+)
 from src.novel.services.intent_parser import IntentParser
 from src.novel.storage.file_manager import FileManager
 
@@ -34,6 +39,7 @@ class EditResult:
     effective_from_chapter: int | None = None
     reasoning: str = ""
     error: str | None = None
+    impact_report: dict | None = None
 
 
 class NovelEditService:
@@ -44,10 +50,12 @@ class NovelEditService:
         workspace: str = "workspace",
         llm_client: LLMClient | None = None,
         changelog_manager: ChangeLogManager | None = None,
+        impact_analyzer: ImpactAnalyzer | None = None,
     ):
         self.file_manager = FileManager(workspace)
         self._llm_client = llm_client
         self._changelog_manager = changelog_manager
+        self._impact_analyzer = impact_analyzer or ImpactAnalyzer()
         self._editors: dict[str, Any] = {
             "character": CharacterEditor(),
             "outline": OutlineEditor(),
@@ -135,6 +143,9 @@ class NovelEditService:
                     error=f"不支持的 entity_type: {entity_type}",
                 )
 
+            # 5b. 影响分析（非阻塞，失败仅记录 warning）
+            impact_report = self._run_impact_analysis(novel_data, change)
+
             # 6. dry_run 模式：预览但不修改
             if dry_run:
                 return EditResult(
@@ -145,6 +156,7 @@ class NovelEditService:
                     entity_id=entity_id,
                     effective_from_chapter=effective_from,
                     reasoning=reasoning,
+                    impact_report=impact_report,
                 )
 
             # 7. 备份
@@ -202,6 +214,7 @@ class NovelEditService:
                 new_value=new_value,
                 effective_from_chapter=effective_from,
                 reasoning=reasoning,
+                impact_report=impact_report,
             )
 
         except Exception as exc:
@@ -218,18 +231,22 @@ class NovelEditService:
         self,
         project_path: str,
         limit: int = 20,
+        change_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """查询变更历史。
 
         Args:
             project_path: 项目路径
             limit: 返回的最大条数
+            change_type: 按变更类型过滤（精确或后缀匹配），在截断前应用
 
         Returns:
             变更日志列表（按时间倒序）
         """
         novel_id = self._extract_novel_id(project_path)
-        return self.file_manager.list_change_logs(novel_id, limit)
+        return self.file_manager.list_change_logs(
+            novel_id, limit, change_type=change_type
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -278,6 +295,76 @@ class NovelEditService:
             "characters": novel_data.get("characters", []),
             "current_chapter": novel_data.get("current_chapter", 0),
         }
+
+    # ------------------------------------------------------------------
+    # Impact analysis integration
+    # ------------------------------------------------------------------
+
+    # Map editor-layer (change_type, entity_type) -> ImpactAnalyzer.ChangeRequest.change_type
+    _IMPACT_CHANGE_TYPE_MAP: dict[tuple[str, str], str] = {
+        ("add", "character"): "add_character",
+        ("update", "character"): "modify_character",
+        ("delete", "character"): "delete_character",
+        ("add", "outline"): "modify_outline",
+        ("update", "outline"): "modify_outline",
+        ("delete", "outline"): "modify_outline",
+        ("add", "world_setting"): "modify_world",
+        ("update", "world_setting"): "modify_world",
+        ("delete", "world_setting"): "modify_world",
+    }
+
+    # Map editor entity_type -> ImpactAnalyzer entity_type
+    _IMPACT_ENTITY_TYPE_MAP: dict[str, str] = {
+        "character": "character",
+        "outline": "outline",
+        "world_setting": "world",
+    }
+
+    def _run_impact_analysis(
+        self,
+        novel_data: dict,
+        change: dict,
+    ) -> dict | None:
+        """调用 ImpactAnalyzer，返回 dict 序列化结果；失败仅 warning 不阻塞。"""
+        try:
+            request = self._build_change_request(change)
+            if request is None:
+                return None
+            result: ImpactResult = self._impact_analyzer.analyze(
+                novel_data, request
+            )
+            return result.model_dump()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ImpactAnalyzer 分析失败: %s", exc)
+            return None
+
+    def _build_change_request(self, change: dict) -> ChangeRequest | None:
+        """把内部 change dict 转换为 ImpactAnalyzer.ChangeRequest。
+
+        不支持的 change_type/entity_type 返回 None（由调用方跳过）。
+        """
+        entity_type = change.get("entity_type", "")
+        change_type = change.get("change_type", "")
+
+        mapped_change_type = self._IMPACT_CHANGE_TYPE_MAP.get(
+            (change_type, entity_type)
+        )
+        mapped_entity_type = self._IMPACT_ENTITY_TYPE_MAP.get(entity_type)
+        if mapped_change_type is None or mapped_entity_type is None:
+            return None
+
+        effective_from = change.get("effective_from_chapter", 1) or 1
+        effective_from = max(1, int(effective_from))
+
+        details = dict(change.get("data") or {})
+
+        return ChangeRequest(
+            change_type=mapped_change_type,
+            entity_type=mapped_entity_type,
+            entity_id=change.get("entity_id"),
+            effective_from_chapter=effective_from,
+            details=details,
+        )
 
     @staticmethod
     def _resolve_effective_from(

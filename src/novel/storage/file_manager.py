@@ -364,13 +364,18 @@ class FileManager:
         return path
 
     def list_change_logs(
-        self, novel_id: str, limit: int = 20
+        self,
+        novel_id: str,
+        limit: int = 20,
+        change_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出变更日志（按修改时间倒序）
 
         Args:
             novel_id: 小说 ID
             limit: 返回的最大条数
+            change_type: 按变更类型过滤。精确匹配或后缀匹配（"character"
+                可匹配 "add_character" / "delete_character"）。过滤在截断前执行。
 
         Returns:
             变更日志 dict 列表
@@ -387,9 +392,16 @@ class FileManager:
         )
 
         results: list[dict[str, Any]] = []
-        for p in log_files[:limit]:
+        for p in log_files:
             with open(p, encoding="utf-8") as f:
-                results.append(json.load(f))
+                entry = json.load(f)
+            if change_type is not None:
+                ct = entry.get("change_type") or ""
+                if ct != change_type and not ct.endswith(f"_{change_type}"):
+                    continue
+            results.append(entry)
+            if len(results) >= limit:
+                break
         return results
 
     def load_change_log(

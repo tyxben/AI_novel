@@ -79,22 +79,11 @@ def _detect_repetition(sentences: list[str], window: int = 3, threshold: float =
     return issues
 
 
-def _extract_json_obj(text: str | None) -> dict | None:
-    """从 LLM 输出中稳健提取 JSON 对象。"""
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+from src.novel.utils.json_extract import extract_json_obj
+
+# Backward-compat alias — canonical implementation in
+# ``src.novel.utils.json_extract``. Retained for any legacy imports.
+_extract_json_obj = extract_json_obj
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +345,7 @@ class QualityCheckTool:
                 json_mode=True,
             )
 
-            data = _extract_json_obj(response.content)
+            data = extract_json_obj(response.content)
             if data is None:
                 log.warning("追更评估 LLM 返回无法解析: %s", response.content[:200])
                 return {}
@@ -433,7 +422,7 @@ class QualityCheckTool:
             json_mode=True,
         )
 
-        data = _extract_json_obj(response.content)
+        data = extract_json_obj(response.content)
         if data is None:
             log.warning("对比评估 LLM 返回无法解析: %s", response.content[:200])
             return PairwiseResult(winner="TIE", reason="LLM 返回无法解析，默认平局")
@@ -522,7 +511,7 @@ class QualityCheckTool:
                 json_mode=True,
             )
 
-            data = _extract_json_obj(response.content)
+            data = extract_json_obj(response.content)
             if data is None:
                 log.warning("评分 LLM 返回无法解析: %s", response.content[:200])
                 scores: dict[str, float] = {}

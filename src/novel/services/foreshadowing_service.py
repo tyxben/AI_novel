@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from src.novel.models.foreshadowing import DetailEntry, Foreshadowing
+from src.novel.utils.json_extract import extract_json_array
 
 if TYPE_CHECKING:
     from src.novel.storage.knowledge_graph import KnowledgeGraph
@@ -21,30 +21,16 @@ if TYPE_CHECKING:
 log = logging.getLogger("novel.services.foreshadowing")
 
 
+# Backward-compat alias — existing tests import `_extract_json_array` from this
+# module. The canonical implementation lives in `src.novel.utils.json_extract`.
 def _extract_json_array(text: str | None) -> list | None:
-    """从 LLM 输出中稳健提取 JSON 数组。"""
-    if not text:
-        return None
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict):
-            # 兼容 {"details": [...]} 或 {"items": [...]} 等包装
-            for key in ("details", "items", "results"):
-                if key in result and isinstance(result[key], list):
-                    return result[key]
-        return None
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = text.find("[")
-    end = text.rfind("]")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+    """Deprecated: use ``src.novel.utils.json_extract.extract_json_array``.
+
+    Kept for backward compatibility with existing tests. Restricts unwrap keys
+    to this module's historical set (details / items / results) to preserve
+    exact prior behaviour.
+    """
+    return extract_json_array(text, unwrap_keys=("details", "items", "results"))
 
 
 class ForeshadowingService:
@@ -246,7 +232,9 @@ class ForeshadowingService:
             log.warning("LLM 调用失败，无法提取闲笔: %s", exc)
             return []
 
-        raw_items = _extract_json_array(resp.content)
+        raw_items = extract_json_array(
+            resp.content, unwrap_keys=("details", "items", "results")
+        )
         if not raw_items:
             return []
 

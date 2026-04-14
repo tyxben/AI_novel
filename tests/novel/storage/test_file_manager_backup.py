@@ -272,6 +272,61 @@ class TestListChangeLogs:
         assert result[0]["change_id"] == "chg_order_2"
         assert result[2]["change_id"] == "chg_order_0"
 
+    def test_change_type_filter_applied_before_limit(self, fm, novel_id):
+        """过滤必须在截断前执行，否则旧的匹配记录会被新的非匹配记录挤掉。"""
+        # 先写 5 条非目标类型（时间较早），再写 2 条目标类型（时间较晚）
+        # 然后再写 20 条非目标类型（时间最晚）— 模拟用户记忆中匹配条目更老
+        import os
+
+        all_paths = []
+        for i in range(5):
+            p = fm.save_change_log(
+                novel_id, {"change_id": f"old_{i}", "change_type": "update_outline"}
+            )
+            all_paths.append((p, 1000 + i))
+        for i in range(2):
+            p = fm.save_change_log(
+                novel_id, {"change_id": f"target_{i}", "change_type": "add_character"}
+            )
+            all_paths.append((p, 2000 + i))
+        for i in range(20):
+            p = fm.save_change_log(
+                novel_id, {"change_id": f"new_{i}", "change_type": "update_outline"}
+            )
+            all_paths.append((p, 3000 + i))
+        for p, t in all_paths:
+            os.utime(p, (t, t))
+
+        # limit=5, 不过滤 → 只会看到最新 5 条 update_outline, 目标类型被挤掉
+        result_no_filter = fm.list_change_logs(novel_id, limit=5)
+        target_in_unfiltered = [
+            e for e in result_no_filter if e["change_type"] == "add_character"
+        ]
+        assert target_in_unfiltered == []
+
+        # limit=5, 过滤 add_character → 必须返回 2 条目标记录
+        result = fm.list_change_logs(
+            novel_id, limit=5, change_type="add_character"
+        )
+        assert len(result) == 2
+        assert all(e["change_type"] == "add_character" for e in result)
+
+    def test_change_type_suffix_match(self, fm, novel_id):
+        """change_type='character' 应匹配 add_character / delete_character 等。"""
+        fm.save_change_log(
+            novel_id, {"change_id": "c1", "change_type": "add_character"}
+        )
+        fm.save_change_log(
+            novel_id, {"change_id": "c2", "change_type": "delete_character"}
+        )
+        fm.save_change_log(
+            novel_id, {"change_id": "c3", "change_type": "update_outline"}
+        )
+
+        result = fm.list_change_logs(novel_id, change_type="character")
+        ids = {e["change_id"] for e in result}
+        assert ids == {"c1", "c2"}
+
 
 # ========== load_change_log 测试 ==========
 

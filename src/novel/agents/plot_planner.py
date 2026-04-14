@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.llm.llm_client import LLMClient, LLMResponse, create_llm_client
 from src.novel.llm_utils import get_stage_llm_config
@@ -17,7 +17,26 @@ from src.novel.models.novel import ChapterOutline, VolumeOutline
 from src.novel.templates.rhythm_templates import get_rhythm
 from src.novel.utils import extract_json_from_llm
 
+if TYPE_CHECKING:  # pragma: no cover - import only for type hints
+    from src.novel.storage.knowledge_graph import KnowledgeGraph
+    from src.novel.tools.foreshadowing_tool import ForeshadowingTool
+
 log = logging.getLogger("novel")
+
+# ---------------------------------------------------------------------------
+# Foreshadowing planning constants
+# ---------------------------------------------------------------------------
+
+# Default lookahead: upcoming chapters whose pending foreshadowings we should
+# remind the Writer to resolve in the current chapter.
+_FORESHADOW_LOOKAHEAD = 2
+
+# Default target chapter offset when auto-planting a foreshadowing that lacks
+# an explicit resolution chapter (we promise resolution within N chapters).
+_DEFAULT_PLANT_TARGET_OFFSET = 8
+
+# Maximum reusable detail suggestions to surface to Writer per plan cycle.
+_REUSABLE_DETAIL_TOP_K = 3
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -157,8 +176,30 @@ _CLIFFHANGER_USER = """\
 class PlotPlanner:
     """情节规划师 Agent - 场景分解和节奏设计"""
 
-    def __init__(self, llm_client: LLMClient) -> None:
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        foreshadowing_tool: "ForeshadowingTool | None" = None,
+        knowledge_graph: "KnowledgeGraph | None" = None,
+    ) -> None:
+        """Initialize PlotPlanner.
+
+        Parameters
+        ----------
+        llm_client:
+            同步 LLM 客户端，用于场景分解和悬念建议。
+        foreshadowing_tool:
+            可选的伏笔工具实例，用于反向检索可复用的历史闲笔（闲笔升级）。
+            未注入时 ``plan_chapter()`` 只返回场景 + 回收提醒，不会检索闲笔。
+        knowledge_graph:
+            可选的知识图谱实例，用于：
+            1) 登记正向伏笔节点（foreshadowings_to_plant）
+            2) 查询 pending 伏笔用于回收提醒（foreshadowings_to_resolve）
+            未注入时 ``plan_chapter()`` 跳过这两步（向后兼容）。
+        """
         self.llm = llm_client
+        self.foreshadowing_tool = foreshadowing_tool
+        self.knowledge_graph = knowledge_graph
 
     # ------------------------------------------------------------------
     # decompose_chapter
@@ -386,6 +427,274 @@ class PlotPlanner:
             scenes = scenes[:max_scenes]
 
         return scenes
+
+    # ------------------------------------------------------------------
+    # plan_chapter (with foreshadowing integration)
+    # ------------------------------------------------------------------
+
+    def plan_chapter(
+        self,
+        chapter_outline: ChapterOutline,
+        volume_context: dict,
+        characters: list[CharacterProfile],
+        foreshadowing_hints: list[dict] | None = None,
+        outline: dict | None = None,
+        generation_config: dict | None = None,
+        continuity_brief: str = "",
+        debt_summary: str = "",
+        volume_progress: dict | None = None,
+        reusable_query: str | None = None,
+    ) -> dict:
+        """规划一章：场景分解 + 伏笔集成。
+
+        返回一个 PlotPlan 字典，包含：
+
+        - ``scenes``: 场景列表（与 :meth:`decompose_chapter` 返回结构一致）
+        - ``foreshadowings_to_plant``: 本章计划埋设的伏笔（已登记到 KG 的节点）
+        - ``foreshadowings_to_resolve``: 本章应该回收的伏笔（来自 KG 的 pending 查询）
+        - ``reusable_details``: 可供 Writer 升级的历史闲笔建议
+
+        Parameters
+        ----------
+        reusable_query:
+            反向检索查询，用于 ``foreshadowing_tool.search_reusable_details``。
+            未提供时基于 ``chapter_outline.goal`` 自动构建。
+        其他参数与 :meth:`decompose_chapter` 相同。
+        """
+        scenes = self.decompose_chapter(
+            chapter_outline=chapter_outline,
+            volume_context=volume_context,
+            characters=characters,
+            foreshadowing_hints=foreshadowing_hints,
+            outline=outline,
+            generation_config=generation_config,
+            continuity_brief=continuity_brief,
+            debt_summary=debt_summary,
+            volume_progress=volume_progress,
+        )
+
+        foreshadowings_to_plant = self._plan_foreshadowings_to_plant(
+            chapter_outline
+        )
+        foreshadowings_to_resolve = self._plan_foreshadowings_to_resolve(
+            chapter_outline.chapter_number
+        )
+        reusable_details = self._plan_reusable_details(
+            chapter_outline=chapter_outline,
+            query=reusable_query,
+        )
+
+        return {
+            "scenes": scenes,
+            "foreshadowings_to_plant": foreshadowings_to_plant,
+            "foreshadowings_to_resolve": foreshadowings_to_resolve,
+            "reusable_details": reusable_details,
+        }
+
+    # ------------------------------------------------------------------
+    # Foreshadowing helpers
+    # ------------------------------------------------------------------
+
+    def _plan_foreshadowings_to_plant(
+        self, chapter_outline: ChapterOutline
+    ) -> list[dict]:
+        """正向伏笔规划：从大纲提取 + 登记 KG 节点。
+
+        识别来源（优先级从高到低）：
+        1. ``chapter_outline.chapter_brief["foreshadowing_plant"]`` — 显式列表
+        2. ``chapter_outline.key_events`` 中含 "埋设" / "foreshadowing" 关键词的事件
+        """
+        plants: list[str] = []
+
+        brief = getattr(chapter_outline, "chapter_brief", None) or {}
+        raw = brief.get("foreshadowing_plant") if isinstance(brief, dict) else None
+        if isinstance(raw, list):
+            plants.extend(
+                str(item).strip()
+                for item in raw
+                if isinstance(item, (str, int, float)) and str(item).strip()
+            )
+        elif isinstance(raw, str) and raw.strip():
+            plants.append(raw.strip())
+
+        # Detect foreshadow markers in key_events
+        for event in chapter_outline.key_events or []:
+            if not isinstance(event, str):
+                continue
+            event_clean = event.strip()
+            if not event_clean:
+                continue
+            lowered = event_clean.lower()
+            if (
+                "埋设" in event_clean
+                or "埋下" in event_clean
+                or "foreshadow" in lowered
+            ):
+                if event_clean not in plants:
+                    plants.append(event_clean)
+
+        if not plants:
+            return []
+
+        registered: list[dict] = []
+        for content in plants:
+            target_chapter = (
+                chapter_outline.chapter_number + _DEFAULT_PLANT_TARGET_OFFSET
+            )
+            fid = self._register_foreshadowing_node(
+                content=content,
+                planted_chapter=chapter_outline.chapter_number,
+                target_chapter=target_chapter,
+            )
+            registered.append(
+                {
+                    "foreshadowing_id": fid,
+                    "content": content,
+                    "target_chapter": target_chapter,
+                    "resolution": "",
+                }
+            )
+        return registered
+
+    def _register_foreshadowing_node(
+        self,
+        content: str,
+        planted_chapter: int,
+        target_chapter: int,
+    ) -> str | None:
+        """Register a foreshadowing node in the knowledge graph.
+
+        Returns the generated foreshadowing_id, or None if no KG is configured
+        or registration fails (logged as warning).
+        """
+        if self.knowledge_graph is None:
+            return None
+        try:
+            from uuid import uuid4
+
+            fid = f"foreshadow_{planted_chapter}_{uuid4().hex[:8]}"
+            self.knowledge_graph.add_foreshadowing_node(
+                foreshadowing_id=fid,
+                planted_chapter=planted_chapter,
+                content=content,
+                target_chapter=target_chapter,
+                status="pending",
+                origin="planned",
+            )
+            log.info(
+                "PlotPlanner 登记伏笔节点: %s (第%d章埋设→第%d章回收)",
+                content,
+                planted_chapter,
+                target_chapter,
+            )
+            return fid
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully
+            log.warning("登记伏笔节点失败 (content=%s): %s", content, exc)
+            return None
+
+    def _plan_foreshadowings_to_resolve(
+        self, current_chapter: int
+    ) -> list[dict]:
+        """回收提醒：查询即将到期的 pending 伏笔。
+
+        返回 ``target_chapter`` 在 ``[current_chapter, current_chapter + lookahead]``
+        范围内的 pending 伏笔摘要，供 Writer 本章优先回收。
+        """
+        if self.knowledge_graph is None:
+            return []
+
+        try:
+            pending = self.knowledge_graph.get_pending_foreshadowings(
+                current_chapter
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("查询 pending 伏笔失败: %s", exc)
+            return []
+
+        deadline = current_chapter + _FORESHADOW_LOOKAHEAD
+        reminders: list[dict] = []
+        for item in pending or []:
+            if not isinstance(item, dict):
+                continue
+            target = item.get("target_chapter", -1)
+            # target_chapter == -1 表示未指定回收章（不纳入 reminder），
+            # 只提醒目标章在 [current_chapter, deadline] 窗口的伏笔。
+            try:
+                target_int = int(target)
+            except (TypeError, ValueError):
+                continue
+            if target_int < 0:
+                continue
+            if current_chapter <= target_int <= deadline:
+                reminders.append(
+                    {
+                        "foreshadowing_id": item.get("foreshadowing_id"),
+                        "content": item.get("content", ""),
+                        "planted_chapter": item.get("planted_chapter"),
+                        "target_chapter": target_int,
+                    }
+                )
+        return reminders
+
+    def _plan_reusable_details(
+        self,
+        chapter_outline: ChapterOutline,
+        query: str | None,
+    ) -> list[dict]:
+        """后置伏笔检索：查找可升级的历史闲笔。
+
+        通过 ``foreshadowing_tool.search_reusable_details`` 反向检索。
+        未注入工具或检索失败时返回空列表（向后兼容）。
+        """
+        if self.foreshadowing_tool is None:
+            return []
+
+        effective_query = (query or "").strip()
+        if not effective_query:
+            # Build query from chapter_outline.goal + first key_event
+            goal = (chapter_outline.goal or "").strip()
+            key = ""
+            if chapter_outline.key_events:
+                first = chapter_outline.key_events[0]
+                if isinstance(first, str):
+                    key = first.strip()
+            effective_query = (goal + " " + key).strip()
+
+        if not effective_query:
+            return []
+
+        try:
+            details = self.foreshadowing_tool.search_reusable_details(
+                query=effective_query,
+                current_chapter=chapter_outline.chapter_number,
+                top_k=_REUSABLE_DETAIL_TOP_K,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("闲笔检索失败: %s", exc)
+            return []
+
+        results: list[dict] = []
+        for d in details or []:
+            # Support both DetailEntry and plain dict returns for easier mocking
+            if hasattr(d, "model_dump"):
+                data = d.model_dump()
+            elif isinstance(d, dict):
+                data = d
+            else:
+                continue
+            # Skip already-promoted entries
+            if data.get("status") == "promoted":
+                continue
+            results.append(
+                {
+                    "detail_id": data.get("detail_id", ""),
+                    "content": data.get("content", ""),
+                    "chapter": data.get("chapter"),
+                    "category": data.get("category", ""),
+                    "context": data.get("context", ""),
+                }
+            )
+        return results
 
     # ------------------------------------------------------------------
     # design_rhythm

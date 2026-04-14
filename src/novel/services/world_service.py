@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
 from src.novel.models.world import PowerLevel, PowerSystem, WorldSetting
+from src.novel.utils.json_extract import extract_json_obj
 
 log = logging.getLogger("novel")
 
@@ -17,22 +17,9 @@ log = logging.getLogger("novel")
 _POWER_SYSTEM_GENRES = {"玄幻", "修仙", "仙侠", "武侠", "奇幻", "魔幻"}
 
 
-def _extract_json_obj(text: str | None) -> dict | None:
-    """从 LLM 输出中稳健提取 JSON 对象。"""
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+# Backward-compat alias — canonical implementation lives in
+# ``src.novel.utils.json_extract``.
+_extract_json_obj = extract_json_obj
 
 
 class WorldService:
@@ -96,7 +83,7 @@ class WorldService:
                     temperature=0.8,
                     json_mode=True,
                 )
-                data = _extract_json_obj(response.content)
+                data = extract_json_obj(response.content)
                 if data is not None:
                     return self._parse_world_setting(data)
                 last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"
@@ -174,7 +161,7 @@ class WorldService:
                     temperature=0.7,
                     json_mode=True,
                 )
-                data = _extract_json_obj(response.content)
+                data = extract_json_obj(response.content)
                 if data is not None:
                     return self._parse_power_system(data)
                 last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"

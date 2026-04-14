@@ -2,57 +2,26 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
 from src.novel.models.memory import Fact
+from src.novel.utils.json_extract import extract_json_array, extract_json_obj
 
 log = logging.getLogger("novel")
 
 
+# Backward-compat aliases — canonical implementation in
+# ``src.novel.utils.json_extract``. Historical behaviour unwrapped only the
+# ``facts`` wrapper key, which we preserve explicitly.
 def _extract_json_array(text: str | None) -> list | None:
-    """从 LLM 输出中稳健提取 JSON 数组。"""
-    if not text:
-        return None
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict) and "facts" in result:
-            return result["facts"]
-        return None
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = text.find("[")
-    end = text.rfind("]")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+    """Deprecated: use :func:`src.novel.utils.json_extract.extract_json_array`."""
+    return extract_json_array(text, unwrap_keys=("facts",))
 
 
 def _extract_json_obj(text: str | None) -> dict | None:
-    """从 LLM 输出中稳健提取 JSON 对象。"""
-    if not text:
-        return None
-    try:
-        result = json.loads(text)
-        if isinstance(result, dict):
-            return result
-        return None
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+    """Deprecated: use :func:`src.novel.utils.json_extract.extract_json_obj`."""
+    return extract_json_obj(text)
 
 
 _FACT_TYPE_MAP = {
@@ -120,7 +89,9 @@ class ConsistencyService:
                 temperature=0.3,
                 json_mode=True,
             )
-            raw_facts = _extract_json_array(response.content)
+            raw_facts = extract_json_array(
+                response.content, unwrap_keys=("facts",)
+            )
             if raw_facts is None:
                 log.warning("事实提取失败：LLM 返回无法解析为 JSON 数组")
                 return []
@@ -360,7 +331,7 @@ class ConsistencyService:
                 temperature=0.2,
                 json_mode=True,
             )
-            result = _extract_json_obj(response.content)
+            result = extract_json_obj(response.content)
             if result is not None:
                 return (
                     bool(result.get("is_contradiction", False)),

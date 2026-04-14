@@ -6,6 +6,16 @@ import json
 import re
 from typing import Any
 
+from src.novel.utils.json_extract import extract_json_array, extract_json_obj
+
+__all__ = [
+    "count_words",
+    "truncate_text",
+    "extract_json_from_llm",
+    "extract_json_obj",
+    "extract_json_array",
+]
+
 
 def count_words(text: str) -> int:
     """统计中文文本字数。

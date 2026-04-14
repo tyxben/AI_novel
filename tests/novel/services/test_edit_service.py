@@ -475,19 +475,35 @@ class TestGetHistory:
 
         assert len(result) == 2
         assert result[0]["change_id"] == "log_1"
-        mock_file_manager.list_change_logs.assert_called_once_with("novel_001", 20)
+        mock_file_manager.list_change_logs.assert_called_once_with(
+            "novel_001", 20, change_type=None
+        )
 
     def test_get_history_with_limit(self, service, mock_file_manager):
         """带 limit 参数查询。"""
         service.get_history("workspace/novels/novel_001", limit=5)
 
-        mock_file_manager.list_change_logs.assert_called_once_with("novel_001", 5)
+        mock_file_manager.list_change_logs.assert_called_once_with(
+            "novel_001", 5, change_type=None
+        )
 
     def test_get_history_extracts_novel_id(self, service, mock_file_manager):
         """从绝对路径提取 novel_id。"""
         service.get_history("/home/user/workspace/novels/novel_xyz")
 
-        mock_file_manager.list_change_logs.assert_called_once_with("novel_xyz", 20)
+        mock_file_manager.list_change_logs.assert_called_once_with(
+            "novel_xyz", 20, change_type=None
+        )
+
+    def test_get_history_with_change_type(self, service, mock_file_manager):
+        """change_type 必须透传到 file_manager，以便在截断前过滤。"""
+        service.get_history(
+            "workspace/novels/novel_001", limit=10, change_type="add_character"
+        )
+
+        mock_file_manager.list_change_logs.assert_called_once_with(
+            "novel_001", 10, change_type="add_character"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +609,7 @@ class TestEditResult:
         assert r.effective_from_chapter is None
         assert r.reasoning == ""
         assert r.error is None
+        assert r.impact_report is None
 
     def test_all_fields(self):
         """所有字段赋值正确。"""
@@ -607,7 +624,226 @@ class TestEditResult:
             effective_from_chapter=10,
             reasoning="test reason",
             error="something broke",
+            impact_report={"severity": "high"},
         )
         assert r.change_id == "id_1"
         assert r.status == "failed"
         assert r.error == "something broke"
+        assert r.impact_report == {"severity": "high"}
+
+
+# ---------------------------------------------------------------------------
+# ImpactAnalyzer 集成
+# ---------------------------------------------------------------------------
+
+class TestImpactReportIntegration:
+    """ImpactAnalyzer 集成到 edit() 的行为测试。"""
+
+    def test_dry_run_returns_impact_report(self, service, mock_file_manager):
+        """dry_run 返回非空 impact_report。"""
+        change = {
+            "change_type": "update",
+            "entity_type": "character",
+            "entity_id": "char_001",
+            "data": {"personality": {"traits": ["冷酷"]}},
+        }
+
+        result = service.edit(
+            project_path="workspace/novels/novel_001",
+            structured_change=change,
+            dry_run=True,
+        )
+
+        assert result.status == "preview"
+        assert result.impact_report is not None
+        # ImpactResult.model_dump() 的结构字段
+        assert "severity" in result.impact_report
+        assert "affected_chapters" in result.impact_report
+        assert "conflicts" in result.impact_report
+        assert "warnings" in result.impact_report
+        assert "summary" in result.impact_report
+
+    def test_success_returns_impact_report(self, service, mock_file_manager):
+        """非 dry_run（写入）也返回 impact_report。"""
+        change = {
+            "change_type": "update",
+            "entity_type": "character",
+            "entity_id": "char_001",
+            "data": {"age": 19},
+        }
+
+        result = service.edit(
+            project_path="workspace/novels/novel_001",
+            structured_change=change,
+        )
+
+        assert result.status == "success"
+        assert result.impact_report is not None
+        assert "severity" in result.impact_report
+
+    def test_impact_analyzer_failure_does_not_block_edit(
+        self, service, mock_file_manager
+    ):
+        """ImpactAnalyzer 抛异常时 edit 照常完成，impact_report 为 None。"""
+        analyzer_mock = MagicMock()
+        analyzer_mock.analyze.side_effect = RuntimeError("analyzer crashed")
+        service._impact_analyzer = analyzer_mock
+
+        change = {
+            "change_type": "update",
+            "entity_type": "character",
+            "entity_id": "char_001",
+            "data": {"age": 20},
+        }
+
+        result = service.edit(
+            project_path="workspace/novels/novel_001",
+            structured_change=change,
+        )
+
+        # 编辑依然成功
+        assert result.status == "success"
+        # impact_report 静默失败 -> None
+        assert result.impact_report is None
+
+    def test_impact_analyzer_failure_in_dry_run(
+        self, service, mock_file_manager
+    ):
+        """dry_run 路径下 ImpactAnalyzer 失败也不阻塞 preview。"""
+        analyzer_mock = MagicMock()
+        analyzer_mock.analyze.side_effect = ValueError("bad request")
+        service._impact_analyzer = analyzer_mock
+
+        change = {
+            "change_type": "update",
+            "entity_type": "character",
+            "entity_id": "char_001",
+            "data": {"age": 20},
+        }
+
+        result = service.edit(
+            project_path="workspace/novels/novel_001",
+            structured_change=change,
+            dry_run=True,
+        )
+
+        assert result.status == "preview"
+        assert result.impact_report is None
+
+    def test_unsupported_change_type_returns_none_impact(
+        self, service, mock_file_manager
+    ):
+        """不支持的 (change_type, entity_type) 映射返回 None 不抛错。"""
+        # 注入一个虚拟的 entity_type "unknown" 走编辑器 -> 这会被上层拒绝
+        # 这里直接测 _build_change_request
+        from src.novel.services.edit_service import NovelEditService
+
+        svc = NovelEditService(workspace="workspace")
+        request = svc._build_change_request(
+            {"change_type": "wtf", "entity_type": "character"}
+        )
+        assert request is None
+
+        request2 = svc._build_change_request(
+            {"change_type": "update", "entity_type": "unknown_type"}
+        )
+        assert request2 is None
+
+    def test_build_change_request_maps_types(self):
+        """验证 change_type + entity_type 映射规则。"""
+        from src.novel.services.edit_service import NovelEditService
+
+        svc = NovelEditService(workspace="workspace")
+
+        # add character
+        req = svc._build_change_request({
+            "change_type": "add",
+            "entity_type": "character",
+            "entity_id": "c1",
+            "effective_from_chapter": 5,
+            "data": {"name": "李四"},
+        })
+        assert req is not None
+        assert req.change_type == "add_character"
+        assert req.entity_type == "character"
+        assert req.entity_id == "c1"
+        assert req.effective_from_chapter == 5
+        assert req.details == {"name": "李四"}
+
+        # world_setting -> world
+        req2 = svc._build_change_request({
+            "change_type": "update",
+            "entity_type": "world_setting",
+            "data": {"era": "新时代"},
+        })
+        assert req2 is not None
+        assert req2.change_type == "modify_world"
+        assert req2.entity_type == "world"
+
+        # delete character
+        req3 = svc._build_change_request({
+            "change_type": "delete",
+            "entity_type": "character",
+            "entity_id": "c2",
+        })
+        assert req3 is not None
+        assert req3.change_type == "delete_character"
+
+    def test_build_change_request_clamps_effective_from(self):
+        """effective_from_chapter <= 0 或 None 被 clamp 到 1。"""
+        from src.novel.services.edit_service import NovelEditService
+
+        svc = NovelEditService(workspace="workspace")
+
+        req_none = svc._build_change_request({
+            "change_type": "add",
+            "entity_type": "character",
+            "effective_from_chapter": None,
+        })
+        assert req_none is not None
+        assert req_none.effective_from_chapter == 1
+
+        req_zero = svc._build_change_request({
+            "change_type": "add",
+            "entity_type": "character",
+            "effective_from_chapter": 0,
+        })
+        assert req_zero is not None
+        assert req_zero.effective_from_chapter == 1
+
+    def test_custom_impact_analyzer_injection(self, mock_file_manager):
+        """构造函数可注入自定义 ImpactAnalyzer。"""
+        custom_analyzer = MagicMock()
+        custom_analyzer.analyze.return_value = MagicMock(
+            model_dump=MagicMock(return_value={
+                "affected_chapters": [1],
+                "severity": "critical",
+                "conflicts": ["custom"],
+                "warnings": [],
+                "summary": "custom result",
+            })
+        )
+
+        svc = NovelEditService(
+            workspace="workspace",
+            impact_analyzer=custom_analyzer,
+        )
+        svc.file_manager = mock_file_manager
+
+        change = {
+            "change_type": "update",
+            "entity_type": "character",
+            "entity_id": "char_001",
+            "data": {"age": 25},
+        }
+
+        result = svc.edit(
+            project_path="workspace/novels/novel_001",
+            structured_change=change,
+            dry_run=True,
+        )
+
+        assert result.impact_report is not None
+        assert result.impact_report["severity"] == "critical"
+        assert result.impact_report["summary"] == "custom result"
+        custom_analyzer.analyze.assert_called_once()

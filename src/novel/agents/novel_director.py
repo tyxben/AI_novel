@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import time
@@ -149,22 +148,11 @@ def _derive_title_from_outline_fields(
     return None
 
 
-def _extract_json_obj(text: str | None) -> dict | None:
-    """从 LLM 输出中稳健提取 JSON 对象。"""
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+from src.novel.utils.json_extract import extract_json_obj
+
+# Backward-compat alias — existing tests import ``_extract_json_obj`` from this
+# module. Canonical implementation lives in ``src.novel.utils.json_extract``.
+_extract_json_obj = extract_json_obj
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +283,7 @@ class NovelDirector:
                     json_mode=True,
                     max_tokens=8192,
                 )
-                outline_data = _extract_json_obj(response.content)
+                outline_data = extract_json_obj(response.content)
                 if outline_data is not None:
                     break
                 last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"
@@ -555,7 +543,7 @@ class NovelDirector:
                     json_mode=True,
                     max_tokens=8192,
                 )
-                result_data = _extract_json_obj(response.content)
+                result_data = extract_json_obj(response.content)
                 if result_data is not None:
                     break
                 last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"
@@ -687,7 +675,7 @@ class NovelDirector:
                 json_mode=True,
                 max_tokens=2048,
             )
-            data = _extract_json_obj(response.content)
+            data = extract_json_obj(response.content)
             if not data:
                 log.warning("里程碑生成 LLM 返回无效 JSON，使用空列表")
                 return []
@@ -907,7 +895,7 @@ class NovelDirector:
             )
             if not response or not response.content:
                 raise ValueError("LLM 返回空响应")
-            arc_data = _extract_json_obj(response.content)
+            arc_data = extract_json_obj(response.content)
         except Exception as exc:
             log.warning("弧线%d LLM 生成失败: %s，使用占位结构", arc_number, exc)
             arc_data = None

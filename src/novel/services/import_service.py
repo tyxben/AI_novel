@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import uuid
@@ -42,51 +41,30 @@ _NUMERIC_CHAPTER_RE = re.compile(
 
 
 # ---------------------------------------------------------------------------
-# JSON extraction helpers (local, matching project pattern)
+# JSON extraction helpers — canonical implementation in
+# ``src.novel.utils.json_extract``. Backward-compat aliases kept so existing
+# tests that import these private names keep working.
 # ---------------------------------------------------------------------------
 
 
+from src.novel.utils.json_extract import (
+    extract_json_array as _shared_extract_json_array,
+    extract_json_obj as _shared_extract_json_obj,
+)
+
+
 def _extract_json_obj(text: str | None) -> dict | None:
-    """Robustly extract a JSON object from LLM output."""
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start: end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+    """Deprecated: delegates to :func:`src.novel.utils.json_extract.extract_json_obj`."""
+    return _shared_extract_json_obj(text)
 
 
 def _extract_json_array(text: str | None) -> list | None:
-    """Robustly extract a JSON array from LLM output."""
-    if not text:
-        return None
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict) and "characters" in result:
-            return result["characters"]
-    except (json.JSONDecodeError, TypeError):
-        pass
-    obj = _extract_json_obj(text)
-    if obj and "characters" in obj:
-        return obj["characters"]
-    start = text.find("[")
-    end = text.rfind("]")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(text[start: end + 1])
-        except json.JSONDecodeError:
-            pass
-    return None
+    """Deprecated: delegates to :func:`src.novel.utils.json_extract.extract_json_array`.
+
+    Preserves the historical behaviour of unwrapping only ``{"characters": [...]}``
+    so existing callers observe identical results.
+    """
+    return _shared_extract_json_array(text, unwrap_keys=("characters",))
 
 
 # ---------------------------------------------------------------------------
@@ -259,9 +237,11 @@ class ImportService:
                     temperature=0.3,
                     json_mode=True,
                 )
-                result = _extract_json_array(response.content)
+                result = _shared_extract_json_array(
+                    response.content, unwrap_keys=("characters",)
+                )
                 if result is None:
-                    obj = _extract_json_obj(response.content)
+                    obj = _shared_extract_json_obj(response.content)
                     if obj and "characters" in obj:
                         result = obj["characters"]
                 if result and isinstance(result, list) and len(result) > 0:
@@ -313,7 +293,7 @@ class ImportService:
                     temperature=0.3,
                     json_mode=True,
                 )
-                result = _extract_json_obj(response.content)
+                result = _shared_extract_json_obj(response.content)
                 if result and "era" in result:
                     return result
             except Exception as e:
