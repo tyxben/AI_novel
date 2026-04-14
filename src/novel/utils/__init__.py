@@ -7,6 +7,12 @@ import re
 from typing import Any
 
 from src.novel.utils.json_extract import extract_json_array, extract_json_obj
+from src.novel.utils.setting_version import (
+    get_chapter_outline_at,
+    get_setting_at_chapter,
+    is_effective_at,
+    list_settings_at_chapter,
+)
 
 __all__ = [
     "count_words",
@@ -14,6 +20,10 @@ __all__ = [
     "extract_json_from_llm",
     "extract_json_obj",
     "extract_json_array",
+    "is_effective_at",
+    "get_setting_at_chapter",
+    "list_settings_at_chapter",
+    "get_chapter_outline_at",
 ]
 
 

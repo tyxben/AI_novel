@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -227,6 +228,208 @@ class NovelEditService:
                 error=str(exc),
             )
 
+    def batch_edit(
+        self,
+        project_path: str,
+        changes: list[dict],
+        dry_run: bool = False,
+        stop_on_failure: bool = False,
+    ) -> list[EditResult]:
+        """批量应用多条 structured_change。
+
+        每条 change 独立调用 ``edit()``，失败的条目不影响其他条目（除非
+        ``stop_on_failure=True``）。每次成功修改都会产生独立的备份 +
+        独立的 changelog 条目，保证回滚粒度。
+
+        Args:
+            project_path: 项目路径。
+            changes: 结构化变更列表，每项格式同 ``edit(structured_change=...)``。
+            dry_run: 若为 True，所有条目走预览路径，不写盘。
+            stop_on_failure: 若为 True，遇到首个 failed 立即停止后续条目。
+
+        Returns:
+            长度等于 len(changes) 的 EditResult 列表；若提前停止，剩余位
+            会被填充 status="skipped" 的占位 EditResult。
+        """
+        results: list[EditResult] = []
+        stopped = False
+
+        for i, change in enumerate(changes):
+            if stopped:
+                results.append(
+                    EditResult(
+                        change_id=str(uuid4()),
+                        status="skipped",
+                        change_type=change.get("change_type", ""),
+                        entity_type=change.get("entity_type", ""),
+                        entity_id=change.get("entity_id"),
+                        error="前序变更失败已中止批处理",
+                    )
+                )
+                continue
+
+            if not isinstance(change, dict):
+                results.append(
+                    EditResult(
+                        change_id=str(uuid4()),
+                        status="failed",
+                        change_type="",
+                        entity_type="",
+                        error=f"changes[{i}] 不是 dict",
+                    )
+                )
+                if stop_on_failure:
+                    stopped = True
+                continue
+
+            result = self.edit(
+                project_path=project_path,
+                structured_change=change,
+                effective_from_chapter=change.get("effective_from_chapter"),
+                dry_run=dry_run,
+            )
+            results.append(result)
+            if stop_on_failure and result.status == "failed":
+                stopped = True
+
+        return results
+
+    def rollback(
+        self,
+        project_path: str,
+        change_id: str,
+        force: bool = False,
+    ) -> EditResult:
+        """回滚指定变更，恢复实体到变更前状态。
+
+        支持的原变更类型：
+        - (add, character)      -> 从 characters 列表移除
+        - (update, character)   -> 替换为 old_value（完整快照）
+        - (delete, character)   -> 替换为 old_value（恢复软删除前）
+        - (add, outline)        -> 从 outline.chapters 移除该 chapter_number
+        - (update, outline)     -> 替换为 old_value（完整章节快照）
+        - (update, world_setting) -> 替换 world_setting 为 old_value
+
+        依赖检查：若存在后续针对同实体的变更且 ``force=False``，拒绝回滚。
+
+        回滚本身作为一条新变更（change_type="rollback"）写入日志，
+        其 ``reverted_change_id`` 字段指向被回滚的 change_id。
+        """
+        rollback_change_id = str(uuid4())
+        try:
+            novel_id = self._extract_novel_id(project_path)
+            novel_data = self.file_manager.load_novel(novel_id)
+            if novel_data is None:
+                return EditResult(
+                    change_id=rollback_change_id,
+                    status="failed",
+                    change_type="rollback",
+                    entity_type="",
+                    error=f"小说项目不存在: {novel_id}",
+                )
+
+            target = self._find_change_log(novel_id, change_id)
+            if target is None:
+                return EditResult(
+                    change_id=rollback_change_id,
+                    status="failed",
+                    change_type="rollback",
+                    entity_type="",
+                    error=f"变更不存在: {change_id}",
+                )
+
+            if target.get("change_type") == "rollback":
+                return EditResult(
+                    change_id=rollback_change_id,
+                    status="failed",
+                    change_type="rollback",
+                    entity_type=target.get("entity_type", ""),
+                    error="不支持回滚 rollback 变更本身",
+                )
+
+            # 依赖检查
+            dependents = self._find_dependent_changes(novel_id, target)
+            if dependents and not force:
+                dep_ids = [d.get("change_id", "?") for d in dependents]
+                return EditResult(
+                    change_id=rollback_change_id,
+                    status="failed",
+                    change_type="rollback",
+                    entity_type=target.get("entity_type", ""),
+                    entity_id=target.get("entity_id"),
+                    error=(
+                        f"存在 {len(dependents)} 个后续变更依赖此实体: "
+                        f"{', '.join(dep_ids[:5])}；请先回滚它们或使用 force=True"
+                    ),
+                )
+
+            # 备份
+            self.file_manager.save_backup(novel_id)
+
+            # 反向应用
+            self._apply_reverse(novel_data, target)
+
+            # 保存
+            self.file_manager.save_novel(novel_id, novel_data)
+
+            old_val = target.get("old_value")
+            new_val = target.get("new_value")
+
+            entry = {
+                "change_id": rollback_change_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "change_type": "rollback",
+                "entity_type": target.get("entity_type", ""),
+                "entity_id": target.get("entity_id"),
+                "reverted_change_id": change_id,
+                "instruction": None,
+                "effective_from_chapter": target.get("effective_from_chapter"),
+                # 回滚前的状态即目标变更的新值；回滚后即旧值
+                "old_value": new_val,
+                "new_value": old_val,
+            }
+            self.file_manager.save_change_log(novel_id, entry)
+
+            if self._changelog_manager is not None:
+                try:
+                    self._changelog_manager.record(
+                        novel_id=novel_id,
+                        change_type="rollback",
+                        entity_type=target.get("entity_type", ""),
+                        description=f"回滚变更 {change_id}",
+                        old_value=new_val,
+                        new_value=old_val,
+                        entity_id=target.get("entity_id"),
+                        effective_from_chapter=(
+                            target.get("effective_from_chapter") or 1
+                        ),
+                        author="user",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("ChangeLogManager 记录回滚失败: %s", exc)
+
+            return EditResult(
+                change_id=rollback_change_id,
+                status="success",
+                change_type="rollback",
+                entity_type=target.get("entity_type", ""),
+                entity_id=target.get("entity_id"),
+                old_value=new_val,
+                new_value=old_val,
+                effective_from_chapter=target.get("effective_from_chapter"),
+                reasoning=f"回滚变更 {change_id}",
+            )
+
+        except Exception as exc:
+            log.exception("回滚失败: %s", exc)
+            return EditResult(
+                change_id=rollback_change_id,
+                status="failed",
+                change_type="rollback",
+                entity_type="",
+                error=str(exc),
+            )
+
     def get_history(
         self,
         project_path: str,
@@ -365,6 +568,151 @@ class NovelEditService:
             effective_from_chapter=effective_from,
             details=details,
         )
+
+    # ------------------------------------------------------------------
+    # Rollback helpers
+    # ------------------------------------------------------------------
+
+    def _find_change_log(
+        self, novel_id: str, change_id: str
+    ) -> dict[str, Any] | None:
+        """在 changelogs/ 中查找指定 change_id 的日志条目。"""
+        logs = self.file_manager.list_change_logs(novel_id, limit=10_000)
+        for entry in logs:
+            if entry.get("change_id") == change_id:
+                return entry
+        return None
+
+    def _find_dependent_changes(
+        self, novel_id: str, target: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """查找在 target 之后、针对同一实体的变更。"""
+        logs = self.file_manager.list_change_logs(novel_id, limit=10_000)
+        target_id = target.get("change_id")
+        target_ts = target.get("timestamp", "")
+        entity_type = target.get("entity_type")
+
+        # 决定如何识别"同一实体"
+        target_entity_id = target.get("entity_id")
+        target_chapter = self._extract_chapter_number(target)
+
+        deps: list[dict[str, Any]] = []
+        for entry in logs:
+            if entry.get("change_id") == target_id:
+                continue
+            if entry.get("timestamp", "") <= target_ts:
+                continue
+            if entry.get("entity_type") != entity_type:
+                continue
+
+            # 匹配规则
+            if entity_type == "character":
+                if target_entity_id and (
+                    entry.get("entity_id") == target_entity_id
+                ):
+                    deps.append(entry)
+            elif entity_type == "outline":
+                ch = self._extract_chapter_number(entry)
+                if target_chapter is not None and ch == target_chapter:
+                    deps.append(entry)
+            elif entity_type == "world_setting":
+                deps.append(entry)
+
+        return deps
+
+    @staticmethod
+    def _extract_chapter_number(entry: dict[str, Any]) -> int | None:
+        """从日志条目中抽取 chapter_number（outline 用）。"""
+        for key in ("new_value", "old_value"):
+            val = entry.get(key)
+            if isinstance(val, dict) and "chapter_number" in val:
+                return val["chapter_number"]
+        return None
+
+    def _apply_reverse(
+        self, novel_data: dict, target: dict[str, Any]
+    ) -> None:
+        """根据 target 变更记录反向修改 novel_data。
+
+        直接操作实体列表/字段，不经过 editor.apply() 的 Pydantic 校验，
+        因为 old_value 已是之前校验过的完整快照。
+        """
+        change_type = target.get("change_type", "")
+        entity_type = target.get("entity_type", "")
+        old_val = target.get("old_value")
+        new_val = target.get("new_value")
+
+        if entity_type == "character":
+            chars = novel_data.setdefault("characters", [])
+            if change_type == "add":
+                # 移除 new_val 对应的 character
+                if not isinstance(new_val, dict):
+                    raise ValueError("add_character 日志缺少 new_value")
+                char_id = new_val.get("character_id")
+                novel_data["characters"] = [
+                    c for c in chars if c.get("character_id") != char_id
+                ]
+            elif change_type in ("update", "delete"):
+                if not isinstance(old_val, dict):
+                    raise ValueError(
+                        f"{change_type}_character 日志缺少 old_value"
+                    )
+                char_id = old_val.get("character_id")
+                restored = copy.deepcopy(old_val)
+                replaced = False
+                for i, c in enumerate(chars):
+                    if c.get("character_id") == char_id:
+                        chars[i] = restored
+                        replaced = True
+                        break
+                if not replaced:
+                    # 目标角色已不存在（可能被别的逻辑移除），直接追加恢复
+                    chars.append(restored)
+            else:
+                raise ValueError(
+                    f"不支持回滚 character 变更类型: {change_type}"
+                )
+
+        elif entity_type == "outline":
+            outline = novel_data.setdefault("outline", {})
+            chapters = outline.setdefault("chapters", [])
+            if change_type == "add":
+                if not isinstance(new_val, dict):
+                    raise ValueError("add_outline 日志缺少 new_value")
+                ch_num = new_val.get("chapter_number")
+                outline["chapters"] = [
+                    c for c in chapters if c.get("chapter_number") != ch_num
+                ]
+            elif change_type == "update":
+                if not isinstance(old_val, dict):
+                    raise ValueError("update_outline 日志缺少 old_value")
+                ch_num = old_val.get("chapter_number")
+                restored = copy.deepcopy(old_val)
+                replaced = False
+                for i, c in enumerate(chapters):
+                    if c.get("chapter_number") == ch_num:
+                        chapters[i] = restored
+                        replaced = True
+                        break
+                if not replaced:
+                    chapters.append(restored)
+                    chapters.sort(key=lambda c: c.get("chapter_number", 0))
+            else:
+                raise ValueError(
+                    f"不支持回滚 outline 变更类型: {change_type}"
+                )
+
+        elif entity_type == "world_setting":
+            if change_type != "update":
+                raise ValueError(
+                    f"不支持回滚 world_setting 变更类型: {change_type}"
+                )
+            if not isinstance(old_val, dict):
+                raise ValueError("update_world_setting 日志缺少 old_value")
+            novel_data["world_setting"] = copy.deepcopy(old_val)
+
+        else:
+            raise ValueError(f"不支持回滚的实体类型: {entity_type}")
 
     @staticmethod
     def _resolve_effective_from(

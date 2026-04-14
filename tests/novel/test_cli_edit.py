@@ -361,3 +361,87 @@ class TestNovelHistory:
         runner = CliRunner()
         result = runner.invoke(cli, ["novel", "history", str(project)])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# novel rollback
+# ---------------------------------------------------------------------------
+
+
+class TestNovelRollback:
+    """Tests for `main.py novel rollback`."""
+
+    @patch("src.novel.services.edit_service.NovelEditService")
+    def test_rollback_success(self, mock_svc_cls, tmp_path):
+        project = _make_project(tmp_path)
+        mock_svc = MagicMock()
+        mock_svc.rollback.return_value = FakeEditResult(
+            change_id="rb-xyz",
+            status="success",
+            change_type="rollback",
+            entity_type="character",
+            entity_id="char_001",
+        )
+        mock_svc_cls.return_value = mock_svc
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "novel", "rollback", str(project), "abc-123",
+        ])
+
+        assert result.exit_code == 0
+        assert "回滚成功" in result.output
+        assert "rb-xyz" in result.output
+        assert "abc-123" in result.output
+        call_kwargs = mock_svc.rollback.call_args.kwargs
+        assert call_kwargs["change_id"] == "abc-123"
+        assert call_kwargs["force"] is False
+
+    @patch("src.novel.services.edit_service.NovelEditService")
+    def test_rollback_with_force(self, mock_svc_cls, tmp_path):
+        project = _make_project(tmp_path)
+        mock_svc = MagicMock()
+        mock_svc.rollback.return_value = FakeEditResult(
+            change_id="rb-forced",
+            status="success",
+            change_type="rollback",
+            entity_type="outline",
+        )
+        mock_svc_cls.return_value = mock_svc
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "novel", "rollback", str(project), "abc-123", "--force",
+        ])
+
+        assert result.exit_code == 0
+        assert mock_svc.rollback.call_args.kwargs["force"] is True
+
+    @patch("src.novel.services.edit_service.NovelEditService")
+    def test_rollback_failed_exits_nonzero(self, mock_svc_cls, tmp_path):
+        project = _make_project(tmp_path)
+        mock_svc = MagicMock()
+        mock_svc.rollback.return_value = FakeEditResult(
+            change_id="rb-xyz",
+            status="failed",
+            change_type="rollback",
+            entity_type="",
+            error="变更不存在: ghost",
+        )
+        mock_svc_cls.return_value = mock_svc
+
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "novel", "rollback", str(project), "ghost",
+        ])
+
+        assert result.exit_code != 0
+        assert "回滚失败" in result.output
+        assert "ghost" in result.output
+
+    def test_rollback_nonexistent_project(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "novel", "rollback", str(tmp_path / "nope"), "abc",
+        ])
+        assert result.exit_code != 0

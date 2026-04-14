@@ -701,6 +701,53 @@ def novel_history(project_path: str, limit: int,
         raise click.Abort()
 
 
+@novel.command("rollback")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.argument("change_id")
+@click.option("--force", "-f", is_flag=True,
+              help="忽略后续依赖变更强制回滚")
+def novel_rollback(project_path: str, change_id: str, force: bool):
+    """回滚指定变更 ID 的编辑操作"""
+    try:
+        from src.novel.services.edit_service import NovelEditService
+
+        workspace = str(Path(project_path).parent.parent)
+        svc = NovelEditService(workspace=workspace)
+        result = svc.rollback(
+            project_path=project_path,
+            change_id=change_id,
+            force=force,
+        )
+
+        status = _edit_result_field(result, "status", "")
+        new_change_id = _edit_result_field(result, "change_id", "")
+        entity_type = _edit_result_field(result, "entity_type", "")
+        entity_id = _edit_result_field(result, "entity_id")
+        error = _edit_result_field(result, "error")
+
+        if status == "failed":
+            console.print("\n[bold red]❌ 回滚失败[/]")
+            if error:
+                console.print(f"  错误: {error}")
+            raise click.Abort()
+
+        console.print("\n[bold green]✅ 回滚成功[/]")
+        table = Table(title="回滚结果")
+        table.add_column("项目", style="cyan")
+        table.add_column("值", style="green")
+        table.add_row("新变更 ID", str(new_change_id))
+        table.add_row("被回滚的 ID", change_id)
+        table.add_row("实体类型", str(entity_type))
+        if entity_id:
+            table.add_row("实体 ID", str(entity_id))
+        console.print(table)
+    except click.Abort:
+        raise
+    except Exception as e:
+        log.error("回滚失败: %s", e)
+        raise click.Abort()
+
+
 # ---------------------------------------------------------------------------
 # ppt 命令组 - AI PPT 生成
 # ---------------------------------------------------------------------------
