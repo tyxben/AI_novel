@@ -222,6 +222,7 @@ class Writer:
         messages: list[dict],
         temperature: float,
         max_tokens: int,
+        soft_max_chars: int | None = None,
     ) -> str:
         """如果 LLM 回复因 max_tokens 被截断，自动续写直到完成。
 
@@ -230,6 +231,9 @@ class Writer:
             messages: 原始消息列表
             temperature: 生成温度
             max_tokens: 单次最大 token 数
+            soft_max_chars: 软上限（可选）。一旦当前文本已超过此长度，
+                即使 finish_reason=length 也不再续写，避免无限扩张。
+                不做硬截断 —— 当前已写的内容全部保留。
 
         Returns:
             完整的文本（可能经过多次续写拼接）
@@ -239,6 +243,13 @@ class Writer:
         text = response.content.strip()
 
         if response.finish_reason != "length":
+            return text
+
+        if soft_max_chars is not None and len(text) >= soft_max_chars:
+            log.warning(
+                "LLM 已写 %d 字（≥软上限 %d），不再续写",
+                len(text), soft_max_chars,
+            )
             return text
 
         log.warning(
@@ -277,6 +288,14 @@ class Writer:
 
             if cont_response.finish_reason != "length":
                 break  # 正常结束
+
+            # 在续写循环中也遵守软上限：已够长则停止而非继续扩张
+            if soft_max_chars is not None and len(text) >= soft_max_chars:
+                log.warning(
+                    "续写后已达 %d 字（≥软上限 %d），停止扩张",
+                    len(text), soft_max_chars,
+                )
+                break
 
         return text
 
@@ -601,11 +620,15 @@ class Writer:
         ]
 
         # max_tokens: 中文1字 ≈ 1.5~2 token，给足空间让 LLM 完整收束
-        # clamp to 8192 to avoid DeepSeek 400 error
-        max_tokens = min(8192, max(6144, target_words * 3))
+        # max_tokens: 给足空间让 LLM 完整收束；soft_max_chars 防止续写无限扩张
+        # max_tokens: 按目标字数估算 token 预算（中文 1 字 ≈ 1.5 token）
+        # 给 1.5x headroom 让 LLM 能收束，但不留无限扩张空间；
+        # 硬下限 1536 token 保证极短 target 也能写完一个段落。
+        max_tokens = min(8192, max(1536, int(target_words * 2.2)))
         response = self.llm.chat(messages, temperature=0.85, max_tokens=max_tokens)
         scene_text = self._continue_if_truncated(
             response, messages, temperature=0.85, max_tokens=max_tokens,
+            soft_max_chars=int(target_words * 1.5),
         )
 
         if len(scene_text) > target_words * 2:
@@ -908,7 +931,10 @@ class Writer:
             )
 
         # clamp to 8192 to avoid DeepSeek 400 error
-        max_tokens = min(8192, max(6144, target_words * 3))
+        # max_tokens: 按目标字数估算 token 预算（中文 1 字 ≈ 1.5 token）
+        # 给 1.5x headroom 让 LLM 能收束，但不留无限扩张空间；
+        # 硬下限 1536 token 保证极短 target 也能写完一个段落。
+        max_tokens = min(8192, max(1536, int(target_words * 2.2)))
         rewrite_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -921,6 +947,7 @@ class Writer:
 
         rewritten = self._continue_if_truncated(
             response, rewrite_messages, temperature=0.8, max_tokens=max_tokens,
+            soft_max_chars=int(target_words * 1.5),
         )
 
         if len(rewritten) > target_words * 2:
@@ -1057,7 +1084,10 @@ class Writer:
         )
 
         # clamp to 8192 to avoid DeepSeek 400 error
-        max_tokens = min(8192, max(6144, target_words * 3))
+        # max_tokens: 按目标字数估算 token 预算（中文 1 字 ≈ 1.5 token）
+        # 给 1.5x headroom 让 LLM 能收束，但不留无限扩张空间；
+        # 硬下限 1536 token 保证极短 target 也能写完一个段落。
+        max_tokens = min(8192, max(1536, int(target_words * 2.2)))
         polish_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -1070,6 +1100,7 @@ class Writer:
 
         polished = self._continue_if_truncated(
             response, polish_messages, temperature=0.7, max_tokens=max_tokens,
+            soft_max_chars=int(target_words * 1.5),
         )
 
         if len(polished) > target_words * 2:

@@ -343,9 +343,9 @@ class TestPolishChapterContinuation:
 # ---------------------------------------------------------------------------
 
 
-class TestMaxTokensIncreased:
-    def test_scene_max_tokens(self):
-        """generate_scene should use max(6144, target_words * 3)."""
+class TestMaxTokensProportional:
+    def test_scene_max_tokens_small_target(self):
+        """generate_scene uses min(8192, max(1536, target_words * 2.2))."""
         response = _make_response("正文。", "stop")
         writer = _make_writer([response])
 
@@ -359,16 +359,16 @@ class TestMaxTokensIncreased:
         )
 
         call_kwargs = writer.llm.chat.call_args
-        # max_tokens should be max(6144, 800*3) = 6144
-        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 6144
+        # max_tokens = min(8192, max(1536, 800 * 2.2)) = max(1536, 1760) = 1760
+        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 1760
 
-    def test_scene_max_tokens_large_target(self):
-        """For large target_words, max_tokens = target_words * 3."""
+    def test_scene_max_tokens_clamped_to_ceiling(self):
+        """For very large target_words, max_tokens is clamped to 8192."""
         response = _make_response("正文。", "stop")
         writer = _make_writer([response])
 
         writer.generate_scene(
-            scene_plan={"scene_number": 1, "target_words": 3000, "location": "城市", "time": "日"},
+            scene_plan={"scene_number": 1, "target_words": 5000, "location": "城市", "time": "日"},
             chapter_outline=_minimal_chapter_outline(),
             characters=[_minimal_character()],
             world_setting=_minimal_world(),
@@ -377,5 +377,23 @@ class TestMaxTokensIncreased:
         )
 
         call_kwargs = writer.llm.chat.call_args
-        # max_tokens should be min(8192, max(6144, 3000*3)) = 8192 (clamped)
+        # max_tokens = min(8192, max(1536, 5000 * 2.2)) = min(8192, 11000) = 8192
         assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 8192
+
+    def test_scene_max_tokens_floor_applied(self):
+        """tiny target_words hits the 1536 floor."""
+        response = _make_response("正文。", "stop")
+        writer = _make_writer([response])
+
+        writer.generate_scene(
+            scene_plan={"scene_number": 1, "target_words": 300, "location": "城市", "time": "日"},
+            chapter_outline=_minimal_chapter_outline(),
+            characters=[_minimal_character()],
+            world_setting=_minimal_world(),
+            context="",
+            style_name="webnovel.shuangwen",
+        )
+
+        call_kwargs = writer.llm.chat.call_args
+        # max_tokens = min(8192, max(1536, 300 * 2.2)) = max(1536, 660) = 1536
+        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 1536

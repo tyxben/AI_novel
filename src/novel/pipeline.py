@@ -765,14 +765,17 @@ class NovelPipeline:
         if progress_callback:
             progress_callback(1.0, "项目创建完成!")
 
+        errors = state.get("errors", [])
         return {
+            "status": "partial" if errors else "success",
             "novel_id": novel_id,
-            "workspace": project_path,
+            "project_path": project_path,
+            "workspace": project_path,  # alias for compat
             "outline": state.get("outline"),
             "characters": state.get("characters", []),
             "world_setting": state.get("world_setting"),
             "total_chapters": state.get("total_chapters", 0),
-            "errors": state.get("errors", []),
+            "errors": errors,
             "author_name": author_name,
             "target_audience": target_audience,
             "protagonist_names": protagonist_names,
@@ -1670,10 +1673,13 @@ class NovelPipeline:
                 try:
                     from src.novel.services.dedup_dialogue import (
                         strip_intra_chapter_dialogue_repeats,
+                        strip_repeated_paragraph_blocks,
                     )
                     chapter_text = strip_intra_chapter_dialogue_repeats(chapter_text)
+                    # 段落整块重复（章节收束拼接 bug 导致的"章末复读"）
+                    chapter_text = strip_repeated_paragraph_blocks(chapter_text)
                 except Exception as exc:
-                    log.warning("对白复读去重失败 (非关键): %s", exc)
+                    log.warning("章内去重失败 (非关键): %s", exc)
 
                 ch_data = self._build_chapter_record(
                     state=state,
@@ -1937,11 +1943,21 @@ class NovelPipeline:
         if progress_callback:
             progress_callback(1.0, f"章节生成完成 ({len(chapters_generated)}章)")
 
+        errors = state.get("errors", [])
+        if errors:
+            status = "partial"
+        elif chapters_generated:
+            status = "success"
+        else:
+            status = "noop"
         result = {
+            "status": status,
             "novel_id": novel_id,
+            "project_path": str(self._novel_dir(novel_id)),
             "chapters_generated": chapters_generated,
+            "chapters_written": chapters_generated,  # alias
             "total_generated": len(chapters_generated),
-            "errors": state.get("errors", []),
+            "errors": errors,
         }
 
         # --- Narrative Control: include debt statistics ---
@@ -3739,6 +3755,9 @@ class NovelPipeline:
             if numeric:
                 quality_score = sum(numeric) / len(numeric)
 
+        scenes_raw = state.get("current_scenes")
+        scenes = scenes_raw if isinstance(scenes_raw, list) else []
+
         return {
             "chapter_number": ch_num,
             "title": ch_title,
@@ -3751,6 +3770,7 @@ class NovelPipeline:
             "rule_passed": rule_check.get("passed", True),
             "rule_checked": bool(rule_check),
             "scored_by_llm": bool(scores),
+            "scenes": scenes,
         }
 
     @staticmethod

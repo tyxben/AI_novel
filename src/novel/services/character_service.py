@@ -318,6 +318,7 @@ class CharacterService:
             gender=gender,
             age=age,
             occupation=occupation,
+            role=data.get("role") or fallback_role or "配角",
             appearance=appearance,
             personality=personality,
             character_arc=character_arc,

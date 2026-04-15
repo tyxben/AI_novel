@@ -713,7 +713,7 @@ class NovelDirector:
 
     def generate_story_arcs(
         self,
-        volume_outline: VolumeOutline,
+        volume_outline: VolumeOutline | dict,
         chapter_outlines: list[ChapterOutline | dict],
         genre: str,
     ) -> list[dict]:
@@ -731,11 +731,26 @@ class NovelDirector:
             list[dict]: StoryUnit 兼容字段的 dict 列表。如果 LLM 调用
             失败，返回基本的占位弧线结构。
         """
-        chapters = volume_outline.chapters
+        if isinstance(volume_outline, dict):
+            raw_chapters = volume_outline.get("chapters") or []
+            # 顶层 Outline.chapters 是 list[ChapterOutline]，而 VolumeOutline.chapters 是 list[int]
+            if raw_chapters and isinstance(raw_chapters[0], dict):
+                chapters = [
+                    c.get("chapter_number")
+                    for c in raw_chapters
+                    if c.get("chapter_number") is not None
+                ]
+            else:
+                chapters = list(raw_chapters)
+            volume_id = volume_outline.get("volume_number", 1)
+            core_conflict = volume_outline.get("core_conflict", "")
+        else:
+            chapters = volume_outline.chapters
+            volume_id = volume_outline.volume_number
+            core_conflict = getattr(volume_outline, "core_conflict", "")
+
         if not chapters:
             return []
-
-        volume_id = volume_outline.volume_number
 
         # 确定弧线数量：目标每弧线约 5 章
         arc_count = max(1, math.ceil(len(chapters) / 5))
@@ -770,6 +785,8 @@ class NovelDirector:
                 arc_number=i + 1,
                 arc_id=arc_id,
                 genre=genre,
+                volume_id=volume_id,
+                core_conflict=core_conflict,
             )
             arcs.append(arc_data)
 
@@ -826,12 +843,14 @@ class NovelDirector:
 
     def _generate_single_arc(
         self,
-        volume_outline: VolumeOutline,
+        volume_outline: VolumeOutline | dict,
         arc_chapters: list[int],
         arc_chapter_outlines: list[dict],
         arc_number: int,
         arc_id: str,
         genre: str,
+        volume_id: int | None = None,
+        core_conflict: str | None = None,
     ) -> dict:
         """通过 LLM 生成单个弧线的叙事结构。
 
@@ -861,10 +880,24 @@ class NovelDirector:
         escalation_ch = arc_chapters[min(escalation_idx, len(arc_chapters) - 1)]
         turning_ch = arc_chapters[min(turning_idx, len(arc_chapters) - 1)]
 
-        prompt = f"""请为小说的第{volume_outline.volume_number}卷第{arc_number}段叙事弧线生成结构。
+        # 兼容 dict / 对象 volume_outline
+        if volume_id is None:
+            volume_id = (
+                volume_outline.get("volume_number", 1)
+                if isinstance(volume_outline, dict)
+                else volume_outline.volume_number
+            )
+        if core_conflict is None:
+            core_conflict = (
+                volume_outline.get("core_conflict", "")
+                if isinstance(volume_outline, dict)
+                else getattr(volume_outline, "core_conflict", "")
+            )
+
+        prompt = f"""请为小说的第{volume_id}卷第{arc_number}段叙事弧线生成结构。
 
 题材：{genre}
-卷核心矛盾：{volume_outline.core_conflict}
+卷核心矛盾：{core_conflict}
 本弧线章节（第{arc_chapters[0]}-{arc_chapters[-1]}章）：
 {chapters_text}
 
@@ -905,7 +938,7 @@ class NovelDirector:
 
         return {
             "arc_id": arc_id,
-            "volume_id": volume_outline.volume_number,
+            "volume_id": volume_id,
             "name": arc_data.get("name", f"第{arc_number}段"),
             "chapters": arc_chapters,
             "phase": "setup",

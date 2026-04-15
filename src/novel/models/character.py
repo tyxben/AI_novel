@@ -101,6 +101,9 @@ class CharacterProfile(BaseModel):
     gender: Literal["男", "女", "其他"] = Field(..., description="性别")
     age: int = Field(..., ge=0, le=200)
     occupation: str = Field(..., min_length=1)
+    role: str = Field(
+        "配角", description="角色类型：主角/反派/配角/导师/爱情线等"
+    )
     status: Literal["active", "retired", "deceased", "absent"] = Field(
         "active", description="角色状态"
     )

@@ -284,3 +284,107 @@ def strip_intra_chapter_dialogue_repeats(text: str) -> str:
 
     kept = [paragraphs[i] for i in range(n) if not drop[i]]
     return "\n\n".join(kept)
+
+
+# ---------------------------------------------------------------------------
+# Paragraph-level block duplicate detection (narrative + dialogue)
+# ---------------------------------------------------------------------------
+
+_MIN_BLOCK_PARA_LEN = 8  # 仅对足够长的段落判重，避免误伤短感叹句
+_MAX_BLOCK_SIZE = 4       # 连续 1-4 段为一组进行判重
+_MAX_BLOCK_GAP = 3        # 两组之间最多隔几段（支持"隔了一小段又复读"）
+
+
+def strip_repeated_paragraph_blocks(text: str) -> str:
+    """移除章节中相邻或近邻的**段落整块**逐字重复。
+
+    常见形态（实测来自 Writer 收束阶段的拼接 bug）::
+
+        <narrative A>
+        <narrative B>
+
+        <narrative A>   <- 整段照搬
+        <narrative B>   <- 整段照搬
+        <narrative C>
+
+    会被清理为::
+
+        <narrative A>
+        <narrative B>
+        <narrative C>
+
+    设计：
+    - 仅处理**连续 1-4 段**的整块重复（norm 后完全相等）
+    - 段落长度 >= _MIN_BLOCK_PARA_LEN 中文字符才参与判重，短句免检
+    - 两组之间允许夹 0-3 段不重复内容（_MAX_BLOCK_GAP）
+    - 保留首次出现，删除后续的那一组
+    - 幂等：重复运行无副作用
+    - 纯本地逻辑，无 LLM
+    """
+    if not text or not text.strip():
+        return text
+
+    paragraphs = re.split(r"\n\s*\n", text)
+    n = len(paragraphs)
+    if n < 2:
+        return text
+
+    norm = [_normalize(p) for p in paragraphs]
+    eligible = [
+        _count_chinese_chars(p) >= _MIN_BLOCK_PARA_LEN for p in paragraphs
+    ]
+    drop = [False] * n
+
+    removed_positions: list[int] = []
+
+    # 从大到小尝试块长，优先剥离较长的整块以避免部分匹配干扰。
+    for block_size in range(_MAX_BLOCK_SIZE, 0, -1):
+        i = 0
+        while i + block_size <= n:
+            # 当前块必须全部 eligible 且都未被 drop
+            if any(drop[i + k] or not eligible[i + k] for k in range(block_size)):
+                i += 1
+                continue
+
+            current_norms = tuple(norm[i + k] for k in range(block_size))
+
+            # 在前向窗口内找等长等内容块
+            earliest = max(0, i - block_size - _MAX_BLOCK_GAP)
+            match_found = False
+            for j in range(earliest, i - block_size + 1):
+                if j < 0:
+                    continue
+                if any(drop[j + k] for k in range(block_size)):
+                    continue
+                prior = tuple(norm[j + k] for k in range(block_size))
+                if prior == current_norms:
+                    # 判定：中间间隙不超过 _MAX_BLOCK_GAP 段（可被 drop 的视为空）
+                    gap = i - (j + block_size)
+                    # 计算实际存活段数
+                    effective_gap = sum(
+                        1 for k in range(j + block_size, i)
+                        if not drop[k]
+                    )
+                    if effective_gap <= _MAX_BLOCK_GAP:
+                        # 标记当前块删除
+                        for k in range(block_size):
+                            drop[i + k] = True
+                            removed_positions.append(i + k)
+                        match_found = True
+                        break
+
+            i += block_size if match_found else 1
+
+    if not any(drop):
+        return text
+
+    if removed_positions:
+        preview = " / ".join(
+            paragraphs[idx].strip()[:30] for idx in removed_positions[:3]
+        )
+        log.info(
+            "检测到整段复读，已移除 %d 段: %s",
+            len(removed_positions), preview,
+        )
+
+    return "\n\n".join(paragraphs[i] for i in range(n) if not drop[i])

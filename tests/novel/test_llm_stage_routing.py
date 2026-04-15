@@ -52,14 +52,12 @@ class TestGetStageLlmConfig:
     def test_extracts_outline_generation_model(self) -> None:
         state = _make_state()
         result = get_stage_llm_config(state, "outline_generation")
-        assert result["model"] == "gpt-5.4"
+        assert result["model"] == "deepseek-chat"
 
     def test_extracts_consistency_check_model(self) -> None:
         state = _make_state()
         result = get_stage_llm_config(state, "consistency_check")
-        # Default from NovelConfig is "gemini-2.5-pro" (or whatever current default)
-        assert "model" in result
-        assert result["model"]  # Non-empty
+        assert result["model"] == "deepseek-chat"
 
     def test_extracts_style_rewrite_model(self) -> None:
         state = _make_state()
@@ -69,17 +67,17 @@ class TestGetStageLlmConfig:
     def test_extracts_scene_writing_model(self) -> None:
         state = _make_state()
         result = get_stage_llm_config(state, "scene_writing")
-        assert result["model"] == "gpt-5.4"
+        assert result["model"] == "deepseek-chat"
 
     def test_extracts_quality_review_model(self) -> None:
         state = _make_state()
         result = get_stage_llm_config(state, "quality_review")
-        assert result["model"] == "gpt-5.4"
+        assert result["model"] == "deepseek-chat"
 
     def test_extracts_character_design_model(self) -> None:
         state = _make_state()
         result = get_stage_llm_config(state, "character_design")
-        assert result["model"] == "gpt-5.4"
+        assert result["model"] == "deepseek-chat"
 
 
 # ---------------------------------------------------------------------------
