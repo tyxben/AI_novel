@@ -211,6 +211,11 @@ class WriterReactAgent(ReactAgent):
                 continuity_brief=continuity_brief,
             )
 
+        # 后处理硬截：与 Writer.generate_scene 保持一致的兜底层
+        # （DeepSeek 不听 prompt 字数，只能在这里强制收口）
+        from src.novel.agents.writer import Writer as _Writer
+        text = _Writer._trim_to_hard_cap(text, hard_cap=int(target * 1.2), target=target)
+
         chars = scene_plan.get(
             "characters_involved", scene_plan.get("characters", [])
         )
@@ -300,7 +305,13 @@ class WriterReactAgent(ReactAgent):
         parts.append(
             f"目标：{scene_plan.get('goal', scene_plan.get('summary', '?'))}"
         )
-        parts.append(f"字数：{target}字左右")
+        # 与 Writer.generate_scene 保持一致的字数硬约束（DeepSeek 实测对此无视，
+        # 但更听话的模型有效；最终由 _trim_to_hard_cap 在出口兜底）
+        _hard_cap = int(target * 1.2)
+        parts.append(
+            f"【字数硬约束】≤ {_hard_cap} 字（目标 {target}）；"
+            f"超出视为失败输出，输出前自检字数，超了必须删减"
+        )
         if scenes_written:
             parts.append(
                 f"\n【已写内容-禁止重复】\n{scenes_written[:800]}"

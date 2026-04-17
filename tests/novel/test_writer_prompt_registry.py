@@ -309,7 +309,7 @@ class TestGenerateSceneWithRegistry:
         assert "推进剧情" in system_msg
         assert "现代都市" in system_msg
         assert "张伟" in system_msg
-        assert "字数限制" in system_msg
+        assert "字数硬约束" in system_msg
 
 
 # ---------------------------------------------------------------------------

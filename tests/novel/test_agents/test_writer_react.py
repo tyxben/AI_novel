@@ -669,7 +669,9 @@ class TestBuildScenePrompt:
         prompt = self._build()
         assert "九霄门演武场" in prompt
         assert "清晨" in prompt
-        assert "800字" in prompt
+        # 字数硬约束块包含目标字数 800（hard_cap=960）
+        assert "字数硬约束" in prompt
+        assert "目标 800" in prompt
 
     def test_contains_context(self):
         prompt = self._build(context="这是一段前文回顾")
@@ -721,7 +723,9 @@ class TestBuildScenePrompt:
         """target_words comes from scene_plan."""
         plan = _make_scene_plan(target_words=1200)
         prompt = self._build(scene_plan=plan)
-        assert "1200字" in prompt
+        # 字数硬约束块：目标 1200，hard_cap = 1200 * 1.2 = 1440
+        assert "目标 1200" in prompt
+        assert "1440" in prompt
 
     def test_scenes_written_truncated(self):
         """scenes_written should be truncated to 800 chars."""

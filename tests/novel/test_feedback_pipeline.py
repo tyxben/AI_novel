@@ -135,18 +135,24 @@ class TestWriterRewriteChapter:
         system_msg = messages[0]["content"]
         assert "微调" in system_msg or "最小修改" in system_msg
 
-    def test_rewrite_no_truncation(self):
-        """Long text is preserved without truncation (only logged as warning)."""
+    def test_rewrite_trims_overlong_to_hard_cap(self):
+        """Long text is post-processed down to hard_cap (target * 1.2).
+
+        Updated 2026-04-17: previously asserted no truncation, but DeepSeek
+        实测 ignores prompt 字数 constraints, so Writer now hard-trims any
+        output exceeding hard_cap. See memory novel-length-control-floor.
+        """
         from src.novel.agents.writer import Writer
 
-        long_text = "这是一段非常长的文本。" * 500  # ~5000 chars
+        target = 2000
+        long_text = "这是一段非常长的文本。" * 500  # ~5500 chars >> target * 1.2
         llm = make_llm_client(response_text=long_text)
         writer = Writer(llm)
 
         result = writer.rewrite_chapter(
             original_text="原文" * 100,
             rewrite_instruction="重写",
-            chapter_outline=_make_chapter_outline_obj(estimated_words=2000),
+            chapter_outline=_make_chapter_outline_obj(estimated_words=target),
             characters=[],
             world_setting=_make_world_setting(),
             context="",
@@ -154,8 +160,10 @@ class TestWriterRewriteChapter:
             is_propagation=False,
         )
 
-        # No truncation — full text preserved
-        assert len(result) == len(long_text)
+        # Trimmed to hard_cap (target * 1.2 = 2400)
+        assert len(result) <= int(target * 1.2)
+        # And not over-trimmed (must keep substantial content)
+        assert len(result) >= int(target * 1.2) // 2
 
     def test_rewrite_empty_context(self):
         """Rewrite works fine with empty context string."""

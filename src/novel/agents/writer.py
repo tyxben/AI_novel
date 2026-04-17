@@ -300,6 +300,63 @@ class Writer:
         return text
 
     # ------------------------------------------------------------------
+    # 字数硬截：last-resort enforcement layer
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _trim_to_hard_cap(text: str, hard_cap: int, target: int) -> str:
+        """超过 hard_cap 时，回退到 hard_cap 内最近的句末标点处截断。
+
+        DeepSeek 实测对 prompt 字数约束完全无视（见 memory
+        novel-length-control-floor），soft_max_chars 只能阻止续写扩张，
+        但首轮就超长时无能为力。本函数是最后一道执行层。
+
+        策略：从 hard_cap 位置向前扫，找到最后一个句末标点（。！？!?）。
+        命中后顺带把紧随其后的闭合引号/括号 ("'」』）】) 一起带出，
+        最多带 4 个（避免极端连续闭合标点导致 cut 越过 hard_cap 太多）。
+        若窗口内没有句末标点（极少），硬切到 hard_cap。
+        下界 floor = hard_cap // 2，保证至少保留半数硬上限的内容。
+
+        Note: 中文 "……"（省略号）刻意排除在 sentence_end 之外，因为它常用作
+        句中悬念（"至于林炎……"），切在那里会留下明显残句。
+
+        防御性：hard_cap <= 0 或空输入直接原样返回（避免数值误配传播）。
+        """
+        if hard_cap <= 0 or not text:
+            return text
+
+        if len(text) <= hard_cap:
+            return text
+
+        # 句末标点：只用真正的句号/问号/感叹号（中文/英文标点都列出以兼容混排文本）
+        sentence_end = "。！？!?"
+        closing = "\"'」』）】"
+        # floor 必须 < hard_cap，否则搜索窗口为空。
+        # 取 hard_cap//2 保证至少保留半数硬上限的内容，不会切到极短。
+        floor = hard_cap // 2
+        cut = -1
+        i = hard_cap
+        while i > floor:
+            if text[i - 1] in sentence_end:
+                j = i
+                # 闭合标点最多带 4 个，防止极端连续闭合越过 hard_cap 太多
+                while j < len(text) and j - i < 4 and text[j] in closing:
+                    j += 1
+                cut = j
+                break
+            i -= 1
+
+        if cut == -1:
+            cut = hard_cap
+
+        trimmed = text[:cut].rstrip()
+        log.info(
+            "[trim] 文本超长裁剪：%d 字 → %d 字 (target=%d, hard_cap=%d)",
+            len(text), len(trimmed), target, hard_cap,
+        )
+        return trimmed
+
+    # ------------------------------------------------------------------
     # 主线上下文设置
     # ------------------------------------------------------------------
 
@@ -491,6 +548,13 @@ class Writer:
                 "5. 开头不要使用'却说''话说''且说'等跳跃性连接词\n\n"
             )
 
+        # 结构化字数约束：用"硬上限 + 段落数 + 自检"三件套逼近目标
+        # DeepSeek 对字数数字不敏感，但对"失败输出"和段落结构相对敏感
+        hard_cap = int(target_words * 1.2)
+        soft_floor = max(int(target_words * 0.7), 300)
+        para_min = max(3, target_words // 200)
+        para_max = max(para_min + 2, target_words // 100)
+
         system_prompt = (
             f"{style}\n\n"
             f"你是一位专业小说写手，正在创作第{chapter_outline.chapter_number}章"
@@ -501,9 +565,11 @@ class Writer:
             f"{position_prompt}"
             f"{chapter_brief_prompt}"
             f"{continuity_prompt}"
-            f"【极其重要的字数限制】你必须严格控制输出在{target_words}字左右。"
-            f"绝对不能超过{target_words + 200}字。宁可写少也不要写多。"
-            f"写到接近目标字数时，必须在一个完整的句子处自然收束，不要强行展开新情节。\n\n"
+            f"【字数硬约束 — 超出视为失败输出，不可交付】\n"
+            f"- 本场景范围 {soft_floor}-{hard_cap} 字（含标点）。上限 {hard_cap} 字是硬线，超一字即失败。\n"
+            f"- 目标 {target_words} 字，分 {para_min}-{para_max} 段，段与段之间空一行。\n"
+            f"- 输出前必须心算总字数：超过 {hard_cap} 字则删减到 {target_words} 字以内再输出。\n"
+            f"- 宁可在 {soft_floor} 字处收束，也不要水字数到 {hard_cap} 字以上。\n\n"
             f"【世界观设定】\n{world_desc}\n\n"
             f"【角色档案】\n{char_desc}\n\n"
             f"{craft_blocks}"
@@ -583,7 +649,7 @@ class Writer:
             f"- 出场角色：{', '.join(scene_plan.get('characters_involved', scene_plan.get('characters', [])))}\n"
             f"- 场景目标：{scene_plan.get('goal', scene_plan.get('summary', '未指定'))}\n"
             f"- 情绪氛围：{scene_plan.get('mood', chapter_outline.mood)}\n"
-            f"- 目标字数：约{target_words}字\n\n"
+            f"- 字数上限：{hard_cap} 字（目标 {target_words}，下限 {soft_floor}）\n\n"
         )
 
         if scenes_written_summary:
@@ -602,16 +668,15 @@ class Writer:
             user_prompt += f"{speech_style_prompt}\n"
 
         user_prompt += (
-            f"请直接输出场景正文，不要输出标题、序号或任何元信息。\n"
-            f"【字数要求】\n"
-            f"- 目标字数：{target_words}字左右\n"
-            f"- 写到接近目标字数时自然收束场景，确保在完整句子处结束\n"
-            f"- 最重要的是场景完整、情节闭合，不要在动作或对话中途停止\n"
-            f"【收束要求 — 极其重要】\n"
+            f"请直接输出场景正文，不要输出标题、序号或任何元信息。\n\n"
+            f"【收束要求】\n"
             f"- 场景必须有明确的结尾段落：角色做出决定、事件有阶段性结果、或情绪有落点\n"
             f"- 禁止在对话、动作、战斗的中途戛然而止\n"
             f"- 结尾至少需要2-3个完整句子来收束当前场景的叙事\n"
-            f"- 可以留悬念引出下文，但当前场景本身必须是完整的"
+            f"- 可以留悬念引出下文，但当前场景本身必须是完整的\n\n"
+            f"【最终字数检查 — 最高优先级，输出前必读】\n"
+            f"本场景输出 ≤ {hard_cap} 字（目标 {target_words}，分 {para_min}-{para_max} 段）。\n"
+            f"写完请自检：超过 {hard_cap} 字必须删减后再交付，绝不能直接输出超长版本。"
         )
 
         messages = [
@@ -619,20 +684,23 @@ class Writer:
             {"role": "user", "content": user_prompt},
         ]
 
-        # max_tokens: 中文1字 ≈ 1.5~2 token，给足空间让 LLM 完整收束
-        # max_tokens: 给足空间让 LLM 完整收束；soft_max_chars 防止续写无限扩张
         # max_tokens: 按目标字数估算 token 预算（中文 1 字 ≈ 1.5 token）
-        # 给 1.5x headroom 让 LLM 能收束，但不留无限扩张空间；
-        # 硬下限 1536 token 保证极短 target 也能写完一个段落。
-        max_tokens = min(8192, max(1536, int(target_words * 2.2)))
+        # 1.4x 倍率给 LLM 少量收束余地；配合 soft_max_chars=target*1.5 的续写
+        # 软上限形成双保险（任一触发都不再扩张）。
+        # 下限 900 token (~1350 字) 保证极短 target 也能完整写完一个段落；
+        # 上限 4096 token 防止极端大 target 爆量。
+        max_tokens = min(4096, max(900, int(target_words * 1.4)))
+        # soft_max_chars 必须 < max_tokens 字符容量，否则对大 target 失效；
+        # 按 1.4 字/token 留 margin，确保软上限总能在 LLM 输出前触发
+        soft_max_chars = min(int(target_words * 1.5), int(max_tokens * 1.4))
         response = self.llm.chat(messages, temperature=0.85, max_tokens=max_tokens)
         scene_text = self._continue_if_truncated(
             response, messages, temperature=0.85, max_tokens=max_tokens,
-            soft_max_chars=int(target_words * 1.5),
+            soft_max_chars=soft_max_chars,
         )
 
-        if len(scene_text) > target_words * 2:
-            log.warning("场景文本超长(%d字，目标%d字)", len(scene_text), target_words)
+        # 后处理硬截：DeepSeek 不听 prompt 字数指令，在这里强制收口
+        scene_text = self._trim_to_hard_cap(scene_text, hard_cap, target_words)
 
         # 清洗系统 UI 元素（避免游戏化提示泄漏到叙事文本）
         scene_text = _sanitize_chapter_text(scene_text)
@@ -885,12 +953,18 @@ class Writer:
         else:
             original_summary = truncate_text(original_text, 3000)
         target_words = chapter_outline.estimated_words
+        # 字数硬约束三件套（与 write_scene 保持一致的口径）
+        hard_cap = int(target_words * 1.2)
+        soft_floor = max(int(target_words * 0.7), 500)
+        para_min = max(3, target_words // 200)
+        para_max = max(para_min + 2, target_words // 100)
 
         if is_propagation:
             system_prompt = (
                 f"{style}\n\n"
                 f"你是一位专业小说写手。前面的章节做了修改，你需要微调当前章节以保持一致性。\n"
                 f"只做必要的最小修改，保持原文风格和节奏。\n\n"
+                f"【字数硬约束 — 超出视为失败】本章 {soft_floor}-{hard_cap} 字，分 {para_min}-{para_max} 段。\n\n"
                 f"{_ANTI_AI_FLAVOR}"
             )
             user_prompt = (
@@ -901,10 +975,10 @@ class Writer:
             if trimmed_context:
                 user_prompt += f"【修改后的前文】\n{trimmed_context}\n\n"
             user_prompt += (
-                f"请在原文基础上做最小必要修改，保持连贯。直接输出修改后的完整章节正文。\n"
-                f"【字数要求 - 必须遵守】\n"
-                f"- 目标字数：{target_words}字（允许范围：{max(target_words - 300, 500)}-{target_words + 300}字）\n"
-                f"- 写到接近目标字数时在完整句子处自然收束，宁少勿多"
+                f"请在原文基础上做最小必要修改，保持连贯。直接输出修改后的完整章节正文。\n\n"
+                f"【最终字数检查 — 最高优先级，输出前必读】\n"
+                f"本章 ≤ {hard_cap} 字（目标 {target_words}，下限 {soft_floor}）。\n"
+                f"写完自检字数：超过 {hard_cap} 必须删减后再交付，绝不可直接输出超长版本。"
             )
         else:
             system_prompt = (
@@ -913,6 +987,9 @@ class Writer:
                 f"「{chapter_outline.title}」。\n"
                 f"本章目标：{chapter_outline.goal}\n"
                 f"本章情绪基调：{chapter_outline.mood}\n\n"
+                f"【字数硬约束 — 超出视为失败输出】\n"
+                f"- 本章 {soft_floor}-{hard_cap} 字（含标点），上限 {hard_cap} 字是硬线\n"
+                f"- 分 {para_min}-{para_max} 段，输出前心算总字数，超出必须删减\n\n"
                 f"【角色档案】\n{char_desc}\n\n"
                 f"{_CRAFT_QUALITY}\n"
                 f"{_ANTI_AI_FLAVOR}"
@@ -924,17 +1001,19 @@ class Writer:
             if trimmed_context:
                 user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
             user_prompt += (
-                f"请根据修改指令重写此章节。直接输出重写后的完整正文，不要标题或元信息。\n"
-                f"【字数要求 - 必须遵守】\n"
-                f"- 目标字数：{target_words}字（允许范围：{max(target_words - 300, 500)}-{target_words + 300}字）\n"
-                f"- 写到接近目标字数时在完整句子处自然收束，宁少勿多"
+                f"请根据修改指令重写此章节。直接输出重写后的完整正文，不要标题或元信息。\n\n"
+                f"【最终字数检查 — 最高优先级，输出前必读】\n"
+                f"本章 ≤ {hard_cap} 字（目标 {target_words}，下限 {soft_floor}，分 {para_min}-{para_max} 段）。\n"
+                f"写完自检字数：超过 {hard_cap} 必须删减后再交付，绝不可直接输出超长版本。"
             )
 
-        # clamp to 8192 to avoid DeepSeek 400 error
         # max_tokens: 按目标字数估算 token 预算（中文 1 字 ≈ 1.5 token）
-        # 给 1.5x headroom 让 LLM 能收束，但不留无限扩张空间；
-        # 硬下限 1536 token 保证极短 target 也能写完一个段落。
-        max_tokens = min(8192, max(1536, int(target_words * 2.2)))
+        # 1.4x 倍率给 LLM 少量收束余地；配合 soft_max_chars=target*1.5 的续写
+        # 软上限形成双保险（任一触发都不再扩张）。
+        # 下限 900 token (~1350 字) 保证极短 target 也能完整写完一个段落；
+        # 上限 4096 token 防止极端大 target 爆量。
+        max_tokens = min(4096, max(900, int(target_words * 1.4)))
+        soft_max_chars = min(int(target_words * 1.5), int(max_tokens * 1.4))
         rewrite_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -947,11 +1026,11 @@ class Writer:
 
         rewritten = self._continue_if_truncated(
             response, rewrite_messages, temperature=0.8, max_tokens=max_tokens,
-            soft_max_chars=int(target_words * 1.5),
+            soft_max_chars=soft_max_chars,
         )
 
-        if len(rewritten) > target_words * 2:
-            log.warning("重写文本超长(%d字，目标%d字)", len(rewritten), target_words)
+        # 后处理硬截：见 _trim_to_hard_cap docstring
+        rewritten = self._trim_to_hard_cap(rewritten, hard_cap, target_words)
 
         return rewritten
 
@@ -1038,6 +1117,11 @@ class Writer:
         style = self._get_style_prompt(style_name)
         trimmed_context = truncate_text(context, _MAX_CONTEXT_CHARS) if context else ""
         target_words = chapter_outline.estimated_words
+        # 字数硬约束三件套（与 write_scene/rewrite_chapter 保持一致）
+        hard_cap = int(target_words * 1.2)
+        soft_floor = max(int(target_words * 0.7), 500)
+        para_min = max(3, target_words // 200)
+        para_max = max(para_min + 2, target_words // 100)
 
         # 构建主线提示（如果有的话）
         main_storyline_prompt = ""
@@ -1056,6 +1140,9 @@ class Writer:
             f"本章目标：{chapter_outline.goal}\n"
             f"本章情绪基调：{chapter_outline.mood}\n"
             f"{main_storyline_prompt}\n"
+            f"【字数硬约束 — 超出视为失败输出】\n"
+            f"- 本章 {soft_floor}-{hard_cap} 字，上限 {hard_cap} 是硬线\n"
+            f"- 分 {para_min}-{para_max} 段，精修不得显著扩张原文长度\n\n"
             f"【精修原则】\n"
             f"1. 保留原文好的部分（精彩描写、有力对话、关键情节）\n"
             f"2. 只改有问题的部分，不要重写没问题的段落\n"
@@ -1077,17 +1164,19 @@ class Writer:
             user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
 
         user_prompt += (
-            f"请输出精修后的完整章节正文。不要输出标题或元信息。\n"
-            f"【字数要求】\n"
-            f"- 目标字数：{target_words}字（允许范围：{max(target_words - 300, 500)}-{target_words + 300}字）\n"
-            f"- 宁可少写也不要超出上限"
+            f"请输出精修后的完整章节正文。不要输出标题或元信息。\n\n"
+            f"【最终字数检查 — 最高优先级，输出前必读】\n"
+            f"本章 ≤ {hard_cap} 字（目标 {target_words}，下限 {soft_floor}）。\n"
+            f"写完自检字数：超过 {hard_cap} 必须删减后再交付，宁可少写也不要超出。"
         )
 
-        # clamp to 8192 to avoid DeepSeek 400 error
         # max_tokens: 按目标字数估算 token 预算（中文 1 字 ≈ 1.5 token）
-        # 给 1.5x headroom 让 LLM 能收束，但不留无限扩张空间；
-        # 硬下限 1536 token 保证极短 target 也能写完一个段落。
-        max_tokens = min(8192, max(1536, int(target_words * 2.2)))
+        # 1.4x 倍率给 LLM 少量收束余地；配合 soft_max_chars=target*1.5 的续写
+        # 软上限形成双保险（任一触发都不再扩张）。
+        # 下限 900 token (~1350 字) 保证极短 target 也能完整写完一个段落；
+        # 上限 4096 token 防止极端大 target 爆量。
+        max_tokens = min(4096, max(900, int(target_words * 1.4)))
+        soft_max_chars = min(int(target_words * 1.5), int(max_tokens * 1.4))
         polish_messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -1100,11 +1189,11 @@ class Writer:
 
         polished = self._continue_if_truncated(
             response, polish_messages, temperature=0.7, max_tokens=max_tokens,
-            soft_max_chars=int(target_words * 1.5),
+            soft_max_chars=soft_max_chars,
         )
 
-        if len(polished) > target_words * 2:
-            log.warning("精修文本超长(%d字，目标%d字)", len(polished), target_words)
+        # 后处理硬截：见 _trim_to_hard_cap docstring
+        polished = self._trim_to_hard_cap(polished, hard_cap, target_words)
 
         return polished
 
@@ -1304,11 +1393,27 @@ class Writer:
 
         matches = dialogue_name_pattern.findall(text)
         unknown_names: set[str] = set()
+        # 代词前缀集合（单字）：若候选以这些字开头，说明整体是"代词+动词"而非人名
+        # 例：「他低头」「她抬头」「我转身」——剥掉代词前缀后剩下的是动词短语，应整体跳过
+        _PRONOUN_PREFIXES = {"他", "她", "它", "我", "你"}
+        # Unicode 弯引号 + ASCII 直引号 + CJK 括号；用 \uXXXX 转义避免编辑器字体渲染歧义
+        _QUOTE_STRIP = (
+            '"\''  # ASCII straight quotes
+            '\u201c\u201d\u2018\u2019'  # "" '' curly quotes (Unicode)
+            '\u300c\u300d\u300e\u300f\u3010\u3011'  # 「」『』【】
+        )
         for name_candidate in matches:
-            name_candidate = name_candidate.strip('""\'"「」『』【】')
+            # 剥离候选前后的引号/括号字符
+            name_candidate = name_candidate.strip(_QUOTE_STRIP)
             if not name_candidate or len(name_candidate) < 2:
                 continue
             if name_candidate in _NOT_NAMES:
+                continue
+            # 代词前缀剥离：若候选以单字代词开头，剥掉后再看。
+            # 剥完 < 2 字说明是纯"代词+单字动词"，整体跳过。
+            # 剥完 >= 2 字则是"代词+双字动词"（如「他低头」→「低头」），
+            # 这类同样不是人名 —— 直接跳过整个候选，不当作未知名字报警。
+            if name_candidate[0] in _PRONOUN_PREFIXES:
                 continue
             # 检查是否在已知名称中（含部分匹配：如"陈工"匹配"陈远"）
             is_known = False

@@ -6,6 +6,7 @@ build/
 .venv/
 venv/
 workspace/
+workspace_verify/
 output/
 .DS_Store
 Thumbs.db

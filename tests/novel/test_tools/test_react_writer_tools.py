@@ -98,20 +98,28 @@ class TestGenerateDraft:
         assert len(result["draft_preview"]) == 503  # 500 + "..."
 
     def test_max_tokens_calculation(self):
-        """max_tokens should be clamped between 6144 and 8192."""
+        """max_tokens should use formula min(4096, max(900, target*1.4))."""
         llm = MagicMock()
         llm.chat.return_value = _resp("ok")
         tk = WriterToolkit(llm)
 
+        # target=100 → max(900, 140) = 900
         tk.set_context(target_words=100)
         tk.generate_draft("p")
         _, kwargs = llm.chat.call_args
-        assert kwargs["max_tokens"] == 6144
+        assert kwargs["max_tokens"] == 900
 
+        # target=800 → max(900, 1120) = 1120
+        tk.set_context(target_words=800)
+        tk.generate_draft("p")
+        _, kwargs = llm.chat.call_args
+        assert kwargs["max_tokens"] == 1120
+
+        # target=5000 → min(4096, 7000) = 4096
         tk.set_context(target_words=5000)
         tk.generate_draft("p")
         _, kwargs = llm.chat.call_args
-        assert kwargs["max_tokens"] == 8192
+        assert kwargs["max_tokens"] == 4096
 
     def test_default_target_words(self):
         """When target_words is not set in context, defaults to 800."""
@@ -441,10 +449,11 @@ class TestRevise:
         llm.chat.return_value = _resp("revised")
         tk = WriterToolkit(llm)
         tk._draft = "原始正文"
+        # target=100 → max(900, 140) = 900
         tk.set_context(target_words=100)
         tk.revise_draft(issues="问题")
         _, kwargs = llm.chat.call_args
-        assert kwargs["max_tokens"] == 6144
+        assert kwargs["max_tokens"] == 900
 
     def test_revised_preview_in_result(self):
         llm = MagicMock()

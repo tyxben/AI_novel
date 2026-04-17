@@ -345,7 +345,7 @@ class TestPolishChapterContinuation:
 
 class TestMaxTokensProportional:
     def test_scene_max_tokens_small_target(self):
-        """generate_scene uses min(8192, max(1536, target_words * 2.2))."""
+        """generate_scene uses min(4096, max(900, int(target_words * 1.4)))."""
         response = _make_response("正文。", "stop")
         writer = _make_writer([response])
 
@@ -359,11 +359,11 @@ class TestMaxTokensProportional:
         )
 
         call_kwargs = writer.llm.chat.call_args
-        # max_tokens = min(8192, max(1536, 800 * 2.2)) = max(1536, 1760) = 1760
-        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 1760
+        # max_tokens = min(4096, max(900, int(800 * 1.4))) = max(900, 1120) = 1120
+        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 1120
 
     def test_scene_max_tokens_clamped_to_ceiling(self):
-        """For very large target_words, max_tokens is clamped to 8192."""
+        """For very large target_words, max_tokens is clamped to 4096."""
         response = _make_response("正文。", "stop")
         writer = _make_writer([response])
 
@@ -377,11 +377,11 @@ class TestMaxTokensProportional:
         )
 
         call_kwargs = writer.llm.chat.call_args
-        # max_tokens = min(8192, max(1536, 5000 * 2.2)) = min(8192, 11000) = 8192
-        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 8192
+        # max_tokens = min(4096, max(900, int(5000 * 1.4))) = min(4096, 7000) = 4096
+        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 4096
 
     def test_scene_max_tokens_floor_applied(self):
-        """tiny target_words hits the 1536 floor."""
+        """tiny target_words hits the 900 floor."""
         response = _make_response("正文。", "stop")
         writer = _make_writer([response])
 
@@ -395,5 +395,5 @@ class TestMaxTokensProportional:
         )
 
         call_kwargs = writer.llm.chat.call_args
-        # max_tokens = min(8192, max(1536, 300 * 2.2)) = max(1536, 660) = 1536
-        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 1536
+        # max_tokens = min(4096, max(900, int(300 * 1.4))) = max(900, 420) = 900
+        assert call_kwargs.kwargs.get("max_tokens", call_kwargs[1].get("max_tokens")) == 900

@@ -39,7 +39,8 @@ class WriterToolkit:
             {"role": "user", "content": "请直接输出场景正文，不要标题序号。"},
         ]
         target = self._context.get("target_words", 800)
-        max_tokens = min(8192, max(6144, target * 3))
+        # 与 Writer 主路径统一：min(4096, max(900, target*1.4))
+        max_tokens = min(4096, max(900, int(target * 1.4)))
         resp = self.llm.chat(messages, temperature=0.85, max_tokens=max_tokens)
         self._draft = resp.content.strip()
         wc = count_words(self._draft)
@@ -140,10 +141,11 @@ class WriterToolkit:
             "只改有问题的部分，直接输出完整正文。"
         )
         target = self._context.get("target_words", 800)
+        # 与 Writer 主路径统一：min(4096, max(900, target*1.4))
         resp = self.llm.chat(
             [{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=min(8192, max(6144, target * 3)),
+            max_tokens=min(4096, max(900, int(target * 1.4))),
         )
         self._draft = resp.content.strip()
         return {
