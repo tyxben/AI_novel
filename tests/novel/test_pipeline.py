@@ -169,15 +169,15 @@ def _mock_character_designer_node(state: dict) -> dict:
     }
 
 
-def _mock_plot_planner_node(state: dict) -> dict:
+def _mock_chapter_planner_node(state: dict) -> dict:
     return {
         "current_scenes": [
             {"scene_number": 1, "target_words": 800, "summary": "场景1"},
             {"scene_number": 2, "target_words": 800, "summary": "场景2"},
         ],
-        "decisions": [{"agent": "PlotPlanner", "step": "test", "decision": "ok", "reason": "test"}],
+        "decisions": [{"agent": "ChapterPlanner", "step": "test", "decision": "ok", "reason": "test"}],
         "errors": [],
-        "completed_nodes": ["plot_planner"],
+        "completed_nodes": ["chapter_planner"],
     }
 
 
@@ -239,7 +239,7 @@ def _get_mock_nodes(quality_pass: bool = True) -> dict:
         "novel_director": _mock_novel_director_node,
         "world_builder": _mock_world_builder_node,
         "character_designer": _mock_character_designer_node,
-        "plot_planner": _mock_plot_planner_node,
+        "chapter_planner": _mock_chapter_planner_node,
         "writer": _mock_writer_node,
         "reviewer": _mock_reviewer_node_pass if quality_pass else _mock_reviewer_node_fail,
     }
@@ -374,7 +374,7 @@ class TestGraph:
         checker_calls = {"count": 0}
 
         def ok_planner(state):
-            return {"current_scenes": [{"scene": 1}], "completed_nodes": ["plot_planner"], "errors": [], "decisions": []}
+            return {"current_scenes": [{"scene": 1}], "completed_nodes": ["chapter_planner"], "errors": [], "decisions": []}
 
         def failing_writer(state):
             raise RuntimeError("LLM timeout")
@@ -385,7 +385,7 @@ class TestGraph:
 
         runner = _ChapterRunner(
             nodes={
-                "plot_planner": ok_planner,
+                "chapter_planner": ok_planner,
                 "writer": failing_writer,
                 "reviewer": counting_checker,
             },

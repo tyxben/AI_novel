@@ -264,25 +264,30 @@ class TestNodeIntegrationRouting:
         assert "quality_review" not in call_config
         assert "scene_writing" not in call_config
 
-    @patch("src.novel.agents.plot_planner.create_llm_client")
-    def test_plot_planner_uses_outline_generation_model(
+    @patch("src.novel.agents.chapter_planner.create_llm_client")
+    def test_chapter_planner_uses_outline_generation_model(
         self, mock_create_llm: MagicMock
     ) -> None:
-        from src.novel.agents.plot_planner import plot_planner_node
+        from src.novel.agents.chapter_planner import chapter_planner_node
         from src.novel.models.novel import ChapterOutline
 
         mock_llm = MagicMock()
         scenes_json = json.dumps({
+            "revised_goal": "Test goal",
+            "revision_reason": "no_revision",
             "scenes": [{
                 "scene_number": 1,
                 "title": "Scene 1",
                 "summary": "test",
                 "characters_involved": ["A"],
-                "mood": "buildup",
+                "mood": "\u84c4\u529b",
                 "tension_level": 0.5,
                 "target_words": 800,
-                "narrative_focus": "dialogue",
-            }]
+                "narrative_focus": "\u5bf9\u8bdd",
+            }],
+            "tone_notes": "",
+            "end_hook": "",
+            "end_hook_type": "",
         })
         mock_llm.chat.return_value = MagicMock(
             content=scenes_json,
@@ -310,7 +315,7 @@ class TestNodeIntegrationRouting:
             "current_chapter_outline": ch_outline.model_dump(),
             "characters": [],
         }
-        plot_planner_node(state)
+        chapter_planner_node(state)
 
         call_config = mock_create_llm.call_args[0][0]
         assert call_config.get("model") == "planner-model"

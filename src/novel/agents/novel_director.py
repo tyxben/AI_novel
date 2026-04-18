@@ -214,6 +214,12 @@ class NovelDirector:
     ) -> dict[str, Any]:
         """分析并丰富用户输入。
 
+        .. deprecated:: Phase 2-γ (2026-04)
+            此立项/骨架推导逻辑已由
+            :class:`~src.novel.agents.project_architect.ProjectArchitect`
+            的 :meth:`propose_project_setup` 取代。本方法保留为
+            :func:`novel_director_node` 的 legacy shim，Phase 3 删除。
+
         Returns:
             dict 包含 suggested_template, suggested_style,
             volume_count, chapters_per_volume,
@@ -253,6 +259,13 @@ class NovelDirector:
         custom_ideas: str | None = None,
     ) -> Outline:
         """通过 LLM 生成三层大纲。
+
+        .. deprecated:: Phase 2-γ (2026-04)
+            "立项/骨架"中的 synopsis / main_storyline 生成已由
+            :class:`~src.novel.agents.project_architect.ProjectArchitect`
+            的 :meth:`propose_synopsis` + :meth:`propose_volume_breakdown`
+            取代。本方法保留作为 :func:`novel_director_node` 的 legacy
+            shim（大量测试/pipeline 依赖），Phase 3 删除。
 
         流程：
         1. 根据模板确定幕数量
@@ -752,6 +765,12 @@ class NovelDirector:
         genre: str,
     ) -> list[dict]:
         """为指定卷生成故事弧线（StoryUnit 结构）。
+
+        .. deprecated:: Phase 2-γ (2026-04)
+            跨卷大弧线生成已由
+            :class:`~src.novel.agents.project_architect.ProjectArchitect`
+            的 :meth:`propose_story_arcs` 取代（内部复用此方法以避免重复
+            prompt）。本方法保留作为 legacy shim，Phase 3 拆离。
 
         将一卷的章节分组为多个 3-7 章的叙事弧线（mini-arc），每个弧线
         有自己的开端钩子、升级点、转折点、收束方式和遗留悬念。

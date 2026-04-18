@@ -163,7 +163,7 @@ def _mock_character_designer_node(state: dict) -> dict:
     }
 
 
-def _mock_plot_planner_node(state: dict) -> dict:
+def _mock_chapter_planner_node(state: dict) -> dict:
     ch = state.get("current_chapter", 1)
     return {
         "current_scenes": [
@@ -172,10 +172,10 @@ def _mock_plot_planner_node(state: dict) -> dict:
             {"scene_number": 3, "target_words": 800, "summary": f"第{ch}章场景3"},
         ],
         "decisions": [
-            {"agent": "PlotPlanner", "step": f"ch{ch}", "decision": "规划场景", "reason": "integration test"}
+            {"agent": "ChapterPlanner", "step": f"ch{ch}", "decision": "规划场景", "reason": "integration test"}
         ],
         "errors": [],
-        "completed_nodes": ["plot_planner"],
+        "completed_nodes": ["chapter_planner"],
     }
 
 
@@ -216,7 +216,7 @@ def _get_mock_nodes(quality_pass: bool = True) -> dict:
         "novel_director": _mock_novel_director_node,
         "world_builder": _mock_world_builder_node,
         "character_designer": _mock_character_designer_node,
-        "plot_planner": _mock_plot_planner_node,
+        "chapter_planner": _mock_chapter_planner_node,
         "writer": _mock_writer_node,
         "reviewer": _mock_reviewer_pass,
     }
@@ -377,7 +377,7 @@ class TestMultiChapterConsistency:
             assert "novel_director" in completed
             assert "world_builder" in completed
             assert "character_designer" in completed
-            # Each chapter adds: plot_planner, writer, reviewer (Phase 2-β merged)
+            # Each chapter adds: chapter_planner, writer, reviewer (Phase 2-δ merged)
             assert completed.count("writer") == 5
             assert completed.count("reviewer") == 5
 

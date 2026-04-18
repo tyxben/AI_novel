@@ -692,21 +692,88 @@ class NovelPipeline:
         # 提取主线信息
         state["main_storyline"] = outline.get("main_storyline", {})
 
+        # Phase 2-γ: 替换 world_builder / character_designer 节点调用为
+        # ProjectArchitect propose → accept 链路。pipeline 对外 API 不变。
+        from src.novel.agents.project_architect import ProjectArchitect
+        from src.llm.llm_client import create_llm_client as _create_llm_pa
+
+        architect_meta = {
+            "genre": genre,
+            "theme": theme,
+            "target_words": target_words,
+            "target_length_class": (
+                "webnovel" if target_words >= 300_000
+                else "novel" if target_words >= 80_000
+                else "novella" if target_words >= 30_000
+                else "short"
+            ),
+            "custom_ideas": custom_ideas,
+        }
+        synopsis_for_arch = (
+            (state.get("outline") or {}).get("main_storyline", {}).get("protagonist_goal", "")
+            if isinstance(state.get("outline"), dict) else ""
+        )
+
+        try:
+            _arch_llm = _create_llm_pa(get_stage_llm_config(state, "character_design"))
+            architect = ProjectArchitect(_arch_llm, config=self.config)
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("ProjectArchitect 初始化失败，退回旧 world/character 节点: %s", e)
+            architect = None
+
         if progress_callback:
             progress_callback(0.4, "正在构建世界观...")
-        try:
-            result = nodes["world_builder"](state)
-            state = _merge_state(state, result)
-        except Exception as e:
-            log.warning("世界观构建失败，继续: %s", e)
+        if architect is not None:
+            try:
+                world_proposal = architect.propose_world_setting(
+                    architect_meta, synopsis=synopsis_for_arch
+                )
+                state["world_setting"] = world_proposal.world.model_dump()
+                state.setdefault("decisions", []).append({
+                    "agent": "ProjectArchitect",
+                    "step": "propose_world_setting",
+                    "decision": f"世界观生成完成: {world_proposal.world.era} - {world_proposal.world.location}",
+                    "reason": "Phase 2-γ ProjectArchitect propose → accept",
+                })
+                state.setdefault("completed_nodes", []).append("project_architect.world")
+            except Exception as e:
+                log.warning("世界观构建失败，继续: %s", e)
+                state.setdefault("errors", []).append(
+                    {"agent": "ProjectArchitect", "message": f"世界观构建失败: {e}"}
+                )
+        else:
+            try:
+                result = nodes["world_builder"](state)
+                state = _merge_state(state, result)
+            except Exception as e:
+                log.warning("世界观构建失败，继续: %s", e)
 
         if progress_callback:
             progress_callback(0.7, "正在设计角色...")
-        try:
-            result = nodes["character_designer"](state)
-            state = _merge_state(state, result)
-        except Exception as e:
-            log.warning("角色设计失败，继续: %s", e)
+        if architect is not None:
+            try:
+                chars_proposal = architect.propose_main_characters(
+                    architect_meta, synopsis=synopsis_for_arch
+                )
+                state["characters"] = [c.model_dump() for c in chars_proposal.characters]
+                state.setdefault("decisions", []).append({
+                    "agent": "ProjectArchitect",
+                    "step": "propose_main_characters",
+                    "decision": f"角色生成完成: {len(chars_proposal.characters)} 个",
+                    "reason": "Phase 2-γ ProjectArchitect propose → accept",
+                })
+                state.setdefault("completed_nodes", []).append("project_architect.characters")
+            except Exception as e:
+                log.warning("角色设计失败，继续: %s", e)
+                state.setdefault("errors", []).append(
+                    {"agent": "ProjectArchitect", "message": f"角色设计失败: {e}"}
+                )
+        else:
+            try:
+                result = nodes["character_designer"](state)
+                state = _merge_state(state, result)
+            except Exception as e:
+                log.warning("角色设计失败，继续: %s", e)
 
         # 校验角色
         if not state.get("characters"):
@@ -847,7 +914,10 @@ class NovelPipeline:
 
         Returns dict with planned outlines for review.
         """
-        from src.novel.agents.dynamic_outline import dynamic_outline_node
+        # Phase 2-δ: plan_chapters reuses ChapterPlanner's outline-revision
+        # capability through chapter_planner_node (which merges the old
+        # dynamic_outline + plot_planner nodes).  We only need the node fn here.
+        from src.novel.agents.chapter_planner import chapter_planner_node
 
         novel_id = Path(project_path).name
         fm = self._get_file_manager()
@@ -1012,10 +1082,12 @@ class NovelPipeline:
                 log.warning("连续性摘要生成失败: %s", exc)
                 state["continuity_brief"] = ""
 
-            # Run dynamic_outline_node to revise
+            # Run chapter_planner_node to revise outline (and plan scenes).
+            # We only keep the revised outline + reason; scenes generated here
+            # are discarded because plan_chapters does not write text.
             revision_reason = ""
             try:
-                result = dynamic_outline_node(state)
+                result = chapter_planner_node(state)
                 revised = result.get("current_chapter_outline")
                 if revised:
                     ch_outline = revised
@@ -1027,11 +1099,11 @@ class NovelPipeline:
 
                 # Extract revision reason from decisions
                 for d in result.get("decisions", []):
-                    if d.get("step") == "revise_outline":
+                    if d.get("step") == "propose_chapter_brief":
                         revision_reason = d.get("reason", "")
                         break
             except Exception as exc:
-                log.warning("第%d章动态大纲修订失败: %s", ch_num, exc)
+                log.warning("第%d章大纲修订失败: %s", ch_num, exc)
 
             # Track this chapter's planned events for dedup in next iteration
             batch_planned_events.append(
@@ -1267,6 +1339,25 @@ class NovelPipeline:
         except Exception as exc:
             log.warning("NovelMemory 初始化失败: %s", exc)
             self.memory = None
+
+        # Phase 2-δ: wire LedgerStore into state so ChapterPlanner (and
+        # Reviewer, if enabled) can pull a per-chapter ledger snapshot
+        # without re-deriving it from the scattered tracker services.
+        try:
+            from src.novel.services.ledger_store import LedgerStore as _LedgerStore
+
+            _novel_data_for_ledger = fm.load_novel(novel_id) or {}
+            state["ledger_store"] = _LedgerStore(
+                project_path=str(Path(self.workspace) / "novels" / novel_id),
+                db=getattr(self.memory, "structured_db", None) if self.memory else None,
+                kg=getattr(self.memory, "knowledge_graph", None) if self.memory else None,
+                vector_store=getattr(self.memory, "vector_store", None) if self.memory else None,
+                novel_data=_novel_data_for_ledger,
+            )
+            log.info("LedgerStore 已写入 state (Phase 2-δ)")
+        except Exception as exc:
+            log.warning("LedgerStore 初始化失败 (非关键): %s", exc)
+            state["ledger_store"] = None
 
         chapters_generated = []
         consecutive_failures = 0
@@ -1686,30 +1777,24 @@ class NovelPipeline:
                         )
                         ch_title = differentiated
 
-                # --- Hook Generator: evaluate and improve chapter ending ---
+                # --- Hook evaluation (Phase 2-δ: absorbed into ChapterPlanner) ---
+                # Post-hoc rewrite path removed: ChapterPlanner plans the
+                # end-hook up-front via ``brief.end_hook`` so the old
+                # HookGenerator.generate_hook path is redundant.  We keep
+                # a cheap log-only quality signal for observability.
                 try:
-                    from src.novel.services.hook_generator import HookGenerator
-                    from src.llm.llm_client import create_llm_client
+                    from src.novel.agents.chapter_planner import ChapterPlanner
 
-                    hook_gen = HookGenerator(
-                        llm_client=create_llm_client(get_stage_llm_config(state, "scene_writing"))
-                    )
-                    eval_result = hook_gen.evaluate(chapter_text)
-                    if eval_result["needs_improvement"]:
+                    eval_result = ChapterPlanner.evaluate_hook(chapter_text)
+                    if eval_result.get("needs_improvement"):
                         log.info(
-                            "第%d章结尾较弱 (评分%d, 类型%s)，尝试重写",
-                            ch_num, eval_result["score"], eval_result["hook_type"]
+                            "第%d章结尾较弱 (评分%d, 类型%s)",
+                            ch_num,
+                            eval_result.get("score", 0),
+                            eval_result.get("hook_type", "?"),
                         )
-                        new_ending = hook_gen.generate_hook(
-                            chapter_text=chapter_text,
-                            chapter_number=ch_num,
-                            chapter_goal=ch_outline.get("goal", "") if ch_outline else "",
-                        )
-                        if new_ending:
-                            chapter_text = hook_gen.replace_ending(chapter_text, new_ending)
-                            log.info("第%d章结尾已优化", ch_num)
                 except Exception as exc:
-                    log.warning("钩子生成失败 (非关键): %s", exc)
+                    log.warning("钩子评估失败 (非关键): %s", exc)
 
                 # --- Surgical dedup: strip intra-chapter dialogue echo runs ---
                 try:

@@ -191,21 +191,21 @@ def _patch_obligation_tracker():
 
 
 def _noop_dynamic_outline(state):
-    """No-op dynamic outline node that returns no revision."""
+    """No-op chapter planner node (Phase 2-δ) that returns no revision."""
     return {
         "decisions": [
             {
-                "step": "revise_outline",
+                "step": "propose_chapter_brief",
                 "decision": "no revision needed",
                 "reason": "test: original outline is fine",
             }
         ],
-        "completed_nodes": ["dynamic_outline"],
+        "completed_nodes": ["chapter_planner"],
     }
 
 
 def _revising_dynamic_outline(state):
-    """Dynamic outline node that revises the outline."""
+    """Chapter planner node (Phase 2-δ) that revises the outline."""
     original = state.get("current_chapter_outline", {})
     revised = dict(original)
     revised["title"] = f"Revised: {original.get('title', 'untitled')}"
@@ -215,12 +215,12 @@ def _revising_dynamic_outline(state):
         "current_chapter_outline": revised,
         "decisions": [
             {
-                "step": "revise_outline",
+                "step": "propose_chapter_brief",
                 "decision": f"Chapter {state.get('current_chapter')} outline revised",
                 "reason": "previous chapters introduced new elements",
             }
         ],
-        "completed_nodes": ["dynamic_outline"],
+        "completed_nodes": ["chapter_planner"],
     }
 
 
@@ -232,7 +232,7 @@ def _revising_dynamic_outline(state):
 class TestPlanChaptersBasic:
     """Test basic plan_chapters functionality."""
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_returns_planned_outlines_with_structure(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -262,7 +262,7 @@ class TestPlanChaptersBasic:
             assert "revision_reason" in ch
             assert isinstance(ch["key_events"], list)
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_auto_detect_start_chapter(self, tmp_workspace_with_chapters):
         ws, novel_id = tmp_workspace_with_chapters
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -282,7 +282,7 @@ class TestPlanChaptersBasic:
         assert len(planned_nums) == 4  # default: 4 chapters ahead
         assert planned_nums == [4, 5, 6, 7]
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_no_chapters_starts_from_1(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -311,7 +311,7 @@ class TestPlanChaptersBasic:
 class TestPlanChaptersPlaceholderFill:
     """Test that placeholder outlines get filled."""
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_placeholder_outlines_get_filled(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -372,7 +372,7 @@ class TestPlanChaptersPlaceholderFill:
 class TestPlanChaptersDynamicRevision:
     """Test dynamic outline revision."""
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _revising_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _revising_dynamic_outline)
     def test_revision_applied(self, tmp_workspace_with_chapters):
         ws, novel_id = tmp_workspace_with_chapters
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -394,7 +394,7 @@ class TestPlanChaptersDynamicRevision:
             assert ch["key_events"] == ["revised event 1", "revised event 2"]
             assert ch["revision_reason"] == "previous chapters introduced new elements"
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_no_revision_records_reason(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -417,7 +417,7 @@ class TestPlanChaptersDynamicRevision:
 class TestPlanChaptersCheckpointSave:
     """Test that checkpoint and novel.json are saved after planning."""
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _revising_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _revising_dynamic_outline)
     def test_checkpoint_saved(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -445,7 +445,7 @@ class TestPlanChaptersCheckpointSave:
                 # so only chapters > 3 would be revised
                 pass
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _revising_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _revising_dynamic_outline)
     def test_novel_json_updated(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -471,7 +471,7 @@ class TestPlanChaptersCheckpointSave:
             if ch["chapter_number"] in (5, 6, 7):
                 assert ch["title"].startswith("Revised:")
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_progress_callback_invoked(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -501,7 +501,7 @@ class TestPlanChaptersCheckpointSave:
 class TestPlanChaptersContextInfo:
     """Test context information in the result."""
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_context_includes_stats(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)
@@ -529,7 +529,7 @@ class TestPlanChaptersContextInfo:
 class TestPlanChaptersEdgeCases:
     """Test edge cases."""
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_no_outline_raises(self, tmp_path):
         """Missing outline should raise ValueError."""
         novel_id = "novel_nooutline"
@@ -551,7 +551,7 @@ class TestPlanChaptersEdgeCases:
         with pytest.raises(ValueError, match="项目大纲不存在"):
             pipe.plan_chapters(project_path=str(novel_dir))
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node")
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node")
     def test_dynamic_outline_failure_graceful(self, mock_dyn, tmp_workspace):
         """If dynamic_outline_node throws, planning continues with original outline."""
         mock_dyn.side_effect = RuntimeError("LLM exploded")
@@ -574,7 +574,7 @@ class TestPlanChaptersEdgeCases:
             assert ch["title"] != ""
             assert ch["revision_reason"] == ""  # No revision happened
 
-    @patch("src.novel.agents.dynamic_outline.dynamic_outline_node", _noop_dynamic_outline)
+    @patch("src.novel.agents.chapter_planner.chapter_planner_node", _noop_dynamic_outline)
     def test_single_chapter_plan(self, tmp_workspace):
         ws, novel_id = tmp_workspace
         project_path = str(Path(ws) / "novels" / novel_id)

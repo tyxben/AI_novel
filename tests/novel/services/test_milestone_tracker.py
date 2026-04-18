@@ -507,44 +507,11 @@ class TestContinuityServiceVolumeProgress:
 
 
 # ---------------------------------------------------------------------------
-# PlotPlanner: volume progress constraint
+# NOTE: Phase 2-δ removed PlotPlanner; the ``_build_volume_progress_section``
+# helper no longer exists.  Volume-progress formatting now happens inline
+# inside ChapterPlanner's prompt, so these old tests are retired.  The
+# MilestoneTracker tests above still cover the data-level behaviour.
 # ---------------------------------------------------------------------------
-
-class TestPlotPlannerVolumeProgress:
-    def test_on_track_produces_empty_section(self):
-        from src.novel.agents.plot_planner import PlotPlanner
-        result = PlotPlanner._build_volume_progress_section(
-            {"progress_health": "on_track"}
-        )
-        assert result == ""
-
-    def test_behind_schedule_produces_warning(self):
-        from src.novel.agents.plot_planner import PlotPlanner
-        result = PlotPlanner._build_volume_progress_section({
-            "progress_health": "behind_schedule",
-            "milestones_pending": ["击败筑基期对手", "外交接触"],
-        })
-        assert "卷进度落后警告" in result
-        assert "击败筑基期对手" in result
-
-    def test_critical_produces_severe_warning(self):
-        from src.novel.agents.plot_planner import PlotPlanner
-        result = PlotPlanner._build_volume_progress_section({
-            "progress_health": "critical",
-            "milestones_overdue": ["扩张三座山峰"],
-        })
-        assert "严重警告" in result
-        assert "扩张三座山峰" in result
-
-    def test_none_produces_empty(self):
-        from src.novel.agents.plot_planner import PlotPlanner
-        result = PlotPlanner._build_volume_progress_section(None)
-        assert result == ""
-
-    def test_empty_dict_produces_empty(self):
-        from src.novel.agents.plot_planner import PlotPlanner
-        result = PlotPlanner._build_volume_progress_section({})
-        assert result == ""
 
 
 # ---------------------------------------------------------------------------

@@ -176,16 +176,16 @@ def make_mock_nodes(quality_pass: bool = True) -> dict:
             "completed_nodes": ["character_designer"],
         }
 
-    def plot_planner_node(state: dict) -> dict:
+    def chapter_planner_node(state: dict) -> dict:
         ch = state.get("current_chapter", 1)
         return {
             "current_scenes": [
                 {"scene_number": 1, "target_words": 800, "summary": f"第{ch}章场景1"},
                 {"scene_number": 2, "target_words": 800, "summary": f"第{ch}章场景2"},
             ],
-            "decisions": [{"agent": "PlotPlanner", "step": f"ch{ch}", "decision": "ok", "reason": "test"}],
+            "decisions": [{"agent": "ChapterPlanner", "step": f"ch{ch}", "decision": "ok", "reason": "test"}],
             "errors": [],
-            "completed_nodes": ["plot_planner"],
+            "completed_nodes": ["chapter_planner"],
         }
 
     def writer_node(state: dict) -> dict:
@@ -237,7 +237,7 @@ def make_mock_nodes(quality_pass: bool = True) -> dict:
         "novel_director": novel_director_node,
         "world_builder": world_builder_node,
         "character_designer": character_designer_node,
-        "plot_planner": plot_planner_node,
+        "chapter_planner": chapter_planner_node,
         "writer": writer_node,
         "consistency_checker": consistency_checker_node,
         "style_keeper": style_keeper_node,

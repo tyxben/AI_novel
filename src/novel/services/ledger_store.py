@@ -122,6 +122,24 @@ class LedgerStore:
         self._entity_service: EntityService | None = None
 
     # ------------------------------------------------------------------
+    # Copy semantics
+    # ------------------------------------------------------------------
+    #
+    # LedgerStore wraps live handles (SQLite connections, NetworkX
+    # graphs, Chroma vector stores) that frequently contain
+    # thread-local locks.  Tests and LangGraph occasionally
+    # ``copy.deepcopy`` the state bag, so expose stable copy methods
+    # that return the same instance (effectively a singleton per
+    # pipeline).  The ledger is read-mostly; sharing one instance
+    # across "copies" of state is the intended behaviour.
+
+    def __copy__(self) -> "LedgerStore":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "LedgerStore":
+        return self
+
+    # ------------------------------------------------------------------
     # Lazy service accessors
     # ------------------------------------------------------------------
 

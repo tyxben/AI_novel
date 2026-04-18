@@ -103,10 +103,10 @@ def _make_state(novel_id: str = "test_novel", total: int = 5,
 _NODES_PATCH_TARGET = "src.novel.agents.graph._get_node_functions"
 
 
-def _mock_plot_planner(state: dict) -> dict:
+def _mock_chapter_planner(state: dict) -> dict:
     return {
         "current_scenes": [{"scene_number": 1, "target_words": 800, "summary": "场景1"}],
-        "decisions": [], "errors": [], "completed_nodes": ["plot_planner"],
+        "decisions": [], "errors": [], "completed_nodes": ["chapter_planner"],
     }
 
 
@@ -135,7 +135,7 @@ def _mock_reviewer_pass(state: dict) -> dict:
 
 def _get_mock_nodes() -> dict:
     return {
-        "plot_planner": _mock_plot_planner,
+        "chapter_planner": _mock_chapter_planner,
         "writer": _mock_writer,
         "reviewer": _mock_reviewer_pass,
     }

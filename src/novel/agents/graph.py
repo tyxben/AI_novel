@@ -1,10 +1,14 @@
 """LangGraph 图构建 - 小说创作流水线
 
-Chapter graph (Phase 2-β 合并后)::
+Chapter graph (Phase 2-δ 合并后)::
 
-    dynamic_outline -> plot_planner -> writer -> reviewer -> state_writeback -> END
+    chapter_planner -> writer -> reviewer -> state_writeback -> END
 
-``reviewer`` 节点是三合一产物：取代了
+``chapter_planner`` 节点是 Phase 2-δ 产物：取代了
+``dynamic_outline + plot_planner`` 两个节点，同时吸收了旧 ``hook_generator``
+的钩子规划职责。章节规划师从 LedgerStore 实时取 snapshot 拼 ChapterBrief。
+
+``reviewer`` 节点是 Phase 2-β 三合一产物：取代了
 ``consistency_checker + style_keeper + quality_reviewer``，零打分零自动重写。
 Reviewer 只产报告（``CritiqueResult``）写进 ``state["current_chapter_quality"]``，
 然后由 state_writeback 持久化。作者看报告后主动决定是否调 ``apply_feedback`` /
@@ -41,22 +45,47 @@ except ImportError:
 
 
 def _get_node_functions() -> dict[str, Callable]:
-    """延迟导入所有节点函数，避免模块级循环依赖。"""
+    """延迟导入所有节点函数，避免模块级循环依赖。
+
+    Phase 2-γ：``world_builder`` / ``character_designer`` 节点已由
+    :class:`~src.novel.agents.project_architect.ProjectArchitect` 取代，pipeline
+    直接调用 ProjectArchitect，不再经过这里。保留 key 位置留空，是为了
+    避免 pipeline / 测试对字典结构的既有假设失效（``nodes["world_builder"]``
+    访问方式）。
+
+    Phase 2-δ：``dynamic_outline`` + ``plot_planner`` 合并为
+    :func:`chapter_planner_node`。两个旧 key 仍返回一个兼容 shim（直接
+    转发给 chapter_planner），方便外部测试过渡；新代码请直接使用
+    ``chapter_planner``。
+    """
     from src.novel.agents.novel_director import novel_director_node
-    from src.novel.agents.world_builder import world_builder_node
-    from src.novel.agents.character_designer import character_designer_node
-    from src.novel.agents.dynamic_outline import dynamic_outline_node
-    from src.novel.agents.plot_planner import plot_planner_node
+    from src.novel.agents.chapter_planner import chapter_planner_node
     from src.novel.agents.writer import writer_node
     from src.novel.agents.reviewer import reviewer_node
     from src.novel.agents.state_writeback import state_writeback_node
 
+    def _removed_node_stub(_name: str):
+        def _fn(state: dict) -> dict:
+            return {
+                "decisions": [
+                    {
+                        "agent": "ProjectArchitect",
+                        "step": "entry",
+                        "decision": f"{_name} 节点已废弃，请使用 ProjectArchitect",
+                        "reason": "Phase 2-γ Agent 合并",
+                    }
+                ],
+                "completed_nodes": [_name],
+                "errors": [],
+            }
+
+        return _fn
+
     return {
         "novel_director": novel_director_node,
-        "world_builder": world_builder_node,
-        "character_designer": character_designer_node,
-        "dynamic_outline": dynamic_outline_node,
-        "plot_planner": plot_planner_node,
+        "world_builder": _removed_node_stub("world_builder"),
+        "character_designer": _removed_node_stub("character_designer"),
+        "chapter_planner": chapter_planner_node,
         "writer": writer_node,
         "reviewer": reviewer_node,
         "state_writeback": state_writeback_node,
@@ -73,24 +102,27 @@ def build_chapter_graph() -> Any:
 
     Flow::
 
-        dynamic_outline -> plot_planner -> writer -> reviewer -> state_writeback -> END
+        chapter_planner -> writer -> reviewer -> state_writeback -> END
 
-    Reviewer 是合并后的单节点（取代 consistency_checker + style_keeper +
-    quality_reviewer）。只产报告（``CritiqueResult``），不触发 Writer 回写。
+    ChapterPlanner 是合并后的单节点（取代 dynamic_outline + plot_planner +
+    hook_generator 三处职责）。通过 LedgerStore 实时取 snapshot 生成
+    ChapterBrief。
+
+    Reviewer 是 Phase 2-β 合并后的单节点（取代 consistency_checker +
+    style_keeper + quality_reviewer）。只产报告（``CritiqueResult``），
+    不触发 Writer 回写。
     """
     nodes = _get_node_functions()
 
     if _LANGGRAPH_AVAILABLE:
         graph = StateGraph(NovelState)
-        graph.add_node("dynamic_outline", nodes["dynamic_outline"])
-        graph.add_node("plot_planner", nodes["plot_planner"])
+        graph.add_node("chapter_planner", nodes["chapter_planner"])
         graph.add_node("writer", nodes["writer"])
         graph.add_node("reviewer", nodes["reviewer"])
         graph.add_node("state_writeback", nodes["state_writeback"])
 
-        graph.set_entry_point("dynamic_outline")
-        graph.add_edge("dynamic_outline", "plot_planner")
-        graph.add_edge("plot_planner", "writer")
+        graph.set_entry_point("chapter_planner")
+        graph.add_edge("chapter_planner", "writer")
         graph.add_edge("writer", "reviewer")
         graph.add_edge("reviewer", "state_writeback")
         graph.add_edge("state_writeback", END)
@@ -99,12 +131,10 @@ def build_chapter_graph() -> Any:
 
     # Fallback: sequential runner (single pass, 无重写循环)
     fallback_nodes = {
-        "plot_planner": nodes["plot_planner"],
+        "chapter_planner": nodes["chapter_planner"],
         "writer": nodes["writer"],
         "reviewer": nodes["reviewer"],
     }
-    if "dynamic_outline" in nodes:
-        fallback_nodes["dynamic_outline"] = nodes["dynamic_outline"]
     if "state_writeback" in nodes:
         fallback_nodes["state_writeback"] = nodes["state_writeback"]
 
@@ -159,7 +189,7 @@ class _SequentialRunner:
 class _ChapterRunner:
     """Fallback for chapter graph — single linear pass, 无重写循环。
 
-    Phase 2-β: reviewer 单节点，只产报告不触发 writer 回写。
+    Phase 2-δ: chapter_planner → writer → reviewer → state_writeback.
     """
 
     def __init__(self, nodes: dict[str, Callable]) -> None:
@@ -168,10 +198,7 @@ class _ChapterRunner:
     def invoke(self, state: dict) -> dict:
         current_state = dict(state)
 
-        if "dynamic_outline" in self.nodes:
-            current_state = self._run_node("dynamic_outline", current_state)
-
-        current_state = self._run_node("plot_planner", current_state)
+        current_state = self._run_node("chapter_planner", current_state)
         current_state = self._run_node("writer", current_state)
 
         if current_state.get("current_chapter_text"):
