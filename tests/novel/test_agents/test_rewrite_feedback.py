@@ -6,22 +6,32 @@ Covers:
 3. writer_node prioritizes current_chapter_rewrite_prompt over feedback_prompt
 4. current_chapter_rewrite_prompt is cleared when chapter passes
 5. current_chapter_rewrite_prompt is cleared on force-pass (max retries)
+
+---
+Phase 0 档 4 (零自动重写): 整个 quality_reviewer → writer 自动回边已拔除，
+本文件测试的行为不复存在。文件保留作为档 4b (refine_loop + agent_chat
+循环拆解 + 配套测试工程) 的参考目标，届时重新设计或删除。
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from typing import Any
-from unittest.mock import MagicMock, patch
-
 import pytest
 
-from src.novel.agents.quality_reviewer import (
+pytest.skip(
+    "graph 自动重写已拔除, 见档 4b (refine_loop/agent_chat 循环拆解)",
+    allow_module_level=True,
+)
+
+import json  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+from src.novel.agents.quality_reviewer import (  # noqa: E402
     QualityReviewer,
     quality_reviewer_node,
 )
-from src.novel.agents.writer import writer_node
+from src.novel.agents.writer import writer_node  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,10 @@
 chapter graph:
   dynamic_outline -> plot_planner -> writer -> consistency_checker
   -> style_keeper -> quality_reviewer -> state_writeback -> END
-  (quality_reviewer 可回到 writer 重写)
+
+Phase 0 档 4: 零自动重写 — Verifier/Reviewer 只标不改。
+quality_reviewer 的 need_rewrite 字段仍作为信息标签产出，
+但不再触发 Writer 回边（作者看报告后主动决定）。
 
 LangGraph 为可选依赖。如果未安装，提供 sequential fallback。
 """
@@ -63,42 +66,6 @@ def _get_node_functions() -> dict[str, Callable]:
 
 
 # ---------------------------------------------------------------------------
-# Conditional edge: should rewrite?
-# ---------------------------------------------------------------------------
-
-MAX_REWRITES = 2
-
-
-def _should_rewrite(state: dict) -> str:
-    """Conditional edge after quality_reviewer.
-
-    Returns "writer" if rewrite needed and under max retries,
-    otherwise returns "state_writeback" to finalize the chapter.
-    """
-    quality = state.get("current_chapter_quality") or {}
-    need_rewrite = quality.get("need_rewrite", False)
-
-    if not need_rewrite:
-        return "state_writeback"
-
-    current_chapter = state.get("current_chapter", 1)
-    retry_counts = state.get("retry_counts") or {}
-    retries = retry_counts.get(current_chapter, 0)
-    max_retries = state.get("max_retries", MAX_REWRITES)
-
-    if retries >= max_retries:
-        log.info(
-            "第%d章已重试%d次，达到上限，强制通过",
-            current_chapter,
-            retries,
-        )
-        return "state_writeback"
-
-    log.info("第%d章质量未通过，触发重写（第%d次）", current_chapter, retries + 1)
-    return "writer"
-
-
-# ---------------------------------------------------------------------------
 # Build chapter graph
 # ---------------------------------------------------------------------------
 
@@ -106,9 +73,13 @@ def _should_rewrite(state: dict) -> str:
 def build_chapter_graph() -> Any:
     """Build the per-chapter generation graph.
 
-    Flow: dynamic_outline -> plot_planner -> writer -> consistency_checker
-          -> style_keeper -> quality_reviewer -> state_writeback -> END
-    quality_reviewer can loop back to writer for rewrites (max 2).
+    Flow (单向线性，无自动回边):
+        dynamic_outline -> plot_planner -> writer -> consistency_checker
+        -> style_keeper -> quality_reviewer -> state_writeback -> END
+
+    quality_reviewer / checker 只产报告（need_rewrite 等信息字段），
+    不再自动触发 Writer 回写。作者主动调 apply_feedback / rewrite_chapter
+    工具才会改文。
 
     Returns a compiled LangGraph graph, or a _ChapterRunner fallback.
     """
@@ -130,18 +101,13 @@ def build_chapter_graph() -> Any:
         graph.add_edge("writer", "consistency_checker")
         graph.add_edge("consistency_checker", "style_keeper")
         graph.add_edge("style_keeper", "quality_reviewer")
-
-        graph.add_conditional_edges(
-            "quality_reviewer",
-            _should_rewrite,
-            {"state_writeback": "state_writeback", "writer": "writer"},
-        )
-
+        # 档 4: quality_reviewer 不再条件跳回 writer，直接进 state_writeback
+        graph.add_edge("quality_reviewer", "state_writeback")
         graph.add_edge("state_writeback", END)
 
         return graph.compile()
 
-    # Fallback: sequential runner with rewrite loop
+    # Fallback: sequential runner (single pass, 无重写循环)
     fallback_nodes = {
         "plot_planner": nodes["plot_planner"],
         "writer": nodes["writer"],
@@ -155,7 +121,7 @@ def build_chapter_graph() -> Any:
     if "state_writeback" in nodes:
         fallback_nodes["state_writeback"] = nodes["state_writeback"]
 
-    return _ChapterRunner(nodes=fallback_nodes, max_rewrites=MAX_REWRITES)
+    return _ChapterRunner(nodes=fallback_nodes)
 
 
 # ---------------------------------------------------------------------------
@@ -208,11 +174,13 @@ class _SequentialRunner:
 
 
 class _ChapterRunner:
-    """Fallback for chapter graph with rewrite loop."""
+    """Fallback for chapter graph — single linear pass, 无重写循环。
 
-    def __init__(self, nodes: dict[str, Callable], max_rewrites: int = 2) -> None:
+    档 4: quality_reviewer 只产报告，不再触发 writer 回写。
+    """
+
+    def __init__(self, nodes: dict[str, Callable]) -> None:
         self.nodes = nodes
-        self.max_rewrites = max_rewrites
 
     def invoke(self, state: dict) -> dict:
         current_state = dict(state)
@@ -224,23 +192,15 @@ class _ChapterRunner:
         # Step 1: plot_planner
         current_state = self._run_node("plot_planner", current_state)
 
-        # Step 2-5: writer -> checkers loop
-        for attempt in range(self.max_rewrites + 1):
-            current_state = self._run_node("writer", current_state)
+        # Step 2: writer (single shot)
+        current_state = self._run_node("writer", current_state)
 
-            # C1 fix: skip checker nodes if writer produced no text
-            if not current_state.get("current_chapter_text"):
-                log.error("Writer 未产生文本，跳过检查节点")
-                break
-
+        # Step 3-5: checkers + reviewer (report-only, no rewrite loop)
+        if current_state.get("current_chapter_text"):
             current_state = self._run_checkers(current_state)
             current_state = self._run_node("quality_reviewer", current_state)
-
-            # Check if rewrite needed
-            route = _should_rewrite(current_state)
-            if route != "writer":
-                break
-            log.info("重写循环第%d次", attempt + 1)
+        else:
+            log.error("Writer 未产生文本，跳过检查节点")
 
         # Step 6: state_writeback (persist changes back to state/DB)
         if "state_writeback" in self.nodes:

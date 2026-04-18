@@ -305,8 +305,8 @@ class TestGraph:
                 assert "writer" in result["completed_nodes"]
                 assert "quality_reviewer" in result["completed_nodes"]
 
-    def test_chapter_graph_rewrite_loop(self):
-        """Chapter graph triggers rewrite when quality fails."""
+    def test_chapter_graph_single_pass_even_on_quality_fail(self):
+        """档 4: quality 标 fail 也不触发回写, writer 只跑一次."""
         call_count = {"writer": 0}
         orig_writer = _mock_writer_node
 
@@ -314,7 +314,7 @@ class TestGraph:
             call_count["writer"] += 1
             return orig_writer(state)
 
-        # Quality fails first, then eventually passes via max_retries
+        # Quality always fails — but no auto-rewrite anymore
         nodes = _get_mock_nodes(quality_pass=False)
         nodes["writer"] = counting_writer
 
@@ -327,41 +327,12 @@ class TestGraph:
                 state["current_chapter_outline"] = state["outline"]["chapters"][0]
                 state["max_retries"] = 2
 
-                result = graph.invoke(state)
+                graph.invoke(state)
 
-                # Writer should be called multiple times (initial + rewrites)
-                assert call_count["writer"] >= 2
+                # 档 4: Writer 只跑一次, 即使质量未通过
+                assert call_count["writer"] == 1
 
-    def test_should_rewrite_pass(self):
-        """_should_rewrite returns 'end' when quality passes."""
-        from src.novel.agents.graph import _should_rewrite
-
-        state = {"current_chapter_quality": {"need_rewrite": False}}
-        assert _should_rewrite(state) == "state_writeback"
-
-    def test_should_rewrite_fail(self):
-        """_should_rewrite returns 'writer' when quality fails and under max retries."""
-        from src.novel.agents.graph import _should_rewrite
-
-        state = {
-            "current_chapter": 1,
-            "current_chapter_quality": {"need_rewrite": True},
-            "retry_counts": {1: 0},
-            "max_retries": 2,
-        }
-        assert _should_rewrite(state) == "writer"
-
-    def test_should_rewrite_max_retries(self):
-        """_should_rewrite returns 'end' when max retries reached."""
-        from src.novel.agents.graph import _should_rewrite
-
-        state = {
-            "current_chapter": 1,
-            "current_chapter_quality": {"need_rewrite": True},
-            "retry_counts": {1: 3},
-            "max_retries": 2,
-        }
-        assert _should_rewrite(state) == "state_writeback"
+    # test_should_rewrite_* 已删除 (档 4 拔除了 _should_rewrite 条件边)
 
     def test_is_langgraph_available(self):
         """is_langgraph_available returns a boolean."""
@@ -422,7 +393,6 @@ class TestGraph:
                 "style_keeper": counting_checker,
                 "quality_reviewer": counting_checker,
             },
-            max_rewrites=2,
         )
         result = runner.invoke({"current_chapter_text": None})
 

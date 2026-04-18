@@ -543,24 +543,24 @@ class TestResumeFromCheckpoint:
 
 
 # ---------------------------------------------------------------------------
-# 4. Quality rewrite loop
+# 4. Quality reviewer — 零自动重写 (Phase 0 档 4)
 # ---------------------------------------------------------------------------
 
 
-class TestQualityRewriteLoop:
-    """Mock quality_reviewer to fail first, pass second. Verify rewrite."""
+class TestQualityReviewerSinglePass:
+    """档 4 拔除了 graph 自动回边: reviewer 只产报告, writer 只跑一次."""
 
-    def test_writer_called_twice_on_quality_fail(self, pipeline: NovelPipeline, tmp_workspace: str):
-        """When quality fails once, writer runs again and final text is from second attempt."""
+    def test_writer_called_once_regardless_of_quality(
+        self, pipeline: NovelPipeline, tmp_workspace: str
+    ):
+        """即使 reviewer 标 need_rewrite=True, writer 也只调用一次, 不再回写."""
         writer_call_count = {"count": 0}
-        writer_texts = {}
 
         def counting_writer(state: dict) -> dict:
             ch = state.get("current_chapter", 1)
             writer_call_count["count"] += 1
             attempt = writer_call_count["count"]
             text = f"第{ch}章第{attempt}次写作的内容。" * 20
-            writer_texts[attempt] = text
             return {
                 "current_chapter_text": text,
                 "decisions": [
@@ -572,82 +572,17 @@ class TestQualityRewriteLoop:
 
         reviewer_call_count = {"count": 0}
 
-        def failing_then_passing_reviewer(state: dict) -> dict:
-            reviewer_call_count["count"] += 1
-            if reviewer_call_count["count"] == 1:
-                # First call: fail
-                return {
-                    "current_chapter_quality": {"need_rewrite": True, "rule_check": {"passed": False}},
-                    "retry_counts": {state.get("current_chapter", 1): 1},
-                    "decisions": [
-                        {"agent": "QualityReviewer", "step": "review", "decision": "需要重写", "reason": "test"}
-                    ],
-                    "errors": [],
-                    "completed_nodes": ["quality_reviewer"],
-                }
-            # Second call: pass
-            return {
-                "current_chapter_quality": {"need_rewrite": False, "rule_check": {"passed": True}, "score": 8.0},
-                "decisions": [
-                    {"agent": "QualityReviewer", "step": "review", "decision": "质量通过", "reason": "test"}
-                ],
-                "errors": [],
-                "completed_nodes": ["quality_reviewer"],
-            }
-
-        nodes = _get_mock_nodes()
-        nodes["writer"] = counting_writer
-        nodes["quality_reviewer"] = failing_then_passing_reviewer
-
-        with _patch_nodes(nodes), _patch_langgraph():
-            result = pipeline.create_novel(
-                genre="玄幻",
-                theme="修仙",
-                target_words=15000,
-            )
-            project_path = result["workspace"]
-            novel_id = result["novel_id"]
-
-            # Generate only chapter 1
-            gen_result = pipeline.generate_chapters(
-                project_path, start_chapter=1, end_chapter=1, silent=True
-            )
-
-            assert gen_result["total_generated"] == 1
-
-            # Writer should have been called twice (initial + rewrite)
-            assert writer_call_count["count"] == 2
-
-            # Reviewer should have been called twice
-            assert reviewer_call_count["count"] == 2
-
-            # Final saved text should come from the second writer attempt
-            fm = pipeline._get_file_manager()
-            saved_text = fm.load_chapter_text(novel_id, 1)
-            assert saved_text == writer_texts[2]
-
-    def test_max_retries_respected(self, pipeline: NovelPipeline, tmp_workspace: str):
-        """When quality always fails, writer is called max_retries + 1 times then stops."""
-        writer_call_count = {"count": 0}
-
-        def counting_writer(state: dict) -> dict:
-            ch = state.get("current_chapter", 1)
-            writer_call_count["count"] += 1
-            return {
-                "current_chapter_text": f"尝试{writer_call_count['count']}。" * 20,
-                "decisions": [],
-                "errors": [],
-                "completed_nodes": ["writer"],
-            }
-
         def always_fail_reviewer(state: dict) -> dict:
-            ch = state.get("current_chapter", 1)
-            retry_counts = dict(state.get("retry_counts") or {})
-            retry_counts[ch] = retry_counts.get(ch, 0) + 1
+            """Reviewer 永远标记 need_rewrite=True, 但不应触发 writer 回写."""
+            reviewer_call_count["count"] += 1
             return {
-                "current_chapter_quality": {"need_rewrite": True, "rule_check": {"passed": False}},
-                "retry_counts": retry_counts,
-                "decisions": [],
+                "current_chapter_quality": {
+                    "need_rewrite": True,
+                    "rule_check": {"passed": False},
+                },
+                "decisions": [
+                    {"agent": "QualityReviewer", "step": "review", "decision": "标记需重写(仅报告)", "reason": "test"}
+                ],
                 "errors": [],
                 "completed_nodes": ["quality_reviewer"],
             }
@@ -664,13 +599,14 @@ class TestQualityRewriteLoop:
             )
             project_path = result["workspace"]
 
-            pipeline.generate_chapters(project_path, start_chapter=1, end_chapter=1, silent=True)
+            gen_result = pipeline.generate_chapters(
+                project_path, start_chapter=1, end_chapter=1, silent=True
+            )
 
-            # _ChapterRunner loop: attempt 0 (initial write) -> reviewer fails,
-            # retry_counts becomes {1: 1}. attempt 1 (rewrite) -> reviewer fails,
-            # retry_counts becomes {1: 2}. _should_rewrite sees 2 >= max_retries(2)
-            # -> "end". So writer is called twice total.
-            assert writer_call_count["count"] == 2
+            assert gen_result["total_generated"] == 1
+            # 档 4: writer 只跑一次, reviewer 只产一次报告
+            assert writer_call_count["count"] == 1
+            assert reviewer_call_count["count"] == 1
 
 
 # ---------------------------------------------------------------------------

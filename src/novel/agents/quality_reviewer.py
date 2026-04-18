@@ -4,8 +4,11 @@
 1. 规则硬指标检查（零成本）
 2. 风格一致性检查（可选）
 3. LLM 打分评估（可选，省钱模式跳过）
-4. 综合判断是否需要重写
+4. 产出质量报告，含 need_rewrite 信息标签（仅供作者参考）
 5. 作为 LangGraph 节点审查章节质量
+
+Phase 0 档 4: 零自动重写。报告节点不再触发 Writer 回写，
+``need_rewrite`` 从"触发器"退化为"信息标签"。
 """
 
 from __future__ import annotations
@@ -369,11 +372,14 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         report,
         threshold=state.get("auto_approve_threshold", 6.0),
     )
+    # Phase 0 档 4: need_rewrite 作为信息标签写回 report，仅供作者参考，
+    # 不再据此回调 writer / 递增 retry_counts / force-pass。
+    report["need_rewrite"] = bool(need_rewrite)
 
     decisions.append(
         _make_decision(
             step="review_chapter",
-            decision="需要重写" if need_rewrite else "质量通过",
+            decision="标记需重写(仅报告)" if need_rewrite else "质量通过",
             reason=report.get("rewrite_reason") or "所有检查通过",
             data={
                 "rule_passed": report.get("rule_check", {}).get("passed", True),
@@ -388,6 +394,8 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
         "decisions": decisions,
         "errors": errors,
         "completed_nodes": ["quality_reviewer"],
+        # 档 4: 主动清空重写 prompt，避免下一章 Writer 误读到上一章的残留反馈
+        "current_chapter_rewrite_prompt": "",
     }
 
     # Save feedback if registry available
@@ -402,86 +410,5 @@ def quality_reviewer_node(state: NovelState) -> dict[str, Any]:
             )
         except Exception as e:
             log.debug("Failed to save chapter feedback: %s", e)
-
-    # 更新重试计数
-    if need_rewrite:
-        current_chapter = state.get("current_chapter", 1)
-        retry_counts = dict(state.get("retry_counts") or {})
-        retry_counts[current_chapter] = retry_counts.get(current_chapter, 0) + 1
-        result["retry_counts"] = retry_counts
-
-        # Build rewrite prompt from review findings
-        rewrite_parts: list[str] = []
-        if report.get("rewrite_reason"):
-            rewrite_parts.append(f"重写原因：{report['rewrite_reason']}")
-
-        # Rule check failures
-        rule_check = report.get("rule_check", {})
-        if not rule_check.get("passed", True):
-            if rule_check.get("ai_flavor_issues"):
-                phrases = []
-                for issue in rule_check["ai_flavor_issues"][:5]:
-                    if isinstance(issue, dict):
-                        phrases.append(issue.get("phrase", str(issue)))
-                    else:
-                        phrases.append(str(issue))
-                rewrite_parts.append(f"必须消除以下 AI 味短语：{'、'.join(phrases)}")
-            if rule_check.get("repetition_issues"):
-                rewrite_parts.append(f"修复 {len(rule_check['repetition_issues'])} 处重复句")
-            if rule_check.get("dialogue_distinction_issues"):
-                rewrite_parts.append("增加不同角色对话的区分度，每个角色必须有独特口吻")
-            if rule_check.get("paragraph_length_issues"):
-                rewrite_parts.append("调整段落长度，避免过长或过短的段落")
-
-        # Style deviations
-        style_check = report.get("style_check", {})
-        if style_check.get("deviations"):
-            for dev in style_check["deviations"][:3]:
-                if isinstance(dev, dict):
-                    rewrite_parts.append(f"风格偏差：{dev.get('description', dev)}")
-                else:
-                    rewrite_parts.append(f"风格偏差：{dev}")
-
-        # Style bible gate deviations (Intervention D)
-        bible_check = report.get("style_bible_check", {})
-        bible_devs = bible_check.get("deviations", [])
-        if bible_devs:
-            for dev in bible_devs[:5]:
-                rewrite_parts.append(f"风格圣经偏差：{dev}")
-
-        # Suggestions
-        suggestions = report.get("suggestions", [])
-        if suggestions:
-            rewrite_parts.append("改进建议：" + "；".join(suggestions[:5]))
-
-        # Brief fulfillment failures
-        brief_report = report.get("brief_fulfillment", {})
-        if brief_report and not brief_report.get("overall_pass", True):
-            unfulfilled = brief_report.get("unfulfilled_items", [])
-            if unfulfilled:
-                rewrite_parts.append("任务书未完成项：" + "；".join(str(u) for u in unfulfilled[:3]))
-
-        if rewrite_parts:
-            result["current_chapter_rewrite_prompt"] = (
-                "【当前章质量审查反馈 — 重写时必须针对性修正以下问题】\n"
-                + "\n".join(f"- {p}" for p in rewrite_parts)
-            )
-
-        max_retries = state.get("max_retries", 2)
-        if retry_counts[current_chapter] >= max_retries:
-            decisions.append(
-                _make_decision(
-                    step="retry_limit",
-                    decision="达到最大重试次数，强制通过",
-                    reason=f"第 {current_chapter} 章已重试 {retry_counts[current_chapter]} 次",
-                )
-            )
-            # 强制通过
-            report["need_rewrite"] = False
-            result["current_chapter_rewrite_prompt"] = ""  # Clear on force pass
-            result["current_chapter_quality"] = report
-    else:
-        # Chapter passed — clear rewrite prompt for next chapter
-        result["current_chapter_rewrite_prompt"] = ""
 
     return result

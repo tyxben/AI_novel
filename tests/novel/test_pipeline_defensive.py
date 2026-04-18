@@ -4,7 +4,7 @@ Covers:
 - Bug #7: State preservation across graph.invoke (service objects lost)
 - Bug #8: Chapter deduplication on resume
 - Bug #22: word_count must use count_words, not len()
-- Bug #23: MAX_REWRITES vs max_retries mismatch / force-pass logic
+- (Bug #23: MAX_REWRITES / force-pass logic — 档 4 移除，自动重写拔除)
 - Consecutive failure handling (3-strike abort)
 - Checkpoint save/restore round-trip (non-serializable, full_text stripping)
 """
@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.novel.agents.graph import MAX_REWRITES, _should_rewrite, _merge_state
+from src.novel.agents.graph import _merge_state
 from src.novel.utils import count_words
 
 
@@ -372,162 +372,12 @@ class TestWordCountUsesCountWords:
 
 
 # ===========================================================================
-# 4. MAX_REWRITES vs max_retries mismatch (Bug #23)
+# 4. Rewrite-limit logic — REMOVED (Phase 0 档 4)
 # ===========================================================================
-
-
-class TestRewriteLimitLogic:
-    """Test the interplay between MAX_REWRITES (graph.py) and max_retries (quality_reviewer)."""
-
-    def test_should_rewrite_stops_at_max_rewrites(self):
-        """_should_rewrite returns 'state_writeback' when retries >= MAX_REWRITES."""
-        state = {
-            "current_chapter": 3,
-            "current_chapter_quality": {"need_rewrite": True},
-            "retry_counts": {3: MAX_REWRITES},  # Already at limit
-            "max_retries": MAX_REWRITES,
-        }
-
-        result = _should_rewrite(state)
-        assert result == "state_writeback"
-
-    def test_should_rewrite_allows_when_under_limit(self):
-        """_should_rewrite returns 'writer' when retries < MAX_REWRITES."""
-        state = {
-            "current_chapter": 3,
-            "current_chapter_quality": {"need_rewrite": True},
-            "retry_counts": {3: 0},
-            "max_retries": MAX_REWRITES,
-        }
-
-        result = _should_rewrite(state)
-        assert result == "writer"
-
-    def test_should_rewrite_no_rewrite_needed(self):
-        """_should_rewrite returns 'state_writeback' when need_rewrite is False."""
-        state = {
-            "current_chapter": 1,
-            "current_chapter_quality": {"need_rewrite": False},
-            "retry_counts": {},
-        }
-
-        result = _should_rewrite(state)
-        assert result == "state_writeback"
-
-    def test_should_rewrite_empty_quality(self):
-        """_should_rewrite handles missing quality dict gracefully."""
-        state = {
-            "current_chapter": 1,
-            "current_chapter_quality": None,
-            "retry_counts": {},
-        }
-
-        result = _should_rewrite(state)
-        assert result == "state_writeback"
-
-    def test_should_rewrite_respects_state_max_retries_over_constant(self):
-        """State max_retries overrides the module-level MAX_REWRITES constant."""
-        # state says max_retries=5, but MAX_REWRITES=2
-        state = {
-            "current_chapter": 1,
-            "current_chapter_quality": {"need_rewrite": True},
-            "retry_counts": {1: 3},  # 3 retries, above MAX_REWRITES(2) but below state max(5)
-            "max_retries": 5,
-        }
-
-        result = _should_rewrite(state)
-        assert result == "writer", "Should still allow rewrite because state max_retries=5"
-
-    def test_should_rewrite_missing_retry_counts(self):
-        """_should_rewrite handles missing retry_counts (None or absent)."""
-        state = {
-            "current_chapter": 1,
-            "current_chapter_quality": {"need_rewrite": True},
-            # retry_counts absent
-        }
-
-        result = _should_rewrite(state)
-        assert result == "writer"
-
-    def test_quality_reviewer_force_pass_at_max_retries(self):
-        """Quality reviewer node force-passes when retry count reaches max_retries.
-
-        This tests the logic at quality_reviewer.py lines 450-462.
-        """
-        from src.novel.agents.quality_reviewer import quality_reviewer_node
-
-        state = _make_base_state()
-        state["current_chapter"] = 3
-        state["current_chapter_text"] = "这是一段需要审查的测试文本内容。" * 30
-        state["current_chapter_outline"] = {
-            "chapter_number": 3,
-            "title": "第3章",
-            "goal": "测试",
-            "key_events": ["事件"],
-        }
-        state["max_retries"] = 2
-        state["retry_counts"] = {3: 1}  # Already 1 retry
-
-        # Mock the quality reviewer to produce need_rewrite=True
-        mock_reviewer = MagicMock()
-        mock_reviewer.review_chapter.return_value = {
-            "need_rewrite": True,
-            "rewrite_reason": "测试失败原因",
-            "rule_check": {"passed": False},
-            "scores": {},
-            "suggestions": [],
-        }
-        mock_reviewer.should_rewrite.return_value = True
-
-        mock_llm = MagicMock()
-
-        with patch("src.novel.agents.quality_reviewer.create_llm_client", return_value=mock_llm), \
-             patch("src.novel.agents.quality_reviewer.QualityReviewer", return_value=mock_reviewer):
-            result = quality_reviewer_node(state)
-
-        # retry_counts[3] should now be 2 (incremented from 1)
-        assert result["retry_counts"][3] == 2
-        # Since 2 >= max_retries(2), it should force pass
-        quality = result["current_chapter_quality"]
-        assert quality["need_rewrite"] is False, "Should force-pass after reaching max_retries"
-
-    def test_quality_reviewer_allows_rewrite_under_limit(self):
-        """Quality reviewer keeps need_rewrite=True when under max_retries."""
-        from src.novel.agents.quality_reviewer import quality_reviewer_node
-
-        state = _make_base_state()
-        state["current_chapter"] = 2
-        state["current_chapter_text"] = "测试文本内容，需要重写。" * 30
-        state["current_chapter_outline"] = {
-            "chapter_number": 2,
-            "title": "第2章",
-            "goal": "测试",
-            "key_events": ["事件"],
-        }
-        state["max_retries"] = 5
-        state["retry_counts"] = {2: 0}  # First attempt
-
-        mock_reviewer = MagicMock()
-        mock_reviewer.review_chapter.return_value = {
-            "need_rewrite": True,
-            "rewrite_reason": "质量不达标",
-            "rule_check": {"passed": False},
-            "scores": {},
-            "suggestions": [],
-        }
-        mock_reviewer.should_rewrite.return_value = True
-
-        mock_llm = MagicMock()
-
-        with patch("src.novel.agents.quality_reviewer.create_llm_client", return_value=mock_llm), \
-             patch("src.novel.agents.quality_reviewer.QualityReviewer", return_value=mock_reviewer):
-            result = quality_reviewer_node(state)
-
-        # retry_counts[2] should be 1, which is < max_retries(5)
-        assert result["retry_counts"][2] == 1
-        # need_rewrite should remain True (no force-pass)
-        quality = result["current_chapter_quality"]
-        assert quality["need_rewrite"] is True
+# 档 4 拔除了 graph.py 的 _should_rewrite 条件边和 MAX_REWRITES 常量。
+# QualityReviewer 现在只产报告（need_rewrite 字段仍存在作为信息标签），
+# 不再据此回调 writer / 递增 retry_counts / force-pass。
+# 原先的 TestRewriteLimitLogic 已删除。
 
 
 # ===========================================================================
