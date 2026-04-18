@@ -239,22 +239,20 @@ class TestRefineChapter:
         assert r.get("status") == "refused"
         assert "已发布" in r.get("error", "")
 
-    def test_refine_no_change_when_clean(self, executor, workspace):
-        """干净的章节，verify pass + critic pass → final 与原文相同 → not changed.
-
-        seed 时 estimated_words=2500，所以正文要写够 2500 字以避免长度检查失败。
-        """
+    def test_refine_clean_chapter_returns_accept_report(self, executor, workspace):
+        """干净章节 → recommended_action=accept；正文不被修改。"""
         ws, nid = workspace
         from src.novel.storage.file_manager import FileManager
 
-        FileManager(str(ws)).save_chapter(
+        fm = FileManager(str(ws))
+        original = "林辰站在矿场前目光扫过远处。" * 200
+        fm.save_chapter(
             nid,
             1,
             {
                 "chapter_number": 1,
                 "title": "测试",
-                # 写到 ~2500 字符避免长度检查 fail
-                "full_text": "林辰站在矿场前目光扫过远处。" * 200,
+                "full_text": original,
             },
         )
 
@@ -273,41 +271,154 @@ class TestRefineChapter:
         assert r["changed"] is False
         assert r["verify_passed"] is True
         assert r["critic_passed"] is True
+        assert r["report"]["recommended_action"] == "accept"
+        # 正文未被改（核心断言：零自动重写）
+        reloaded = fm.load_chapter(nid, 1)
+        assert reloaded["full_text"] == original
 
-    def test_refine_changes_text_when_dirty(self, executor, workspace):
-        """有 hard-ban 禁词 → verify 触发 rewrite → 落盘新文本."""
+    def test_refine_dirty_chapter_reports_needs_rewrite_without_mutating(
+        self, executor, workspace
+    ):
+        """脏章节（硬约束失败）→ recommended_action=needs_rewrite，但正文不被修改。"""
         ws, nid = workspace
         from src.novel.storage.file_manager import FileManager
 
         fm = FileManager(str(ws))
+        original = "一股莫名的力量袭来。" * 10
         fm.save_chapter(
             nid,
             1,
             {
                 "chapter_number": 1,
                 "title": "测试",
-                "full_text": "一股莫名的力量袭来。" * 10,
+                "full_text": original,
             },
         )
 
-        new_text = "他眯起眼皱眉看向远方山峦上的浮云。" * 200
-
+        # critic 也应只被调一次（单轮）
         fake_llm = MagicMock()
-        responses = [
-            LLMResponse(content=new_text, model="m", usage=None),
-            LLMResponse(content='{"strengths": ["改进"], "issues": []}', model="m", usage=None),
-        ]
-        fake_llm.chat.side_effect = responses
+        fake_llm.chat.return_value = LLMResponse(
+            content='{"strengths": [], "issues": []}',
+            model="m",
+            usage=None,
+        )
 
         with patch.object(
             AgentToolExecutor, "_llm_for_critic", return_value=fake_llm
         ):
             r = executor.execute("refine_chapter", {"chapter_number": 1})
 
-        assert r["changed"] is True
+        # 关键不变量
+        assert r["changed"] is False  # 永远 False，零自动重写
+        assert r["verify_passed"] is False
+        assert "report" in r
+        assert r["report"]["recommended_action"] == "needs_rewrite"
+        assert any(
+            f["rule"] == "banned_phrase"
+            for f in r["report"]["verifier_findings"]
+        )
+        # 正文 before == after
         reloaded = fm.load_chapter(nid, 1)
-        assert "莫名的力量" not in reloaded["full_text"]
-        assert reloaded["word_count"] > 0
+        assert reloaded["full_text"] == original
+        # critic LLM 至多 1 次
+        assert fake_llm.chat.call_count <= 1
+
+    def test_refine_with_legacy_kwargs_is_tolerated(self, executor, workspace):
+        """老调用方传 max_verify_retries / max_refine_iters 不应 crash（被静默忽略）。"""
+        ws, nid = workspace
+        from src.novel.storage.file_manager import FileManager
+
+        FileManager(str(ws)).save_chapter(
+            nid,
+            1,
+            {
+                "chapter_number": 1,
+                "title": "测试",
+                "full_text": "林辰站在矿场前目光扫过远处。" * 200,
+            },
+        )
+
+        fake_llm = MagicMock()
+        fake_llm.chat.return_value = LLMResponse(
+            content='{"strengths": [], "issues": []}', model="m", usage=None
+        )
+        with patch.object(
+            AgentToolExecutor, "_llm_for_critic", return_value=fake_llm
+        ):
+            r = executor.execute(
+                "refine_chapter",
+                {
+                    "chapter_number": 1,
+                    "max_verify_retries": 5,  # deprecated
+                    "max_refine_iters": 5,    # deprecated
+                },
+            )
+        assert "error" not in r
+        assert r["changed"] is False
+        assert "report" in r
+
+    def test_refine_report_shape(self, executor, workspace):
+        """返回 dict 含 report 字段，字段按 RefineReport schema。"""
+        ws, nid = workspace
+        from src.novel.storage.file_manager import FileManager
+
+        FileManager(str(ws)).save_chapter(
+            nid,
+            1,
+            {
+                "chapter_number": 1,
+                "title": "测试",
+                "full_text": "林辰站在矿场前目光扫过远处。" * 200,
+            },
+        )
+        fake_llm = MagicMock()
+        fake_llm.chat.return_value = LLMResponse(
+            content='{"strengths": ["好"], "issues": []}', model="m", usage=None
+        )
+        with patch.object(
+            AgentToolExecutor, "_llm_for_critic", return_value=fake_llm
+        ):
+            r = executor.execute("refine_chapter", {"chapter_number": 1})
+
+        rep = r["report"]
+        for key in (
+            "chapter_number",
+            "sanitized",
+            "verifier_findings",
+            "critic_findings",
+            "overall_assessment",
+            "recommended_action",
+        ):
+            assert key in rep
+        assert rep["chapter_number"] == 1
+        assert r["recommended_action"] == rep["recommended_action"]
+
+    def test_refine_critic_disabled_skips_llm(self, executor, workspace):
+        """enable_critic=False 时不应要求 LLM，也不会调 critic。"""
+        ws, nid = workspace
+        from src.novel.storage.file_manager import FileManager
+
+        FileManager(str(ws)).save_chapter(
+            nid,
+            1,
+            {
+                "chapter_number": 1,
+                "title": "测试",
+                "full_text": "林辰站在矿场前目光扫过远处。" * 200,
+            },
+        )
+        fake_llm = MagicMock()  # should not be called
+        with patch.object(
+            AgentToolExecutor, "_llm_for_critic", return_value=fake_llm
+        ):
+            r = executor.execute(
+                "refine_chapter",
+                {"chapter_number": 1, "enable_critic": False},
+            )
+        assert "error" not in r
+        assert r["critic_passed"] is True
+        assert r["critique_attempts"] == 0
+        assert fake_llm.chat.call_count == 0
 
     def test_unknown_chapter_error(self, executor):
         r = executor.execute("refine_chapter", {"chapter_number": 99})

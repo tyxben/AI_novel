@@ -239,12 +239,15 @@ TOOLS = [
     },
     {
         "name": "refine_chapter",
-        "description": "对已落盘章节跑 SelfRefineLoop（verify+critic+rewrite 闭环）。改写并落盘，附完整执行轨迹。LLM 成本可观，max_iter 控制。",
+        "description": (
+            "对已落盘章节出一份审阅报告（单轮，不改正文）：跑 sanitize + verifier + "
+            "critic，返回 RefineReport（硬约束报告 + 软质量报告 + recommended_action）。"
+            "作者读报告后若决定重写，请显式调用 rewrite_chapter 工具；本工具自身"
+            "不会修改任何章节文件。"
+        ),
         "parameters": {
             "chapter_number": {"type": "integer", "description": "章节号"},
-            "max_verify_retries": {"type": "integer", "description": "verify 最多重写次数（默认2）", "optional": True},
-            "max_refine_iters": {"type": "integer", "description": "critic 最多优化轮次（默认2）", "optional": True},
-            "enable_critic": {"type": "boolean", "description": "是否跑 critic 阶段（默认 true）", "optional": True},
+            "enable_critic": {"type": "boolean", "description": "是否跑 critic 阶段（默认 true，关闭可省 LLM）", "optional": True},
         },
     },
     {
@@ -1535,10 +1538,14 @@ class AgentToolExecutor:
     def _tool_refine_chapter(
         self,
         chapter_number: int,
-        max_verify_retries: int = 2,
-        max_refine_iters: int = 2,
         enable_critic: bool = True,
+        **_legacy: Any,  # swallow deprecated max_verify_retries / max_refine_iters
     ) -> dict:
+        """单轮审阅工具（Phase 0 档 4b：零自动重写）。
+
+        出一份 ``RefineReport``（verifier + critic 结构化报告），**不改章节正文、
+        不落盘**。作者读完报告若决定重写，显式调用 ``rewrite_chapter`` 工具。
+        """
         from src.novel.agents.chapter_critic import ChapterCritic
         from src.novel.services.chapter_verifier import ChapterVerifier
         from src.novel.services.refine_loop import RefineConfig, run_refine_loop
@@ -1550,7 +1557,7 @@ class AgentToolExecutor:
 
         fm = FileManager(self.workspace)
         novel_data = fm.load_novel(self.novel_id) or {}
-        # Refuse to refine published chapters
+        # 即使是单轮只读报告，发布章节我们也拒绝产生建议（保持既有契约）
         if chapter_number in set(novel_data.get("published_chapters") or []):
             return {
                 "error": f"第{chapter_number}章已发布，不能 refine。请先取消发布。",
@@ -1564,37 +1571,16 @@ class AgentToolExecutor:
         )
         prev_text = self._load_chapter_text(chapter_number - 1) or ""
 
-        try:
-            llm = self._llm_for_critic()
-        except Exception as exc:
-            return {"error": f"无可用 LLM: {exc}"}
+        # critic 需要 LLM；verifier 不用。enable_critic=False 时允许缺失 LLM。
+        llm = None
+        if enable_critic:
+            try:
+                llm = self._llm_for_critic()
+            except Exception as exc:
+                return {"error": f"无可用 LLM: {exc}"}
 
-        # Build draft_fn that returns the existing text (we're refining, not regenerating)
         def _draft_fn() -> str:
             return text
-
-        # Build rewrite_fn using the same LLM
-        def _rewrite_fn(prev_text: str, feedback: str) -> str:
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是一位中文长篇小说作者，正在按编辑反馈精修一章。"
-                        "保留原章节的整体结构和情节线，只针对反馈中提到的问题做局部改写。"
-                        "禁止：增删主要情节、改变章节目标、引入新角色。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"## 编辑反馈\n{feedback}\n\n"
-                        f"## 待修订的章节正文\n{prev_text}\n\n"
-                        "请输出完整修订后的章节正文，不要任何解释或 markdown 标题。"
-                    ),
-                },
-            ]
-            resp = llm.chat(messages, temperature=0.5, max_tokens=6000)
-            return (resp.content or "").strip()
 
         # Gather verify constraints (same as verify_chapter)
         banned = self._global_banned_phrases()
@@ -1625,16 +1611,11 @@ class AgentToolExecutor:
         except Exception:
             pass
 
-        critic = ChapterCritic(llm) if enable_critic else None
-        config = RefineConfig(
-            max_verify_retries=max(0, min(int(max_verify_retries), 3)),
-            max_refine_iters=max(0, min(int(max_refine_iters), 3)),
-            enable_critic=bool(enable_critic),
-        )
+        critic = ChapterCritic(llm) if (enable_critic and llm is not None) else None
+        config = RefineConfig(enable_critic=bool(enable_critic and critic is not None))
 
         trace = run_refine_loop(
             draft_fn=_draft_fn,
-            rewrite_fn=_rewrite_fn,
             verifier=ChapterVerifier(),
             critic=critic,
             must_fulfill_debts=debts,
@@ -1648,29 +1629,27 @@ class AgentToolExecutor:
             config=config,
         )
 
-        # Persist final_text only if it actually changed
-        changed = trace.final_text and trace.final_text != text
-        if changed:
-            ch_data = fm.load_chapter(self.novel_id, chapter_number) or {}
-            ch_data["full_text"] = trace.final_text
-            ch_data["word_count"] = len(trace.final_text)
-            fm.save_chapter(self.novel_id, chapter_number, ch_data)
-            self.close()  # invalidate cached structured_db
+        report = trace.report
+        report_dict = report.model_dump() if report is not None else {}
 
+        # 不落盘。保留几个高频字段便于调用者直接读取，不再有 refine_iterations
+        # 概念（单轮固定，字段保留为 1 兼容老前端）。
         return {
             "chapter_number": chapter_number,
-            "changed": bool(changed),
+            "changed": False,
             "before_words": len(text),
-            "after_words": len(trace.final_text) if trace.final_text else 0,
+            "after_words": len(text),
             "verify_passed": trace.verify_passed,
             "critic_passed": trace.critic_passed,
-            "refine_iterations": trace.refine_iterations,
+            "refine_iterations": 1,  # 兼容字段：单轮固定 1，不再代表重写次数
             "verify_attempts": len(trace.verify_attempts),
             "critique_attempts": len(trace.critique_attempts),
             "sanitize_actions": trace.sanitize_actions,
             "opening_duplicate_flagged": trace.opening_duplicate_flagged,
             "total_llm_calls": trace.total_llm_calls,
             "notes": trace.notes[-5:],
+            "report": report_dict,
+            "recommended_action": report_dict.get("recommended_action", "accept"),
         }
 
     def _tool_get_reflexion_log(
