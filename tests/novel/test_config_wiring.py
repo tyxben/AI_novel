@@ -116,54 +116,32 @@ def _mock_llm_scenes(scene_count: int = 3, total_words: int = 3000) -> str:
 
 
 class TestBlacklistOverrides:
-    """Test that blacklist_overrides in rule_check filters AI flavor hits."""
+    """Phase 0 架构重构：AI 味黑名单已废弃，overrides 现在永远无命中可过滤。
 
-    def test_no_overrides_detects_all(self) -> None:
-        """Without overrides, all AI flavor hits are reported."""
+    保留这些测试作为 smoke test，确认 blacklist_overrides 参数传递不抛错；
+    TODO(phase-1): StyleProfile 接管后用新的阈值机制重写这些测试。
+    """
+
+    def test_no_overrides_returns_empty_ai_flavor(self) -> None:
+        """Stubbed blacklist → ai_flavor_issues always empty."""
         tool = QualityCheckTool()
         result = tool.rule_check(_AI_FLAVOR_TEXT)
-        assert len(result.ai_flavor_issues) > 0
+        assert result.ai_flavor_issues == []
 
-    def test_override_allows_phrase_within_threshold(self) -> None:
-        """When override allows N occurrences, hits within limit are suppressed."""
-        # "内心翻涌" appears once in _AI_FLAVOR_TEXT
-        overrides = {"内心翻涌": 1}
+    def test_overrides_parameter_still_accepted(self) -> None:
+        """blacklist_overrides 依然可以传入，不抛异常即可。"""
         tool = QualityCheckTool()
-        result_with = tool.rule_check(_AI_FLAVOR_TEXT, blacklist_overrides=overrides)
-        result_without = tool.rule_check(_AI_FLAVOR_TEXT)
-
-        # The override should suppress "内心翻涌" (1 occurrence <= threshold 1)
-        issues_with = [i for i in result_with.ai_flavor_issues if "内心翻涌" in i]
-        issues_without = [i for i in result_without.ai_flavor_issues if "内心翻涌" in i]
-        assert len(issues_with) == 0
-        assert len(issues_without) == 1
-
-    def test_override_zero_threshold_flags_all(self) -> None:
-        """Override with threshold 0 means even 1 occurrence is flagged."""
-        overrides = {"内心翻涌": 0}
-        tool = QualityCheckTool()
-        result = tool.rule_check(_AI_FLAVOR_TEXT, blacklist_overrides=overrides)
-        issues = [i for i in result.ai_flavor_issues if "内心翻涌" in i]
-        assert len(issues) == 1
-
-    def test_override_does_not_affect_unmentioned_phrases(self) -> None:
-        """Phrases not in overrides are still flagged normally."""
-        overrides = {"内心翻涌": 5}  # Only override one phrase
-        tool = QualityCheckTool()
-        result = tool.rule_check(_AI_FLAVOR_TEXT, blacklist_overrides=overrides)
-        # Other AI phrases like "嘴角勾起一抹" should still be flagged
-        other_issues = [
-            i for i in result.ai_flavor_issues
-            if "嘴角勾起一抹" in i or "命运的齿轮" in i
-        ]
-        assert len(other_issues) > 0
+        result = tool.rule_check(
+            _AI_FLAVOR_TEXT, blacklist_overrides={"内心翻涌": 0}
+        )
+        # Stubbed blacklist returns no hits, overrides become irrelevant.
+        assert result.ai_flavor_issues == []
 
     def test_empty_overrides_same_as_none(self) -> None:
         """Empty dict should behave the same as no overrides."""
         tool = QualityCheckTool()
         result_none = tool.rule_check(_AI_FLAVOR_TEXT)
         result_empty = tool.rule_check(_AI_FLAVOR_TEXT, blacklist_overrides={})
-        # Empty dict is falsy, so no filtering should happen
         assert len(result_none.ai_flavor_issues) == len(result_empty.ai_flavor_issues)
 
 
@@ -186,14 +164,17 @@ class TestEnableRuleCheck:
         assert report["need_rewrite"] is False
 
     def test_rule_check_enabled_detects_issues(self) -> None:
-        """With enable_rule_check=True (default), AI-flavored text should fail."""
+        """Phase 0 架构重构：AI 味黑名单废弃；AI-flavored text 不再被 rule_check 判失败。
+
+        TODO(phase-1): StyleProfile 接管后重写。
+        """
         reviewer = QualityReviewer(None)
         report = reviewer.review_chapter(
             _AI_FLAVOR_TEXT,
             enable_rule_check=True,
         )
-        assert report["rule_check"]["passed"] is False
-        assert report["need_rewrite"] is True
+        # Rule check enabled but no AI flavor hits → passes.
+        assert report["rule_check"]["ai_flavor_issues"] == []
 
     def test_rule_check_disabled_with_blacklist_overrides(self) -> None:
         """When rule check is disabled, blacklist_overrides are irrelevant."""

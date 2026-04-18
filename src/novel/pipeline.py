@@ -520,7 +520,51 @@ class NovelPipeline:
         # Heal any historical duplication in the chapters list on every load.
         if "chapters" in data and isinstance(data["chapters"], list):
             data["chapters"] = self._dedupe_chapters_list(data["chapters"])
+        # Drop stale LLM provider/model whose API key is no longer available
+        # in the current environment.  Without this, every LLM call first
+        # tries the stale provider, fails, prints a warning, and falls back
+        # to auto-detect — wasting time and polluting logs.
+        self._drop_stale_llm_provider(data)
         return data
+
+    @staticmethod
+    def _drop_stale_llm_provider(state: dict) -> None:
+        """If the checkpoint's LLM provider has no usable API key in env,
+        strip ``provider`` / ``model`` / ``api_key`` so ``create_llm_client``
+        falls back to current ``config.yaml`` and env-based auto-detection.
+
+        Mutates ``state`` in place.
+        """
+        import os
+
+        llm_cfg = state.get("config", {}).get("llm")
+        if not isinstance(llm_cfg, dict):
+            return
+        provider = llm_cfg.get("provider")
+        if not provider or provider == "auto":
+            return
+        env_key_map = {
+            "openai": "OPENAI_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+        }
+        env_key = env_key_map.get(provider)
+        # Unknown providers (e.g. ollama) and explicit api_key entries are
+        # left alone — only purge when we *know* the env-key is required
+        # and missing.
+        if env_key is None:
+            return
+        if llm_cfg.get("api_key"):
+            return
+        if os.environ.get(env_key):
+            return
+        log.info(
+            "Checkpoint provider %r has no %s in env; reverting to auto-detect.",
+            provider,
+            env_key,
+        )
+        for k in ("provider", "model", "api_key", "api_key_env", "base_url"):
+            llm_cfg.pop(k, None)
 
     # ------------------------------------------------------------------
     # Refresh state from novel.json (canonical source of truth)
@@ -1040,7 +1084,6 @@ class NovelPipeline:
         end_chapter: int | None = None,
         silent: bool = False,
         progress_callback: Callable[[float, str], None] | None = None,
-        react_mode: bool = False,
         budget_mode: bool = False,
     ) -> dict:
         """Generate chapters for an existing project.
@@ -1145,7 +1188,6 @@ class NovelPipeline:
                 state["main_storyline"] = {}
 
         # Pass writer mode flags into state
-        state["react_mode"] = react_mode
         state["budget_mode"] = budget_mode
 
         # Initialize chapters_text from existing chapters in state + disk

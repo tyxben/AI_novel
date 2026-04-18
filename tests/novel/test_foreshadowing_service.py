@@ -1,4 +1,9 @@
-"""伏笔管理服务测试 - ForeshadowingService + ForeshadowingTool"""
+"""伏笔管理服务测试 - ForeshadowingService
+
+NOTE: ``ForeshadowingTool`` 已随 architecture-rework-2026 Phase 0 删除，
+对应的 ``TestForeshadowingTool`` 用例集体下线。本文件只保留
+``ForeshadowingService`` + ``_extract_json_array`` + 集成用例。
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,6 @@ from src.novel.services.foreshadowing_service import (
     _extract_json_array,
 )
 from src.novel.storage.knowledge_graph import KnowledgeGraph
-from src.novel.tools.foreshadowing_tool import ForeshadowingTool
 
 
 # ---------------------------------------------------------------------------
@@ -494,94 +498,6 @@ class TestPromoteToForeshadowing:
                 resolution_plan="plan",
                 target_chapter=10,
             )
-
-
-# ---------------------------------------------------------------------------
-# ForeshadowingTool tests
-# ---------------------------------------------------------------------------
-
-
-class TestForeshadowingTool:
-    def test_from_components(self, knowledge_graph, mock_llm, mock_memory):
-        """Test creating tool from components."""
-        tool = ForeshadowingTool.from_components(
-            knowledge_graph=knowledge_graph,
-            llm_client=mock_llm,
-            novel_memory=mock_memory,
-        )
-        assert isinstance(tool.service, ForeshadowingService)
-
-    def test_extract_details_delegates(self, service, mock_llm):
-        """Tool.extract_details should delegate to service."""
-        tool = ForeshadowingTool(service)
-        llm_response = MagicMock()
-        llm_response.content = json.dumps([{
-            "content": "测试",
-            "context": "测试上下文",
-            "category": "道具",
-        }])
-        mock_llm.chat.return_value = llm_response
-
-        results = tool.extract_details("章节文本", 1)
-        assert len(results) == 1
-
-    def test_search_reusable_details_delegates(self, service, mock_memory):
-        """Tool.search_reusable_details should delegate to service."""
-        tool = ForeshadowingTool(service)
-        mock_memory.search_details.return_value = {
-            "ids": [["d1"]],
-            "documents": [["剑"]],
-            "metadatas": [[{"chapter": 1, "category": "道具", "detail_id": "d1", "type": "detail"}]],
-        }
-
-        results = tool.search_reusable_details("武器", current_chapter=10)
-        assert len(results) == 1
-
-    def test_promote_to_foreshadowing_delegates(self, service, knowledge_graph):
-        """Tool.promote_to_foreshadowing should delegate to service."""
-        tool = ForeshadowingTool(service)
-        detail = DetailEntry(
-            detail_id="d1",
-            chapter=1,
-            content="道具",
-            context="上下文",
-            category="道具",
-        )
-
-        result = tool.promote_to_foreshadowing(
-            detail_id="d1",
-            resolution_plan="计划",
-            target_chapter=10,
-            detail=detail,
-        )
-        assert isinstance(result, Foreshadowing)
-
-    def test_verify_foreshadowings_delegates(self, service):
-        """Tool.verify_foreshadowings should delegate to service."""
-        tool = ForeshadowingTool(service)
-        result = tool.verify_foreshadowings(
-            chapter_text="主角获得了铁剑",
-            chapter_number=3,
-            planned_plants=["铁剑"],
-            planned_collects=[],
-        )
-        assert "plants_confirmed" in result
-
-    def test_get_forgotten_delegates(self, service, knowledge_graph):
-        """Tool.get_forgotten should delegate to service."""
-        tool = ForeshadowingTool(service)
-        # Add a foreshadowing planted long ago
-        knowledge_graph.add_foreshadowing_node(
-            foreshadowing_id="old_foreshadow",
-            planted_chapter=1,
-            content="远古伏笔",
-            target_chapter=-1,
-            status="pending",
-        )
-
-        result = tool.get_forgotten(current_chapter=20, threshold=10)
-        assert len(result) == 1
-        assert result[0]["foreshadowing_id"] == "old_foreshadow"
 
 
 # ---------------------------------------------------------------------------

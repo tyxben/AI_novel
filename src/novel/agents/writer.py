@@ -429,30 +429,11 @@ class Writer:
         style_name: str,
         scenes_written_summary: str = "",
         debt_summary: str = "",
-        react_mode: bool = False,
         budget_mode: bool = False,
         feedback_prompt: str = "",
         continuity_brief: str = "",
     ) -> Scene:
         """生成单个场景正文。"""
-        if react_mode:
-            from src.novel.agents.writer_react import WriterReactAgent
-
-            react_agent = WriterReactAgent(self.llm)
-            return react_agent.generate_scene(
-                scene_plan=scene_plan,
-                chapter_outline=chapter_outline,
-                characters=characters,
-                world_setting=world_setting,
-                context=context,
-                style_name=style_name,
-                budget_mode=budget_mode,
-                scenes_written_summary=scenes_written_summary,
-                debt_summary=debt_summary,
-                feedback_prompt=feedback_prompt,
-                continuity_brief=continuity_brief,
-            )
-
         char_desc = self._build_character_description(characters)
         world_desc = self._build_world_description(world_setting)
         style = self._get_style_prompt(style_name)
@@ -752,7 +733,6 @@ class Writer:
         context: str,
         style_name: str,
         debt_summary: str = "",
-        react_mode: bool = False,
         budget_mode: bool = False,
         feedback_prompt: str = "",
         continuity_brief: str = "",
@@ -817,7 +797,6 @@ class Writer:
                 style_name=style_name,
                 scenes_written_summary=scenes_written_summary,
                 debt_summary=scene_debt_summary,
-                react_mode=react_mode,
                 budget_mode=budget_mode,
                 feedback_prompt=feedback_prompt,
                 continuity_brief=continuity_brief,
@@ -1544,8 +1523,7 @@ def writer_node(state: dict) -> dict:
     scene_plans = state.get("current_scenes") or []
     style_name = state.get("style_name", "webnovel.shuangwen")
 
-    # Read react/budget mode from state
-    react_mode = state.get("react_mode", False)
+    # Read budget mode from state
     budget_mode_writer = state.get("budget_mode", False)
     feedback_prompt = state.get("feedback_prompt", "")
     debt_summary = state.get("debt_summary", "")
@@ -1689,7 +1667,6 @@ def writer_node(state: dict) -> dict:
             context=context,
             style_name=style_name,
             debt_summary=debt_summary,
-            react_mode=react_mode,
             budget_mode=budget_mode_writer,
             feedback_prompt=feedback_prompt,
             continuity_brief=continuity_brief,

@@ -102,8 +102,8 @@ def _dispatch(task_type: TaskType, params: dict, progress_cb) -> dict:
         return _run_novel_resize(params, progress_cb)
     elif task_type == TaskType.novel_agent_chat:
         return _run_novel_agent_chat(params, progress_cb)
-    elif task_type == TaskType.novel_narrative_rebuild:
-        return _run_novel_narrative_rebuild(params, progress_cb)
+    # NOTE: novel_narrative_rebuild handler removed with NarrativeRebuildService
+    # (architecture-rework-2026 Phase 0).
     elif task_type == TaskType.novel_plan:
         return _run_novel_plan(params, progress_cb)
     else:
@@ -157,7 +157,6 @@ def _run_novel_generate(params: dict, progress_cb) -> dict:
         end_chapter=end_ch,
         silent=params.get("silent", False),
         progress_callback=progress_cb,
-        react_mode=params.get("react_mode", False),
         budget_mode=params.get("budget_mode", False),
     )
 
@@ -615,36 +614,8 @@ def _run_novel_agent_chat(params: dict, progress_cb) -> dict:
     return result
 
 
-def _run_novel_narrative_rebuild(params: dict, progress_cb) -> dict:
-    """Worker: rebuild narrative control from existing chapters."""
-    from src.novel.services.narrative_rebuild import NarrativeRebuildService
-
-    project_path = params["project_path"]
-    method = params.get("method", "hybrid")
-
-    progress_cb(0.05, "初始化叙事重建服务...")
-
-    # Create LLM client if possible (for hybrid/llm extraction)
-    llm = None
-    try:
-        from src.llm.llm_client import create_llm_client
-
-        llm = create_llm_client({})
-    except (ImportError, OSError, ValueError, RuntimeError) as exc:
-        log.warning("LLM 客户端创建失败，将仅使用规则模式: %s", exc)
-
-    progress_cb(0.1, "扫描章节...")
-
-    service = NarrativeRebuildService(
-        project_path, llm_client=llm, progress_cb=progress_cb
-    )
-    try:
-        result = service.rebuild_all(method=method)
-    finally:
-        service.close()
-
-    progress_cb(1.0, "叙事重建完成")
-    return result
+# NOTE: _run_novel_narrative_rebuild removed with NarrativeRebuildService
+# (architecture-rework-2026 Phase 0).
 
 
 def _run_novel_plan(params: dict, progress_cb) -> dict:

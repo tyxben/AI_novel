@@ -600,37 +600,19 @@ class TestCharacterDesignerNode:
         assert "角色生成失败" in result["errors"][-1]["message"]
         assert "character_designer" in result["completed_nodes"]
 
-    def test_default_genre_when_missing(self):
-        """state 缺少 genre 时使用默认值。"""
-        characters_json = _make_characters_json()
-        profile_json = _make_profile_json()
+    def test_missing_genre_raises(self):
+        """Phase 0 架构重构：state 缺少 genre 时直接抛 ValueError，不再 fallback 到 '玄幻'。"""
+        import pytest
 
         mock_client = MagicMock()
-        # extract returns characters, then each profile generation
-        mock_client.chat.side_effect = [
-            FakeLLMResponse(
-                content=json.dumps(characters_json, ensure_ascii=False)
-            ),
-            FakeLLMResponse(
-                content=json.dumps(profile_json, ensure_ascii=False)
-            ),
-            FakeLLMResponse(
-                content=json.dumps(profile_json, ensure_ascii=False)
-            ),
-            FakeLLMResponse(
-                content=json.dumps(profile_json, ensure_ascii=False)
-            ),
-        ]
-
         state = {"outline": _make_outline(), "characters": [], "config": {}}
 
         with patch(
             "src.novel.agents.character_designer.create_llm_client",
             return_value=mock_client,
         ):
-            result = character_designer_node(state)
-
-        assert result["characters"] is not None
+            with pytest.raises(ValueError, match="genre"):
+                character_designer_node(state)
 
 
 class TestMakeDecision:

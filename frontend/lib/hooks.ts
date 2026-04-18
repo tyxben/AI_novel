@@ -348,18 +348,8 @@ export function useDeleteConversation(novelId: string) {
   });
 }
 
-// ─── Narrative Rebuild ────────────────────────────────────────────────
-export function useRebuildNarrative(novelId: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.rebuildNarrative(novelId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["narrative-overview", novelId] });
-      qc.invalidateQueries({ queryKey: ["narrative-debts", novelId] });
-      qc.invalidateQueries({ queryKey: ["story-arcs", novelId] });
-    },
-  });
-}
+// NOTE: useRebuildNarrative removed with NarrativeRebuildService
+// (architecture-rework-2026 Phase 0).
 
 // ─── Narrative Control ─────────────────────────────────────────────────
 export function useNarrativeOverview(novelId: string) {

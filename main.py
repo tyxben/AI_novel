@@ -215,7 +215,8 @@ def novel():
 
 
 @novel.command("write")
-@click.option("--genre", default="玄幻", help="题材（玄幻/都市/武侠/悬疑等）")
+# Phase 0 架构重构：零默认体裁。立项必须显式选体裁，不给 fallback。
+@click.option("--genre", required=True, help="题材（玄幻/都市/武侠/悬疑等），必填")
 @click.option("--theme", required=True, help="主题（如：商战复仇、修仙逆袭）")
 @click.option("--target-words", type=int, default=100000, help="目标字数")
 @click.option("--style", default="", help="风格预设名称")
@@ -400,52 +401,6 @@ def novel_status(project_path: str, verbose: bool):
                     console.print(dec_table)
     except Exception as e:
         log.error("状态查询失败: %s", e)
-        raise click.Abort()
-
-
-@novel.command("import")
-@click.option("--file", "file_path", required=True, type=click.Path(exists=True),
-              help="待导入的文本文件路径")
-@click.option("--genre", default="通用", help="题材（玄幻/都市/武侠/悬疑等）")
-@click.option("--auto-split/--no-auto-split", default=True, help="自动章节分割")
-@click.option("--workspace", "-w", type=click.Path(), default=None, help="工作目录")
-def import_novel(file_path: str, genre: str, auto_split: bool, workspace: str | None):
-    """导入已有小说稿件为项目"""
-    try:
-        from src.llm.llm_client import create_llm_client
-        from src.novel.config import load_novel_config
-        from src.novel.llm_utils import get_stage_llm_config
-        from src.novel.services.import_service import ImportService
-
-        cfg = load_novel_config()
-        llm_config = get_stage_llm_config(cfg.model_dump(), "outline_generation")
-        llm = create_llm_client(llm_config)
-        svc = ImportService(llm)
-
-        ws = workspace or "workspace"
-        console.print(f"\n[bold cyan]导入小说稿件...[/]")
-        console.print(f"  文件: {file_path}")
-        console.print(f"  题材: {genre}")
-        console.print(f"  自动分割: {'是' if auto_split else '否'}")
-
-        result = svc.import_existing_draft(
-            file_path=file_path,
-            genre=genre,
-            auto_split=auto_split,
-            workspace=ws,
-        )
-
-        console.print(f"\n[bold green]导入成功![/]")
-        console.print(f"  项目路径: {result['workspace']}")
-        console.print(f"  章节数: {result['total_chapters']}")
-        console.print(f"  总字数: {result['total_words']:,}")
-        console.print(f"  角色数: {len(result.get('characters', []))}")
-
-        if result.get("characters"):
-            for ch in result["characters"][:5]:
-                console.print(f"    - {ch.get('name', '?')} ({ch.get('role', '?')})")
-    except Exception as e:
-        log.error("导入失败: %s", e)
         raise click.Abort()
 
 

@@ -19,7 +19,8 @@ from src.novel.utils import extract_json_from_llm
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type hints
     from src.novel.storage.knowledge_graph import KnowledgeGraph
-    from src.novel.tools.foreshadowing_tool import ForeshadowingTool
+    # TODO: Phase 2 — reusable-detail lookup moves into LedgerStore; the
+    # legacy ForeshadowingTool has been removed (architecture-rework-2026).
 
 log = logging.getLogger("novel")
 
@@ -34,9 +35,6 @@ _FORESHADOW_LOOKAHEAD = 2
 # Default target chapter offset when auto-planting a foreshadowing that lacks
 # an explicit resolution chapter (we promise resolution within N chapters).
 _DEFAULT_PLANT_TARGET_OFFSET = 8
-
-# Maximum reusable detail suggestions to surface to Writer per plan cycle.
-_REUSABLE_DETAIL_TOP_K = 3
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -179,7 +177,7 @@ class PlotPlanner:
     def __init__(
         self,
         llm_client: LLMClient,
-        foreshadowing_tool: "ForeshadowingTool | None" = None,
+        foreshadowing_tool: Any = None,
         knowledge_graph: "KnowledgeGraph | None" = None,
     ) -> None:
         """Initialize PlotPlanner.
@@ -189,8 +187,10 @@ class PlotPlanner:
         llm_client:
             同步 LLM 客户端，用于场景分解和悬念建议。
         foreshadowing_tool:
-            可选的伏笔工具实例，用于反向检索可复用的历史闲笔（闲笔升级）。
-            未注入时 ``plan_chapter()`` 只返回场景 + 回收提醒，不会检索闲笔。
+            历史遗留参数，仅为兼容旧调用方签名保留。当前始终被忽略，
+            ``reusable_details`` 恒返回空列表。
+            TODO: Phase 2 — 由 LedgerStore 接管历史闲笔反向检索后，
+            彻底移除该参数。
         knowledge_graph:
             可选的知识图谱实例，用于：
             1) 登记正向伏笔节点（foreshadowings_to_plant）
@@ -198,6 +198,7 @@ class PlotPlanner:
             未注入时 ``plan_chapter()`` 跳过这两步（向后兼容）。
         """
         self.llm = llm_client
+        # NOTE: 保留属性以兼容旧单测与签名，但逻辑上已不再使用。
         self.foreshadowing_tool = foreshadowing_tool
         self.knowledge_graph = knowledge_graph
 
@@ -457,8 +458,8 @@ class PlotPlanner:
         Parameters
         ----------
         reusable_query:
-            反向检索查询，用于 ``foreshadowing_tool.search_reusable_details``。
-            未提供时基于 ``chapter_outline.goal`` 自动构建。
+            保留参数；当前 ``reusable_details`` 恒为空，等待 Phase 2
+            LedgerStore 接管后重新启用。
         其他参数与 :meth:`decompose_chapter` 相同。
         """
         scenes = self.decompose_chapter(
@@ -643,58 +644,12 @@ class PlotPlanner:
     ) -> list[dict]:
         """后置伏笔检索：查找可升级的历史闲笔。
 
-        通过 ``foreshadowing_tool.search_reusable_details`` 反向检索。
-        未注入工具或检索失败时返回空列表（向后兼容）。
+        TODO: Phase 2 — 该路径原先依赖已删除的 ``ForeshadowingTool``；
+        重新启用时改由 ``LedgerStore`` 提供反向检索。
+        当前阶段恒返回空列表，不调用任何外部检索接口。
         """
-        if self.foreshadowing_tool is None:
-            return []
-
-        effective_query = (query or "").strip()
-        if not effective_query:
-            # Build query from chapter_outline.goal + first key_event
-            goal = (chapter_outline.goal or "").strip()
-            key = ""
-            if chapter_outline.key_events:
-                first = chapter_outline.key_events[0]
-                if isinstance(first, str):
-                    key = first.strip()
-            effective_query = (goal + " " + key).strip()
-
-        if not effective_query:
-            return []
-
-        try:
-            details = self.foreshadowing_tool.search_reusable_details(
-                query=effective_query,
-                current_chapter=chapter_outline.chapter_number,
-                top_k=_REUSABLE_DETAIL_TOP_K,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("闲笔检索失败: %s", exc)
-            return []
-
-        results: list[dict] = []
-        for d in details or []:
-            # Support both DetailEntry and plain dict returns for easier mocking
-            if hasattr(d, "model_dump"):
-                data = d.model_dump()
-            elif isinstance(d, dict):
-                data = d
-            else:
-                continue
-            # Skip already-promoted entries
-            if data.get("status") == "promoted":
-                continue
-            results.append(
-                {
-                    "detail_id": data.get("detail_id", ""),
-                    "content": data.get("content", ""),
-                    "chapter": data.get("chapter"),
-                    "category": data.get("category", ""),
-                    "context": data.get("context", ""),
-                }
-            )
-        return results
+        _ = (chapter_outline, query)  # 参数暂未使用，Phase 2 恢复
+        return []
 
     # ------------------------------------------------------------------
     # design_rhythm

@@ -360,7 +360,6 @@ class TestWriterRewritePriority:
             "total_chapters": 10,
             "config": {},
             "style_name": "webnovel.shuangwen",
-            "react_mode": False,
             "budget_mode": False,
             "feedback_prompt": "",
             "debt_summary": "",

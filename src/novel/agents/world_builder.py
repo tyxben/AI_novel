@@ -203,7 +203,12 @@ def world_builder_node(state: dict) -> dict:
         }
 
     builder = WorldBuilder(llm)
-    genre = state.get("genre", "玄幻")
+    # Phase 0 架构重构：零默认体裁。state 必须带 genre。
+    genre = state.get("genre")
+    if not genre:
+        raise ValueError(
+            "state 缺少 genre 字段（Phase 0 架构重构：禁止默认回退到玄幻）"
+        )
     outline = state.get("outline", {})
 
     try:

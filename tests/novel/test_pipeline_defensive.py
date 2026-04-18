@@ -122,7 +122,6 @@ def _make_base_state(novel_id: str = "test_novel", total_chapters: int = 5) -> d
         "completed_nodes": [],
         "retry_counts": {},
         "should_continue": True,
-        "react_mode": False,
         "budget_mode": False,
     }
 

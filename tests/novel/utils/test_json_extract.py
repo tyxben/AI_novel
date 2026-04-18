@@ -264,8 +264,8 @@ class TestHistoricalBehaviourParity:
         assert extract_json_array('{"items": [{"x": 2}]}') == [{"x": 2}]
         assert extract_json_array('{"results": [{"r": 1}]}') == [{"r": 1}]
 
-    def test_import_service_dual_extraction(self):
-        # import_service.py calls both obj and array on the same response.
+    def test_dual_extraction_same_response(self):
+        # Some callers apply both obj and array extraction to the same response.
         text = '{"characters": [{"name": "a"}]}'
         obj = extract_json_obj(text)
         assert obj == {"characters": [{"name": "a"}]}

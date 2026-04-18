@@ -22,7 +22,9 @@ class TaskType(str, enum.Enum):
     novel_rewrite_affected = "novel_rewrite_affected"
     novel_resize = "novel_resize"
     novel_agent_chat = "novel_agent_chat"
-    novel_narrative_rebuild = "novel_narrative_rebuild"
+    # NOTE: novel_narrative_rebuild removed with NarrativeRebuildService
+    # (architecture-rework-2026 Phase 0). 历史任务记录若出现该枚举值，
+    # 会在 TaskType 反序列化时失败；如需兼容旧 DB 需手动清理 tasks 表。
     novel_plan = "novel_plan"
 
 

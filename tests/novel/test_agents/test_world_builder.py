@@ -451,23 +451,17 @@ class TestWorldBuilderNode:
         assert "世界观生成失败" in result["errors"][-1]["message"]
         assert "world_builder" in result["completed_nodes"]
 
-    def test_default_genre_when_missing(self):
-        """state 缺少 genre 时使用默认值。"""
-        world_json = _make_world_json()
+    def test_missing_genre_raises(self):
+        """Phase 0 架构重构：state 缺少 genre 时直接抛 ValueError，不再 fallback 到 '玄幻'。"""
         mock_client = MagicMock()
-        mock_client.chat.return_value = FakeLLMResponse(
-            content=json.dumps(world_json, ensure_ascii=False)
-        )
-
         state = {"outline": {}, "config": {}}
 
         with patch(
             "src.novel.agents.world_builder.create_llm_client",
             return_value=mock_client,
         ):
-            result = world_builder_node(state)
-
-        assert result["world_setting"] is not None
+            with pytest.raises(ValueError, match="genre"):
+                world_builder_node(state)
 
 
 class TestMakeDecision:

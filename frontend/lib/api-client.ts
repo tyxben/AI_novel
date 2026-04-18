@@ -243,11 +243,8 @@ export const api = {
       method: "DELETE",
     }),
 
-  // Narrative rebuild
-  rebuildNarrative: (novelId: string) =>
-    request<{ task_id: string }>(`/api/novels/${novelId}/narrative/rebuild`, {
-      method: "POST",
-    }),
+  // NOTE: rebuildNarrative removed with NarrativeRebuildService
+  // (architecture-rework-2026 Phase 0).
 
   // Narrative Control
   getNarrativeOverview: (id: string) => request<any>(`/api/novels/${id}/narrative/overview`),

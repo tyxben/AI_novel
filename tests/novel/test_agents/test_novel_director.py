@@ -432,20 +432,19 @@ class TestNovelDirectorNode:
         assert "大纲生成失败" in result["errors"][-1]["message"]
         assert "novel_director" in result["completed_nodes"]
 
-    def test_default_values_when_no_input(self):
-        outline_json = _make_outline_json(total_chapters=25)
-        mock_client = MagicMock()
-        mock_client.chat.return_value = FakeLLMResponse(
-            content=json.dumps(outline_json, ensure_ascii=False)
-        )
+    def test_missing_genre_raises(self):
+        """Phase 0 架构重构：state 缺少 genre 时直接抛 ValueError，不再 fallback 到 '玄幻'。"""
+        import pytest
 
+        mock_client = MagicMock()
         state: NovelState = {"config": {}}
 
-        with patch("src.novel.agents.novel_director.create_llm_client", return_value=mock_client):
-            result = novel_director_node(state)
-
-        assert result["outline"] is not None
-        assert result["template"] == "cyclic_upgrade"
+        with patch(
+            "src.novel.agents.novel_director.create_llm_client",
+            return_value=mock_client,
+        ):
+            with pytest.raises(ValueError, match="genre"):
+                novel_director_node(state)
 
     def test_node_sets_style_from_analysis(self):
         outline_json = _make_outline_json(total_chapters=5)

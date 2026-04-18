@@ -75,7 +75,6 @@ def _make_state(total_chapters: int = 2) -> dict:
         "style_name": "webnovel.shuangwen",
         "main_storyline": {"core": "测试主线"},
         "chapters": [],
-        "react_mode": False,
         "budget_mode": False,
         "config": {"llm": {"provider": "openai", "model": "gpt-4"}},
     }

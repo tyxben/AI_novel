@@ -1,12 +1,12 @@
 """PlotPlanner 伏笔集成测试
 
-验证 Task 6.1.2 的三个增强：
-1. 正向伏笔规划 (foreshadowings_to_plant)
-2. 后置伏笔检索 (reusable_details)
-3. 回收提醒 (foreshadowings_to_resolve)
+验证 Task 6.1.2 的两个仍启用的增强：
+1. 正向伏笔规划 (foreshadowings_to_plant) — 依赖 KnowledgeGraph
+2. 回收提醒 (foreshadowings_to_resolve) — 依赖 KnowledgeGraph
 
-外加向后兼容：PlotPlanner 未注入 foreshadowing_tool / knowledge_graph 时
-plan_chapter 仍能工作，只是对应字段为空。
+NOTE: 后置伏笔检索 (reusable_details) 的断言已随 ``ForeshadowingTool``
+一起移除（architecture-rework-2026 Phase 0），Phase 2 由 LedgerStore 接管后恢复。
+保留字段存在性与"无 tool 返回空"两个兜底用例。
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ import pytest
 
 from src.llm.llm_client import LLMClient, LLMResponse
 from src.novel.agents.plot_planner import PlotPlanner
-from src.novel.models.foreshadowing import DetailEntry
 from src.novel.models.novel import ChapterOutline
 from src.novel.storage.knowledge_graph import KnowledgeGraph
 
@@ -243,117 +242,12 @@ def test_plant_handles_kg_failure_gracefully():
 
 
 # ---------------------------------------------------------------------------
-# 2. 后置伏笔检索 (reusable_details)
+# 2. reusable_details 字段存在性（Phase 0 恒为空）
 # ---------------------------------------------------------------------------
 
 
-def test_reusable_details_found_via_tool():
-    """mock foreshadowing_tool 返回两条闲笔，plan 中应包含它们。"""
-    mock_llm = _make_mock_llm()
-    tool = MagicMock()
-    tool.search_reusable_details.return_value = [
-        DetailEntry(
-            detail_id="d1",
-            chapter=3,
-            content="酒馆老板擦拭一把古剑",
-            context="主角瞥见酒馆柜台后...",
-            category="道具",
-            status="available",
-        ),
-        DetailEntry(
-            detail_id="d2",
-            chapter=5,
-            content="山道上的奇怪脚印",
-            context="雨后山道留着深浅不一...",
-            category="异常现象",
-            status="available",
-        ),
-    ]
-
-    planner = PlotPlanner(mock_llm, foreshadowing_tool=tool)
-
-    ch = _make_chapter_outline(chapter_number=10)
-    plan = planner.plan_chapter(
-        chapter_outline=ch,
-        volume_context={},
-        characters=[],
-        reusable_query="主角需要一把信物触发回忆",
-    )
-
-    details = plan["reusable_details"]
-    assert len(details) == 2
-    assert details[0]["detail_id"] == "d1"
-    assert details[0]["chapter"] == 3
-    assert details[1]["detail_id"] == "d2"
-
-    # Tool was called with correct query + current_chapter
-    tool.search_reusable_details.assert_called_once()
-    kwargs = tool.search_reusable_details.call_args.kwargs
-    assert kwargs["query"] == "主角需要一把信物触发回忆"
-    assert kwargs["current_chapter"] == 10
-
-
-def test_reusable_details_filters_out_promoted():
-    """已升级的闲笔 (status=promoted) 不应出现在结果中。"""
-    mock_llm = _make_mock_llm()
-    tool = MagicMock()
-    tool.search_reusable_details.return_value = [
-        DetailEntry(
-            detail_id="d1",
-            chapter=3,
-            content="available 闲笔",
-            context="...",
-            category="道具",
-            status="available",
-        ),
-        DetailEntry(
-            detail_id="d2",
-            chapter=4,
-            content="已升级闲笔",
-            context="...",
-            category="道具",
-            status="promoted",
-        ),
-    ]
-
-    planner = PlotPlanner(mock_llm, foreshadowing_tool=tool)
-    plan = planner.plan_chapter(
-        chapter_outline=_make_chapter_outline(),
-        volume_context={},
-        characters=[],
-        reusable_query="相关查询",
-    )
-
-    details = plan["reusable_details"]
-    assert len(details) == 1
-    assert details[0]["detail_id"] == "d1"
-
-
-def test_reusable_details_query_auto_built_from_goal():
-    """未传 reusable_query 时，自动基于 chapter_outline.goal 构建查询。"""
-    mock_llm = _make_mock_llm()
-    tool = MagicMock()
-    tool.search_reusable_details.return_value = []
-
-    planner = PlotPlanner(mock_llm, foreshadowing_tool=tool)
-    ch = _make_chapter_outline(
-        goal="主角寻找神秘信物",
-        key_events=["进入古墓", "发现玉佩"],
-    )
-    planner.plan_chapter(
-        chapter_outline=ch,
-        volume_context={},
-        characters=[],
-    )
-
-    # Ensure tool was called; query should contain goal text
-    tool.search_reusable_details.assert_called_once()
-    used_query = tool.search_reusable_details.call_args.kwargs["query"]
-    assert "主角寻找神秘信物" in used_query
-
-
-def test_reusable_details_without_tool_returns_empty():
-    """未注入 foreshadowing_tool 时 reusable_details 为空。"""
+def test_reusable_details_always_empty_after_tool_removal():
+    """ForeshadowingTool 删除后，reusable_details 恒返回空列表。"""
     mock_llm = _make_mock_llm()
     planner = PlotPlanner(mock_llm)  # 无 tool
 
@@ -367,71 +261,24 @@ def test_reusable_details_without_tool_returns_empty():
     assert plan["reusable_details"] == []
 
 
-def test_reusable_details_empty_query_skips_search():
-    """查询无法构建（空 goal + 空 key_events）时不调用 tool。"""
+def test_reusable_details_ignores_legacy_tool_argument():
+    """即使旧调用方仍传入 foreshadowing_tool，当前阶段也不会调用它。"""
     mock_llm = _make_mock_llm()
-    tool = MagicMock()
-
-    planner = PlotPlanner(mock_llm, foreshadowing_tool=tool)
-    ch = _make_chapter_outline(goal=" ", key_events=[""])
-    # ChapterOutline 要求 goal 非空，所以这里只能 force-setattr
-    object.__setattr__(ch, "goal", "")
-    object.__setattr__(ch, "key_events", [])
-
-    plan = planner.plan_chapter(
-        chapter_outline=ch,
-        volume_context={},
-        characters=[],
-    )
-
-    assert plan["reusable_details"] == []
-    tool.search_reusable_details.assert_not_called()
-
-
-def test_reusable_details_handles_tool_failure():
-    """tool.search_reusable_details 抛异常时返回空列表而非崩溃。"""
-    mock_llm = _make_mock_llm()
-    tool = MagicMock()
-    tool.search_reusable_details.side_effect = RuntimeError("vector store down")
-
-    planner = PlotPlanner(mock_llm, foreshadowing_tool=tool)
-    plan = planner.plan_chapter(
-        chapter_outline=_make_chapter_outline(),
-        volume_context={},
-        characters=[],
-        reusable_query="something",
-    )
-
-    assert plan["reusable_details"] == []
-
-
-def test_reusable_details_accepts_plain_dict():
-    """tool 返回 plain dict 时也能正常处理（灵活 mock 支持）。"""
-    mock_llm = _make_mock_llm()
-    tool = MagicMock()
-    tool.search_reusable_details.return_value = [
-        {
-            "detail_id": "d99",
-            "chapter": 2,
-            "content": "墙上的裂缝",
-            "context": "主角盯着斑驳墙面...",
-            "category": "环境",
-            "status": "available",
-        }
+    legacy_tool = MagicMock()
+    legacy_tool.search_reusable_details.return_value = [
+        {"detail_id": "d1", "content": "should not appear"}
     ]
 
-    planner = PlotPlanner(mock_llm, foreshadowing_tool=tool)
+    planner = PlotPlanner(mock_llm, foreshadowing_tool=legacy_tool)
     plan = planner.plan_chapter(
         chapter_outline=_make_chapter_outline(),
         volume_context={},
         characters=[],
-        reusable_query="线索",
+        reusable_query="任何查询",
     )
 
-    details = plan["reusable_details"]
-    assert len(details) == 1
-    assert details[0]["detail_id"] == "d99"
-    assert details[0]["chapter"] == 2
+    assert plan["reusable_details"] == []
+    legacy_tool.search_reusable_details.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -591,10 +438,8 @@ def test_plan_chapter_returns_all_four_keys():
     """plan_chapter 返回 dict 必须包含 scenes + 三个伏笔字段。"""
     mock_llm = _make_mock_llm()
     kg = KnowledgeGraph()
-    tool = MagicMock()
-    tool.search_reusable_details.return_value = []
 
-    planner = PlotPlanner(mock_llm, foreshadowing_tool=tool, knowledge_graph=kg)
+    planner = PlotPlanner(mock_llm, knowledge_graph=kg)
     plan = planner.plan_chapter(
         chapter_outline=_make_chapter_outline(),
         volume_context={},
@@ -613,8 +458,8 @@ def test_plan_chapter_returns_all_four_keys():
     assert isinstance(plan["reusable_details"], list)
 
 
-def test_plan_chapter_combines_all_three_features():
-    """端到端：plant + resolve + reusable 同时生效。"""
+def test_plan_chapter_combines_plant_and_resolve():
+    """端到端：plant + resolve 同时生效（reusable_details 在 Phase 2 前恒空）。"""
     mock_llm = _make_mock_llm()
     kg = KnowledgeGraph()
     kg.add_foreshadowing_node(
@@ -625,19 +470,7 @@ def test_plan_chapter_combines_all_three_features():
         status="pending",
     )
 
-    tool = MagicMock()
-    tool.search_reusable_details.return_value = [
-        DetailEntry(
-            detail_id="detail_007",
-            chapter=4,
-            content="酒馆墙上的剑痕",
-            context="主角注意到墙上有一道剑痕...",
-            category="环境",
-            status="available",
-        ),
-    ]
-
-    planner = PlotPlanner(mock_llm, foreshadowing_tool=tool, knowledge_graph=kg)
+    planner = PlotPlanner(mock_llm, knowledge_graph=kg)
 
     ch = _make_chapter_outline(
         chapter_number=9,
@@ -647,7 +480,6 @@ def test_plan_chapter_combines_all_three_features():
         chapter_outline=ch,
         volume_context={},
         characters=[],
-        reusable_query="寻找旧武器的线索",
     )
 
     # Plant: 神秘光芒 登记到 KG
@@ -661,10 +493,8 @@ def test_plan_chapter_combines_all_three_features():
     assert len(resolves) == 1
     assert resolves[0]["foreshadowing_id"] == "fs_old"
 
-    # Reusable: detail_007
-    reusable = plan["reusable_details"]
-    assert len(reusable) == 1
-    assert reusable[0]["detail_id"] == "detail_007"
+    # Reusable: 恒为空（ForeshadowingTool 已删除）
+    assert plan["reusable_details"] == []
 
     # Scenes still populated
     assert len(plan["scenes"]) == 3

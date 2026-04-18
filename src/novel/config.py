@@ -74,16 +74,42 @@ class QualityConfig(BaseModel):
     enable_rule_check: bool = Field(True, description="启用规则硬指标检查")
     enable_pairwise_compare: bool = Field(True, description="启用对比式评估")
     enable_llm_scoring: bool = Field(True, description="启用 LLM 打分")
-    ai_flavor_blacklist: dict[str, int] = Field(
+    ai_flavor_hard_ban: list[str] = Field(
+        default_factory=lambda: [
+            "内心翻涌",       # 抽象抒情，永远不具象
+            "莫名的力量",     # 写不清楚就用这个糊弄
+            "嘴角勾起一抹",   # 公式化网文表情
+            "深邃的眸子",     # 同上
+            "不可名状的",     # 廉价玄秘感
+        ],
+        description=(
+            "硬禁短语：无论场景都属于空洞抒情/抽象偷懒。出现即判失败。"
+            "仅放真正没有合适使用场景的短语。"
+        ),
+    )
+
+    ai_flavor_watchlist: dict[str, int] = Field(
         default_factory=lambda: {
-            "内心翻涌": 2,
-            "莫名的力量": 2,
+            # 短语 → 单章软上限。超过即提示"可能滥用"，由 LLM critic 判断是否合理
+            "瞳孔骤缩": 2,
+            "黑眸": 2,
+            "目光一凝": 2,
+            "眼神一凛": 2,
             "不由得": 3,
             "竟然": 5,
-            "眼神一凛": 2,
-            "嘴角勾起一抹": 2,
         },
-        description="AI 味短语及其单章出现次数阈值",
+        description=(
+            "软观察名单：这些短语在合适场景里能用，但单章超出阈值"
+            "就交给 LLM critic 按场景判断是否滥用。Verifier 不直接据此判失败。"
+        ),
+    )
+
+    # ---- Backwards compat ----
+    # 旧字段 ai_flavor_blacklist 保留只是为了不破坏读旧 config.yaml 的代码。
+    # 新代码请用 ai_flavor_hard_ban / ai_flavor_watchlist。
+    ai_flavor_blacklist: dict[str, int] = Field(
+        default_factory=dict,
+        description="DEPRECATED: 请用 ai_flavor_hard_ban + ai_flavor_watchlist",
     )
 
 

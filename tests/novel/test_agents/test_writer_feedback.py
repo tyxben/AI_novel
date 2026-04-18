@@ -114,7 +114,6 @@ class TestFeedbackPromptInjection:
             world_setting=_make_world(),
             context="前文内容",
             style_name="webnovel.shuangwen",
-            react_mode=False,
             feedback_prompt=feedback_text,
         )
 
@@ -149,7 +148,6 @@ class TestFeedbackPromptInjection:
             world_setting=_make_world(),
             context="前文内容",
             style_name="webnovel.shuangwen",
-            react_mode=False,
             feedback_prompt="",
         )
 
@@ -178,7 +176,6 @@ class TestFeedbackPromptInjection:
             world_setting=_make_world(),
             context="",
             style_name="webnovel.shuangwen",
-            react_mode=False,
             feedback_prompt=feedback_text,
         )
 

@@ -12,6 +12,9 @@ from src.novel.models.chapter import MoodTag
 from src.novel.models.novel import OutlineTemplate
 from src.novel.templates.ai_flavor_blacklist import check_ai_flavor, get_blacklist
 from src.novel.templates.outline_templates import get_template, list_templates
+# NOTE: ai_flavor_blacklist is DEPRECATED (Phase 0 rework). Imports above only
+# stay to confirm backwards-compat stubs remain importable; see
+# TestAIFlavorBlacklistDeprecated below.
 from src.novel.templates.rhythm_templates import get_rhythm
 from src.novel.templates.style_presets import get_style, list_styles
 from src.novel.utils import count_words, extract_json_from_llm, truncate_text
@@ -229,48 +232,22 @@ class TestRhythmTemplates:
 # ==========================================================================
 
 
-class TestAIFlavorBlacklist:
-    """AI 味短语黑名单测试"""
+class TestAIFlavorBlacklistDeprecated:
+    """AI 味短语黑名单已在 Phase 0 架构重构中废弃。
 
-    def test_get_blacklist_has_at_least_50(self) -> None:
-        bl = get_blacklist()
-        assert len(bl) >= 50
+    保留少量烟雾测试确认 stub 仍可 import 且不抛异常，
+    Phase 1 StyleProfile 接管后会整体删除。
+    TODO(phase-1): 删除此类及相关模块。
+    """
 
-    def test_get_blacklist_all_chinese(self) -> None:
-        """所有短语应包含中文"""
-        bl = get_blacklist()
-        for phrase in bl:
-            assert any("\u4e00" <= ch <= "\u9fff" for ch in phrase), (
-                f"短语 '{phrase}' 不包含中文"
-            )
+    def test_get_blacklist_returns_empty(self) -> None:
+        # Stubbed — no more hardcoded phrase list.
+        assert get_blacklist() == []
 
-    def test_get_blacklist_no_duplicates(self) -> None:
-        bl = get_blacklist()
-        assert len(bl) == len(set(bl))
-
-    def test_check_ai_flavor_hits(self) -> None:
-        text = "他心中涌起一股暖流，嘴角勾起一抹微笑，仿佛时间在这一刻静止了。"
-        hits = check_ai_flavor(text)
-        assert len(hits) >= 2
-        # 确认返回的是 (短语, 位置) 格式
-        for phrase, pos in hits:
-            assert isinstance(phrase, str)
-            assert isinstance(pos, int)
-            assert text[pos : pos + len(phrase)] == phrase
-
-    def test_check_ai_flavor_no_hits(self) -> None:
-        text = "老王蹲在门口抽旱烟，看着远处的麦田发愣。"
-        hits = check_ai_flavor(text)
-        assert hits == []
-
-    def test_check_ai_flavor_empty_text(self) -> None:
+    def test_check_ai_flavor_returns_empty(self) -> None:
+        # Stubbed — detection disabled until StyleProfile lands in Phase 1.
+        assert check_ai_flavor("他心中涌起一股暖流，嘴角勾起一抹微笑。") == []
         assert check_ai_flavor("") == []
-
-    def test_check_ai_flavor_sorted_by_position(self) -> None:
-        text = "命运的齿轮开始转动，他眼神一凛，内心翻涌。"
-        hits = check_ai_flavor(text)
-        positions = [pos for _, pos in hits]
-        assert positions == sorted(positions)
 
 
 # ==========================================================================
@@ -303,7 +280,11 @@ class TestNovelConfig:
         cfg = NovelConfig()
         assert cfg.quality.max_retries == 2
         assert cfg.quality.auto_approve_threshold == 6.0
-        assert "内心翻涌" in cfg.quality.ai_flavor_blacklist
+        # ai_flavor_blacklist 已废弃，新字段是 hard_ban + watchlist
+        assert "内心翻涌" in cfg.quality.ai_flavor_hard_ban
+        assert "瞳孔骤缩" in cfg.quality.ai_flavor_watchlist
+        # 旧字段保留但默认空
+        assert cfg.quality.ai_flavor_blacklist == {}
 
     def test_load_from_dict(self) -> None:
         data = {

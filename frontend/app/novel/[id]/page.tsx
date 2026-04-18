@@ -36,7 +36,8 @@ import {
   useConversationMessages,
   useCreateConversation,
   useDeleteConversation,
-  useRebuildNarrative,
+  // NOTE: useRebuildNarrative removed — narrative rebuild feature deleted
+  // in architecture-rework-2026 Phase 0.
   useVolumesSummary,
   useUpdateChapterMetadata,
 } from "@/lib/hooks";
@@ -3826,7 +3827,6 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
   const [debtFilter, setDebtFilter] = useState("all");
   const [graphOpen, setGraphOpen] = useState(false);
   const [selectedBriefChapter, setSelectedBriefChapter] = useState<number | null>(null);
-  const [rebuildTaskId, setRebuildTaskId] = useState<string | null>(null);
 
   const { data: overview, isLoading: overviewLoading } = useNarrativeOverview(novelId);
   const { data: debts, isLoading: debtsLoading } = useNarrativeDebts(novelId, debtFilter);
@@ -3835,27 +3835,7 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
   const { data: volumes, isLoading: volumesLoading } = useVolumesSummary(novelId);
   const { data: brief } = useChapterBrief(novelId, selectedBriefChapter);
   const fulfillDebt = useFulfillDebt(novelId);
-  const rebuildMut = useRebuildNarrative(novelId);
-  const { data: rebuildTask } = useTask(rebuildTaskId);
-
-  // Track rebuild task completion
-  useEffect(() => {
-    if (!rebuildTask || !rebuildTaskId) return;
-    if (rebuildTask.status === "completed" || rebuildTask.status === "failed") {
-      // Keep the task ID for a short while so user sees the result
-      const timer = setTimeout(() => setRebuildTaskId(null), 8000);
-      return () => clearTimeout(timer);
-    }
-  }, [rebuildTask, rebuildTaskId]);
-
-  const handleRebuild = async () => {
-    try {
-      const result = await rebuildMut.mutateAsync();
-      setRebuildTaskId(result.task_id);
-    } catch {
-      // error handled by mutation state
-    }
-  };
+  // NOTE: rebuild-narrative feature removed (architecture-rework-2026 Phase 0).
 
   const debtFilterTabs = [
     { key: "all", label: "全部" },
@@ -3897,35 +3877,9 @@ function NarrativeControlSection({ novelId }: { novelId: string }) {
         ) : (
           <p className="py-4 text-center text-sm text-slate-400">暂无叙事数据</p>
         )}
-
-        {/* Rebuild narrative button */}
-        <div className="mt-4 flex items-center gap-3">
-          <button
-            onClick={handleRebuild}
-            disabled={rebuildMut.isPending || (!!rebuildTaskId && rebuildTask?.status !== "completed" && rebuildTask?.status !== "failed")}
-            className="inline-flex items-center gap-2 rounded-xl bg-purple-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-purple-700 disabled:opacity-50"
-          >
-            {rebuildMut.isPending || (rebuildTaskId && rebuildTask?.status !== "completed" && rebuildTask?.status !== "failed") ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <RefreshCw className="h-4 w-4" />
-            )}
-            从已有章节重建叙事数据
-          </button>
-          {rebuildTaskId && rebuildTask && (
-            <span className={`text-xs font-medium ${
-              rebuildTask.status === "completed" ? "text-emerald-600" :
-              rebuildTask.status === "failed" ? "text-rose-600" :
-              "text-purple-600"
-            }`}>
-              {rebuildTask.status === "completed"
-                ? (() => { try { const r = JSON.parse(typeof rebuildTask.result === 'string' ? rebuildTask.result : '{}'); return `重建完成！${r.chapters_scanned ?? 0}章扫描, ${r.debts_extracted ?? 0}个债务, ${r.arcs_detected ?? 0}个弧线`; } catch { return "重建完成！"; } })()
-                : rebuildTask.status === "failed"
-                ? `重建失败: ${rebuildTask.error || "未知错误"}`
-                : `${rebuildTask.progress_msg || "正在分析..."} (${Math.round((rebuildTask.progress ?? 0) * 100)}%)`}
-            </span>
-          )}
-        </div>
+        {/* NOTE: "从已有章节重建叙事数据" 按钮移除（architecture-rework-2026
+            Phase 0）— NarrativeRebuildService 已删除，Phase 2/3 合并入
+            Verifier + LedgerStore 后再重新提供入口。 */}
       </Panel>
 
       {/* A2. Volume Settlement Panel */}
@@ -4440,7 +4394,7 @@ function ActiveTaskPanel({ novelId }: { novelId: string }) {
     novel_feedback: "反馈重写",
     novel_edit: "AI 编辑",
     novel_agent_chat: "Agent 对话",
-    novel_narrative_rebuild: "叙事重建",
+    // NOTE: novel_narrative_rebuild removed (architecture-rework-2026 Phase 0).
     novel_resize: "调整章节数",
     novel_rewrite_affected: "设定影响重写",
   };

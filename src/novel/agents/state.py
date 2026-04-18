@@ -87,7 +87,6 @@ class NovelState(TypedDict, total=False):
     resume: bool
 
     # === Writer 模式控制 ===
-    react_mode: bool  # Enable ReAct writer mode
     budget_mode: bool  # Budget mode for writer
     feedback_prompt: str  # Feedback injection prompt
     debt_summary: str  # Debt summary for writer

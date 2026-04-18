@@ -141,18 +141,9 @@ TOOLS = [
         "description": "获取叙事控制总览：待处理债务数、弧线进度、最近章节质量",
         "parameters": {},
     },
-    {
-        "name": "rebuild_narrative",
-        "description": "从已有章节重建叙事控制数据（债务、故事弧线）。适用于写了一半但没有叙事控制数据的小说。",
-        "parameters": {
-            "method": {
-                "type": "string",
-                "description": "提取方法: rule_based(纯规则快速), llm(AI分析精准), hybrid(混合推荐)",
-                "default": "hybrid",
-                "optional": True,
-            },
-        },
-    },
+    # NOTE: "rebuild_narrative" tool removed with NarrativeRebuildService
+    # (architecture-rework-2026 Phase 0). 叙事控制数据的重建路径将在
+    # Phase 2/3 合并入 Verifier + LedgerStore 后以新形态回归。
     {
         "name": "get_volume_settlement",
         "description": "查看当前卷的收束状态 — 哪些债务必须在本卷解决，哪些可延续",
@@ -179,6 +170,89 @@ TOOLS = [
         "parameters": {
             "chapter_number": {"type": "integer", "description": "章节号"},
             "new_title": {"type": "string", "description": "新标题"},
+        },
+    },
+    {
+        "name": "get_change_history",
+        "description": "查看小说设定的变更历史（按时间倒序），可按变更类型过滤",
+        "parameters": {
+            "limit": {"type": "integer", "description": "返回最大条数（默认20）", "optional": True},
+            "change_type": {"type": "string", "description": "按类型过滤: add/update/delete/rollback（可选）", "optional": True},
+        },
+    },
+    {
+        "name": "rollback_change",
+        "description": "回滚指定的设定变更，恢复到变更前状态。若有后续依赖变更会拒绝，需 force=true 才能强制回滚。",
+        "parameters": {
+            "change_id": {"type": "string", "description": "要回滚的 change_id（从 get_change_history 获得）"},
+            "force": {"type": "boolean", "description": "true=绕过依赖检查强制回滚（默认 false）", "optional": True},
+        },
+    },
+    {
+        "name": "analyze_change_impact",
+        "description": "纯规则分析编辑操作对后续章节的影响（不调 LLM、不实际修改）。用于在 edit_setting 之前评估风险。",
+        "parameters": {
+            "change_type": {"type": "string", "description": "变更类型: add_character/modify_character/delete_character/modify_outline/modify_world"},
+            "entity_type": {"type": "string", "description": "实体类型: character/outline/world"},
+            "effective_from_chapter": {"type": "integer", "description": "变更生效起始章节（>=1）"},
+            "entity_id": {"type": "string", "description": "实体 ID（角色 character_id 或章节号字符串）", "optional": True},
+            "details": {"type": "object", "description": "变更详情字典（可选，例如 {'name':'柳青鸾'}）", "optional": True},
+        },
+    },
+    {
+        "name": "batch_edit_settings",
+        "description": "批量应用多条结构化设定变更，每条独立 changelog 与回滚粒度。失败默认不影响其他，可选 stop_on_failure。",
+        "parameters": {
+            "changes": {"type": "array", "description": "结构化变更列表，每项包含 change_type/entity_type/entity_id/old_value/new_value/effective_from_chapter 等字段"},
+            "dry_run": {"type": "boolean", "description": "true=只预览不写盘（默认 false）", "optional": True},
+            "stop_on_failure": {"type": "boolean", "description": "true=遇首个失败即停止后续（默认 false）", "optional": True},
+        },
+    },
+    {
+        "name": "get_foreshadowing_graph",
+        "description": "查看伏笔图谱：总数/已回收/待回收/即将遗忘统计，并列出 pending 伏笔（按遗忘风险排序）",
+        "parameters": {
+            "current_chapter": {"type": "integer", "description": "当前章节号（不填则从 novel.json 取 current_chapter）", "optional": True},
+            "threshold": {"type": "integer", "description": "遗忘阈值（默认 10）", "optional": True},
+        },
+    },
+    {
+        "name": "get_health_dashboard",
+        "description": "查看小说健康度仪表盘：综合得分 + 伏笔/里程碑/角色/实体/债务五维指标，并附可读报告",
+        "parameters": {},
+    },
+    {
+        "name": "verify_chapter",
+        "description": "对已落盘章节跑硬约束验证：债务兑现/伏笔回收/禁用词/字数偏离。零 LLM 成本。",
+        "parameters": {
+            "chapter_number": {"type": "integer", "description": "章节号"},
+            "target_words": {"type": "integer", "description": "目标字数（不填则跳过长度检查）", "optional": True},
+            "extra_banned": {"type": "array", "description": "额外禁用词（叠加到全局 AI 黑名单上）", "optional": True},
+        },
+    },
+    {
+        "name": "critique_chapter",
+        "description": "对已落盘章节调 ChapterCritic 做结构化批评（LLM 调用）：返回 strengths / issues / specific_revisions。不修改正文。",
+        "parameters": {
+            "chapter_number": {"type": "integer", "description": "章节号"},
+        },
+    },
+    {
+        "name": "refine_chapter",
+        "description": "对已落盘章节跑 SelfRefineLoop（verify+critic+rewrite 闭环）。改写并落盘，附完整执行轨迹。LLM 成本可观，max_iter 控制。",
+        "parameters": {
+            "chapter_number": {"type": "integer", "description": "章节号"},
+            "max_verify_retries": {"type": "integer", "description": "verify 最多重写次数（默认2）", "optional": True},
+            "max_refine_iters": {"type": "integer", "description": "critic 最多优化轮次（默认2）", "optional": True},
+            "enable_critic": {"type": "boolean", "description": "是否跑 critic 阶段（默认 true）", "optional": True},
+        },
+    },
+    {
+        "name": "get_reflexion_log",
+        "description": "查看跨章反思日志（每章写完 AI 自动写的 lesson）。用户可见 AI '学到了什么'。",
+        "parameters": {
+            "start_chapter": {"type": "integer", "description": "起始章节号（含），不填从第1章", "optional": True},
+            "end_chapter": {"type": "integer", "description": "结束章节号（含），不填到最后", "optional": True},
         },
     },
 ]
@@ -905,27 +979,8 @@ class AgentToolExecutor:
 
         return overview
 
-    def _tool_rebuild_narrative(self, method: str = "hybrid") -> dict:
-        from src.novel.services.narrative_rebuild import NarrativeRebuildService
-
-        # Create LLM client for hybrid/llm methods
-        llm = None
-        if method != "rule_based":
-            try:
-                from src.llm.llm_client import create_llm_client
-
-                llm = create_llm_client({})
-            except Exception:
-                pass
-
-        service = NarrativeRebuildService(
-            self._project_path, llm_client=llm
-        )
-        try:
-            result = service.rebuild_all(method=method)
-        finally:
-            service.close()
-        return result
+    # NOTE: _tool_rebuild_narrative removed with NarrativeRebuildService
+    # (architecture-rework-2026 Phase 0). See registry comment above.
 
     def _tool_get_volume_settlement(self, chapter_number: int = 1) -> dict:
         from src.novel.services.volume_settlement import VolumeSettlement
@@ -1013,6 +1068,670 @@ class AgentToolExecutor:
             "chapter_number": chapter_number,
             "old_title": old_title,
             "new_title": new_title,
+        }
+
+    # ------------------------------------------------------------------
+    # Smart-editor extras (changelog / rollback / impact / batch)
+    # ------------------------------------------------------------------
+
+    def _tool_get_change_history(
+        self, limit: int = 20, change_type: str | None = None
+    ) -> dict:
+        from src.novel.services.edit_service import NovelEditService
+
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 100))
+
+        svc = NovelEditService(workspace=self.workspace)
+        entries = svc.get_history(
+            project_path=self._project_path,
+            limit=limit,
+            change_type=change_type,
+        )
+
+        # Truncate large value blobs for LLM context
+        safe = []
+        for e in entries:
+            safe.append({
+                "change_id": e.get("change_id", ""),
+                "timestamp": e.get("timestamp", ""),
+                "change_type": e.get("change_type", ""),
+                "entity_type": e.get("entity_type", ""),
+                "entity_id": e.get("entity_id"),
+                "instruction": (e.get("instruction") or "")[:200] if e.get("instruction") else None,
+                "effective_from_chapter": e.get("effective_from_chapter"),
+                "reverted_change_id": e.get("reverted_change_id"),
+                "old_value_preview": str(e.get("old_value"))[:200] if e.get("old_value") is not None else None,
+                "new_value_preview": str(e.get("new_value"))[:200] if e.get("new_value") is not None else None,
+            })
+        return {"total": len(safe), "changes": safe}
+
+    def _tool_rollback_change(self, change_id: str, force: bool = False) -> dict:
+        from src.novel.services.edit_service import NovelEditService
+
+        if not change_id or not isinstance(change_id, str):
+            return {"error": "change_id 必填"}
+
+        svc = NovelEditService(workspace=self.workspace)
+        result = svc.rollback(
+            project_path=self._project_path,
+            change_id=change_id,
+            force=bool(force),
+        )
+        # H1: rollback 改了 novel.json 与 changelog；丢弃缓存的 SQLite 句柄
+        # 防止后续工具读到陈旧的角色快照/债务状态
+        if result.status == "success":
+            self.close()
+        return {
+            "status": result.status,
+            "rollback_change_id": result.change_id,
+            "reverted_change_id": change_id,
+            "entity_type": result.entity_type,
+            "entity_id": result.entity_id,
+            "error": result.error,
+            "reasoning": result.reasoning,
+        }
+
+    def _tool_analyze_change_impact(
+        self,
+        change_type: str,
+        entity_type: str,
+        effective_from_chapter: int,
+        entity_id: str | None = None,
+        details: dict | None = None,
+    ) -> dict:
+        from src.novel.services.impact_analyzer import (
+            ChangeRequest,
+            ImpactAnalyzer,
+        )
+        from src.novel.storage.file_manager import FileManager
+
+        try:
+            effective_from_chapter = int(effective_from_chapter)
+        except (TypeError, ValueError):
+            return {"error": "effective_from_chapter 必须是 >=1 的整数"}
+        if effective_from_chapter < 1:
+            return {"error": "effective_from_chapter 必须 >=1"}
+
+        fm = FileManager(self.workspace)
+        novel_data = fm.load_novel(self.novel_id)
+        if novel_data is None:
+            return {"error": f"小说不存在: {self.novel_id}"}
+
+        try:
+            req = ChangeRequest(
+                change_type=change_type,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                effective_from_chapter=effective_from_chapter,
+                details=details or {},
+            )
+        except Exception as exc:
+            return {"error": f"参数无效: {exc}"}
+
+        result = ImpactAnalyzer().analyze(novel_data, req)
+        return {
+            "severity": result.severity,
+            "summary": result.summary,
+            "affected_chapters": result.affected_chapters[:30],
+            "conflicts": result.conflicts[:20],
+            "warnings": result.warnings[:20],
+        }
+
+    # H3: 单次批量编辑的 payload 体积上限（64 KB JSON），防止 LLM 误塞 MB 级数据
+    _BATCH_EDIT_MAX_PAYLOAD_BYTES = 64 * 1024
+
+    def _tool_batch_edit_settings(
+        self,
+        changes: list,
+        dry_run: bool = False,
+        stop_on_failure: bool = False,
+    ) -> dict:
+        from src.novel.services.edit_service import NovelEditService
+
+        if not isinstance(changes, list) or not changes:
+            return {"error": "changes 必须是非空列表"}
+        # Cap to avoid runaway tool calls
+        if len(changes) > 50:
+            return {"error": f"changes 数量超过上限 50（实际 {len(changes)}）"}
+        # H3: payload 体积上限
+        try:
+            payload_bytes = len(
+                json.dumps(changes, ensure_ascii=False).encode("utf-8")
+            )
+        except (TypeError, ValueError) as exc:
+            return {"error": f"changes 不是合法 JSON 结构: {exc}"}
+        if payload_bytes > self._BATCH_EDIT_MAX_PAYLOAD_BYTES:
+            return {
+                "error": (
+                    f"changes 体积 {payload_bytes} 字节超过上限 "
+                    f"{self._BATCH_EDIT_MAX_PAYLOAD_BYTES}"
+                )
+            }
+
+        svc = NovelEditService(workspace=self.workspace)
+        results = svc.batch_edit(
+            project_path=self._project_path,
+            changes=changes,
+            dry_run=bool(dry_run),
+            stop_on_failure=bool(stop_on_failure),
+        )
+
+        # H2: summary 动态聚合所有出现过的状态，避免 EditResult 扩展新状态时漏报
+        summary: dict[str, int] = {}
+        items = []
+        for r in results:
+            summary[r.status] = summary.get(r.status, 0) + 1
+            items.append({
+                "change_id": r.change_id,
+                "status": r.status,
+                "change_type": r.change_type,
+                "entity_type": r.entity_type,
+                "entity_id": r.entity_id,
+                "effective_from_chapter": r.effective_from_chapter,
+                "error": r.error,
+            })
+
+        success_count = summary.get("success", 0)
+        failed_count = summary.get("failed", 0)
+        partial_failure = success_count > 0 and failed_count > 0
+
+        # H1: 真实落盘且至少有一条成功 → 丢弃 SQLite 缓存
+        if not dry_run and success_count > 0:
+            self.close()
+
+        return {
+            "dry_run": bool(dry_run),
+            "total": len(results),
+            "summary": summary,
+            "partial_failure": partial_failure,
+            "results": items,
+        }
+
+    def _tool_get_foreshadowing_graph(
+        self, current_chapter: int | None = None, threshold: int = 10
+    ) -> dict:
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            threshold = 10
+        threshold = max(1, threshold)
+
+        # Resolve current_chapter from novel.json if not given
+        if current_chapter is None:
+            try:
+                novel_json = Path(self._project_path) / "novel.json"
+                if novel_json.exists():
+                    data = json.loads(novel_json.read_text("utf-8"))
+                    current_chapter = int(data.get("current_chapter", 0) or 0)
+            except Exception:
+                current_chapter = 0
+        try:
+            current_chapter = int(current_chapter or 0)
+        except (TypeError, ValueError):
+            current_chapter = 0
+        # H3: 拒绝负数章节，避免 is_forgotten 计算异常
+        current_chapter = max(0, current_chapter)
+
+        graph = self._get_knowledge_graph()
+        if graph is None:
+            return {"error": "知识图谱未初始化", "stats": {}, "pending": []}
+
+        try:
+            stats = graph.get_foreshadowing_stats()
+        except Exception as exc:
+            log.warning("get_foreshadowing_stats failed: %s", exc)
+            stats = {}
+
+        pending: list[dict] = []
+        try:
+            raw_pending = graph.get_pending_foreshadowings(current_chapter)
+            for f in raw_pending[:30]:
+                pending.append({
+                    "foreshadowing_id": f.get("foreshadowing_id", ""),
+                    "content": str(f.get("content", ""))[:200],
+                    "planted_chapter": f.get("planted_chapter"),
+                    "target_chapter": f.get("target_chapter"),
+                    "chapters_since_plant": f.get("chapters_since_plant"),
+                    "last_mentioned_chapter": f.get("last_mentioned_chapter"),
+                    "is_forgotten": bool(f.get("is_forgotten")),
+                })
+        except Exception as exc:
+            log.warning("get_pending_foreshadowings failed: %s", exc)
+
+        forgotten_count = sum(1 for f in pending if f["is_forgotten"])
+        return {
+            "current_chapter": current_chapter,
+            "threshold": threshold,
+            "stats": stats,
+            "forgotten_in_pending": forgotten_count,
+            "pending": pending,
+        }
+
+    # H4: 健康度仪表盘只对 LLM 暴露顶层指标，避免下钻明细把 token 吃光
+    _HEALTH_TOPLEVEL_KEYS = (
+        "overall_health_score",
+        "foreshadowing_collection_rate",
+        "foreshadowing_total",
+        "foreshadowing_collected",
+        "foreshadowing_forgotten",
+        "milestone_completion_rate",
+        "milestone_total",
+        "milestone_completed",
+        "milestone_overdue",
+        "character_coverage",
+        "character_total",
+        "character_active",
+        "entity_consistency_score",
+        "entity_conflict_count",
+        "debt_health",
+        "debt_total",
+        "debt_overdue",
+    )
+
+    # ------------------------------------------------------------------
+    # Self-Refine / Reflexion tools
+    # ------------------------------------------------------------------
+
+    def _load_chapter_text(self, chapter_number: int) -> str | None:
+        from src.novel.storage.file_manager import FileManager
+
+        fm = FileManager(self.workspace)
+        ch = fm.load_chapter(self.novel_id, chapter_number) or {}
+        text = ch.get("full_text") or ""
+        if not text:
+            text = fm.load_chapter_text(self.novel_id, chapter_number) or ""
+        return text or None
+
+    def _llm_for_critic(self):
+        """构造 critic/refine/reflexion 用的 LLM 客户端。"""
+        from src.llm.llm_client import create_llm_client
+
+        # 复用 novel.json 的 config，drop 掉 stale provider 用 auto-detect
+        try:
+            novel_json = Path(self._project_path) / "novel.json"
+            if novel_json.exists():
+                cfg = json.loads(novel_json.read_text("utf-8"))
+                llm_cfg = (cfg.get("config", {}) or {}).get("llm", {}) or {}
+            else:
+                llm_cfg = {}
+        except Exception:
+            llm_cfg = {}
+        return create_llm_client(llm_cfg)
+
+    def _global_banned_phrases(self) -> list[str]:
+        """读 ``NovelConfig.quality.ai_flavor_hard_ban``（**只取硬禁**）。
+
+        软观察 watchlist 不参与 verifier，由 ChapterCritic 按场景判断。
+        优先 ``config.yaml`` 用户配置；不可用时回退 schema 默认。
+        兼容旧的 ``ai_flavor_blacklist`` 字段（视为 hard_ban）。
+        """
+        from src.novel.config import NovelConfig, load_novel_config
+
+        try:
+            cfg = load_novel_config(config_path="config.yaml")
+        except Exception:
+            cfg = NovelConfig()
+        hard = list(cfg.quality.ai_flavor_hard_ban or [])
+        # 旧字段兼容
+        legacy = cfg.quality.ai_flavor_blacklist or {}
+        if isinstance(legacy, dict):
+            hard.extend(legacy.keys())
+        if not hard:
+            # 用户显式清空过 → 用 schema 默认，工具才有意义
+            hard = list(NovelConfig().quality.ai_flavor_hard_ban)
+        # 去重保留顺序
+        seen: set[str] = set()
+        result: list[str] = []
+        for p in hard:
+            if p and p not in seen:
+                result.append(p)
+                seen.add(p)
+        return result
+
+    def _global_watchlist(self) -> dict[str, int]:
+        """读 ``NovelConfig.quality.ai_flavor_watchlist``。供 critic 用。"""
+        from src.novel.config import NovelConfig, load_novel_config
+
+        try:
+            cfg = load_novel_config(config_path="config.yaml")
+        except Exception:
+            cfg = NovelConfig()
+        wl = dict(cfg.quality.ai_flavor_watchlist or {})
+        if not wl:
+            wl = dict(NovelConfig().quality.ai_flavor_watchlist)
+        return wl
+
+    def _tool_verify_chapter(
+        self,
+        chapter_number: int,
+        target_words: int | None = None,
+        extra_banned: list | None = None,
+    ) -> dict:
+        from src.novel.services.chapter_verifier import ChapterVerifier
+
+        text = self._load_chapter_text(chapter_number)
+        if text is None:
+            return {"error": f"章节 {chapter_number} 不存在或为空"}
+
+        banned = list(self._global_banned_phrases())
+        if extra_banned and isinstance(extra_banned, list):
+            banned += [str(p) for p in extra_banned if p]
+
+        # 查本章应兑现的债务和应回收的伏笔
+        debts: list[dict] = []
+        try:
+            tracker = self._get_obligation_tracker()
+            if tracker is not None:
+                source = (
+                    list(tracker._mem_store.values())
+                    if tracker._mem_store is not None
+                    else (tracker.db.query_debts() if tracker.db else [])
+                )
+                debts = [
+                    d for d in source
+                    if d.get("status") in ("pending", "overdue")
+                    and (
+                        d.get("source_chapter", 0) <= chapter_number
+                    )
+                ][:5]
+        except Exception as exc:
+            log.warning("verify_chapter: load debts failed: %s", exc)
+
+        forsh: list[dict] = []
+        try:
+            graph = self._get_knowledge_graph()
+            if graph is not None:
+                forsh = [
+                    f for f in graph.get_pending_foreshadowings(chapter_number)
+                    if f.get("is_forgotten")
+                ][:5]
+        except Exception as exc:
+            log.warning("verify_chapter: load foreshadowings failed: %s", exc)
+
+        report = ChapterVerifier().verify(
+            text,
+            must_fulfill_debts=debts,
+            must_collect_foreshadowings=forsh,
+            banned_phrases=banned,
+            target_words=target_words,
+        )
+        return {
+            "chapter_number": chapter_number,
+            "passed": report.passed,
+            "word_count": report.word_count,
+            "high_severity_count": report.high_severity_count,
+            "failures": [
+                {
+                    "rule": f.rule,
+                    "severity": f.severity,
+                    "detail": f.detail[:300],
+                }
+                for f in report.failures[:20]
+            ],
+            "checked": {
+                "debts": len(debts),
+                "foreshadowings": len(forsh),
+                "banned_phrases": len(banned),
+                "target_words": target_words,
+            },
+        }
+
+    def _tool_critique_chapter(self, chapter_number: int) -> dict:
+        from src.novel.agents.chapter_critic import ChapterCritic
+        from src.novel.storage.file_manager import FileManager
+
+        text = self._load_chapter_text(chapter_number)
+        if text is None:
+            return {"error": f"章节 {chapter_number} 不存在或为空"}
+
+        fm = FileManager(self.workspace)
+        novel_data = fm.load_novel(self.novel_id) or {}
+        outline_chs = (novel_data.get("outline") or {}).get("chapters") or []
+        ch_outline = next(
+            (c for c in outline_chs if c.get("chapter_number") == chapter_number),
+            {},
+        )
+        prev_text = self._load_chapter_text(chapter_number - 1) or ""
+
+        try:
+            llm = self._llm_for_critic()
+        except Exception as exc:
+            return {"error": f"无可用 LLM: {exc}"}
+
+        critic = ChapterCritic(llm)
+        result = critic.critique(
+            text,
+            chapter_number=chapter_number,
+            chapter_title=ch_outline.get("title", ""),
+            chapter_goal=ch_outline.get("goal", ""),
+            prev_chapter_tail=prev_text[-500:] if prev_text else "",
+        )
+        return {
+            "chapter_number": chapter_number,
+            "needs_refine": result.needs_refine,
+            "high_severity_count": result.high_severity_count,
+            "medium_severity_count": result.medium_severity_count,
+            "strengths": result.strengths[:5],
+            "issues": [
+                {
+                    "type": i.type,
+                    "severity": i.severity,
+                    "quote": i.quote,
+                    "reason": i.reason,
+                }
+                for i in result.issues[:10]
+            ],
+            "specific_revisions": [
+                {"target": r.target, "suggestion": r.suggestion}
+                for r in result.specific_revisions[:8]
+            ],
+            "overall_assessment": result.overall_assessment[:500],
+        }
+
+    def _tool_refine_chapter(
+        self,
+        chapter_number: int,
+        max_verify_retries: int = 2,
+        max_refine_iters: int = 2,
+        enable_critic: bool = True,
+    ) -> dict:
+        from src.novel.agents.chapter_critic import ChapterCritic
+        from src.novel.services.chapter_verifier import ChapterVerifier
+        from src.novel.services.refine_loop import RefineConfig, run_refine_loop
+        from src.novel.storage.file_manager import FileManager
+
+        text = self._load_chapter_text(chapter_number)
+        if text is None:
+            return {"error": f"章节 {chapter_number} 不存在或为空"}
+
+        fm = FileManager(self.workspace)
+        novel_data = fm.load_novel(self.novel_id) or {}
+        # Refuse to refine published chapters
+        if chapter_number in set(novel_data.get("published_chapters") or []):
+            return {
+                "error": f"第{chapter_number}章已发布，不能 refine。请先取消发布。",
+                "status": "refused",
+            }
+
+        outline_chs = (novel_data.get("outline") or {}).get("chapters") or []
+        ch_outline = next(
+            (c for c in outline_chs if c.get("chapter_number") == chapter_number),
+            {},
+        )
+        prev_text = self._load_chapter_text(chapter_number - 1) or ""
+
+        try:
+            llm = self._llm_for_critic()
+        except Exception as exc:
+            return {"error": f"无可用 LLM: {exc}"}
+
+        # Build draft_fn that returns the existing text (we're refining, not regenerating)
+        def _draft_fn() -> str:
+            return text
+
+        # Build rewrite_fn using the same LLM
+        def _rewrite_fn(prev_text: str, feedback: str) -> str:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是一位中文长篇小说作者，正在按编辑反馈精修一章。"
+                        "保留原章节的整体结构和情节线，只针对反馈中提到的问题做局部改写。"
+                        "禁止：增删主要情节、改变章节目标、引入新角色。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"## 编辑反馈\n{feedback}\n\n"
+                        f"## 待修订的章节正文\n{prev_text}\n\n"
+                        "请输出完整修订后的章节正文，不要任何解释或 markdown 标题。"
+                    ),
+                },
+            ]
+            resp = llm.chat(messages, temperature=0.5, max_tokens=6000)
+            return (resp.content or "").strip()
+
+        # Gather verify constraints (same as verify_chapter)
+        banned = self._global_banned_phrases()
+        debts: list[dict] = []
+        try:
+            tracker = self._get_obligation_tracker()
+            if tracker is not None:
+                source = (
+                    list(tracker._mem_store.values())
+                    if tracker._mem_store is not None
+                    else (tracker.db.query_debts() if tracker.db else [])
+                )
+                debts = [
+                    d for d in source
+                    if d.get("status") in ("pending", "overdue")
+                    and d.get("source_chapter", 0) <= chapter_number
+                ][:3]
+        except Exception:
+            pass
+        forsh: list[dict] = []
+        try:
+            graph = self._get_knowledge_graph()
+            if graph is not None:
+                forsh = [
+                    f for f in graph.get_pending_foreshadowings(chapter_number)
+                    if f.get("is_forgotten")
+                ][:3]
+        except Exception:
+            pass
+
+        critic = ChapterCritic(llm) if enable_critic else None
+        config = RefineConfig(
+            max_verify_retries=max(0, min(int(max_verify_retries), 3)),
+            max_refine_iters=max(0, min(int(max_refine_iters), 3)),
+            enable_critic=bool(enable_critic),
+        )
+
+        trace = run_refine_loop(
+            draft_fn=_draft_fn,
+            rewrite_fn=_rewrite_fn,
+            verifier=ChapterVerifier(),
+            critic=critic,
+            must_fulfill_debts=debts,
+            must_collect_foreshadowings=forsh,
+            banned_phrases=banned,
+            target_words=ch_outline.get("estimated_words"),
+            prev_chapter_text=prev_text,
+            chapter_number=chapter_number,
+            chapter_title=ch_outline.get("title", ""),
+            chapter_goal=ch_outline.get("goal", ""),
+            config=config,
+        )
+
+        # Persist final_text only if it actually changed
+        changed = trace.final_text and trace.final_text != text
+        if changed:
+            ch_data = fm.load_chapter(self.novel_id, chapter_number) or {}
+            ch_data["full_text"] = trace.final_text
+            ch_data["word_count"] = len(trace.final_text)
+            fm.save_chapter(self.novel_id, chapter_number, ch_data)
+            self.close()  # invalidate cached structured_db
+
+        return {
+            "chapter_number": chapter_number,
+            "changed": bool(changed),
+            "before_words": len(text),
+            "after_words": len(trace.final_text) if trace.final_text else 0,
+            "verify_passed": trace.verify_passed,
+            "critic_passed": trace.critic_passed,
+            "refine_iterations": trace.refine_iterations,
+            "verify_attempts": len(trace.verify_attempts),
+            "critique_attempts": len(trace.critique_attempts),
+            "sanitize_actions": trace.sanitize_actions,
+            "opening_duplicate_flagged": trace.opening_duplicate_flagged,
+            "total_llm_calls": trace.total_llm_calls,
+            "notes": trace.notes[-5:],
+        }
+
+    def _tool_get_reflexion_log(
+        self, start_chapter: int | None = None, end_chapter: int | None = None
+    ) -> dict:
+        from src.novel.services.reflexion_memory import ReflexionMemory
+
+        memory = ReflexionMemory(self._project_path)
+        all_entries = memory.get_all()
+
+        if start_chapter is not None:
+            try:
+                start = int(start_chapter)
+                all_entries = [e for e in all_entries if e.chapter_number >= start]
+            except (TypeError, ValueError):
+                pass
+        if end_chapter is not None:
+            try:
+                end = int(end_chapter)
+                all_entries = [e for e in all_entries if e.chapter_number <= end]
+            except (TypeError, ValueError):
+                pass
+
+        return {
+            "total": len(all_entries),
+            "entries": [
+                {
+                    "chapter_number": e.chapter_number,
+                    "chapter_type": e.chapter_type,
+                    "what_worked": e.what_worked,
+                    "what_failed": e.what_failed,
+                    "lesson": e.lesson,
+                    "next_action": e.next_action,
+                    "user_edited": e.user_edited,
+                    "created_at": e.created_at,
+                }
+                for e in all_entries[:50]
+            ],
+        }
+
+    def _tool_get_health_dashboard(self) -> dict:
+        from src.novel.pipeline import NovelPipeline
+
+        pipe = NovelPipeline(workspace=self.workspace)
+        try:
+            report = pipe.get_health_report(self._project_path)
+        except Exception as exc:
+            return {"error": f"健康度计算失败: {exc}"}
+
+        metrics = report.get("metrics", {}) or {}
+        text = report.get("report", "") or ""
+
+        # H4: 白名单顶层指标；其余下钻明细折叠
+        top = {k: metrics[k] for k in self._HEALTH_TOPLEVEL_KEYS if k in metrics}
+        details_truncated = any(k not in self._HEALTH_TOPLEVEL_KEYS for k in metrics)
+
+        return {
+            "overall_health_score": metrics.get("overall_health_score"),
+            "metrics": top,
+            "details_truncated": details_truncated,
+            "report": text[:2000],
         }
 
 
@@ -1302,7 +2021,6 @@ def _run_agent_chat_inner(
                 "get_chapter_brief": "查看章节任务书",
                 "get_knowledge_graph": "查看知识图谱",
                 "get_narrative_overview": "叙事总览",
-                "rebuild_narrative": "重建叙事数据",
                 "get_volume_settlement": "查看卷末收束",
                 "get_arc_status": "查看弧线状态",
                 "plan_chapters": "规划大纲",

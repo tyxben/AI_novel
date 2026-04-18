@@ -1,126 +1,36 @@
-"""AI 味短语黑名单
+"""DEPRECATED — AI 味短语黑名单已停用。
 
-收录在 AI 生成中文小说中高频出现的模式化短语，
-用于检测和消除 AI 味。
+Phase 0 架构重构：硬编码黑名单被砍。AI 味检测将在 Phase 1 由
+StyleProfile（按项目学习的风格画像）接管，不再依赖全局短语列表。
+
+保留本模块仅为向后兼容：老代码路径（例如 ``quality_check_tool``）
+仍会 import ``check_ai_flavor`` / ``get_blacklist``。当前实现直接
+返回空结果，相当于"暂不检测"。
+
+TODO(phase-1): StyleProfile 接管后删除本文件及所有引用。
 """
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# 黑名单数据（按类别分组）
-# ---------------------------------------------------------------------------
-
-_BLACKLIST_BY_CATEGORY: dict[str, list[str]] = {
-    "情感类": [
-        "内心翻涌",
-        "心中涌起一股",
-        "莫名的情绪",
-        "一股暖流涌上心头",
-        "心头一颤",
-        "心中五味杂陈",
-        "一股复杂的情绪",
-        "心中泛起涟漪",
-        "内心深处的某根弦被拨动",
-        "眼眶不由得湿润",
-        "莫名的感动",
-        "百感交集",
-        "心如刀绞",
-        "一股酸涩涌上鼻尖",
-    ],
-    "动作类": [
-        "嘴角勾起一抹",
-        "嘴角微微上扬",
-        "眼神一凛",
-        "眉头微蹙",
-        "不由自主地攥紧了拳头",
-        "身形一闪",
-        "嘴角挂着一丝",
-        "目光如炬",
-        "眼中闪过一丝",
-        "微微眯起双眼",
-        "下意识地握紧",
-        "浑身一震",
-    ],
-    "描写类": [
-        "莫名的力量",
-        "一股无形的威压",
-        "仿佛时间在这一刻静止",
-        "空气仿佛凝固",
-        "一股令人窒息的气息",
-        "如同潮水般涌来",
-        "宛如天神降世",
-        "恍若隔世",
-        "犹如一道闪电划过脑海",
-        "周围的空气都变得凝重起来",
-        "仿佛整个世界都安静了",
-        "弥漫着一股淡淡的",
-    ],
-    "转折类": [
-        "然而他并不知道",
-        "殊不知",
-        "却不曾想",
-        "谁也没有想到",
-        "命运的齿轮开始转动",
-        "一切都将发生改变",
-        "故事才刚刚开始",
-        "这一切只是开始",
-        "真正的考验还在后面",
-        "好戏才刚刚开始",
-        "一场风暴正在酝酿",
-        "暗流涌动",
-    ],
-}
-
-# 扁平化的完整列表（缓存）
-_FLAT_BLACKLIST: list[str] | None = None
-
-
-def _build_flat_list() -> list[str]:
-    """构建扁平化黑名单列表。"""
-    global _FLAT_BLACKLIST  # noqa: PLW0603
-    if _FLAT_BLACKLIST is None:
-        result: list[str] = []
-        for phrases in _BLACKLIST_BY_CATEGORY.values():
-            result.extend(phrases)
-        _FLAT_BLACKLIST = result
-    return _FLAT_BLACKLIST
-
-
-# ---------------------------------------------------------------------------
-# 公开接口
-# ---------------------------------------------------------------------------
-
 
 def get_blacklist() -> list[str]:
-    """返回完整的 AI 味短语黑名单列表。
+    """返回空黑名单。
 
-    Returns:
-        包含所有黑名单短语的列表（至少 50 个）
+    历史版本返回 50+ 条硬编码短语；已废弃。
     """
-    return list(_build_flat_list())
+    return []
 
 
 def check_ai_flavor(text: str) -> list[tuple[str, int]]:
-    """检测文本中命中的 AI 味短语。
+    """始终返回空命中列表。
+
+    历史版本扫描全局黑名单短语；现在不做任何检测，等待
+    Phase 1 StyleProfile 接管。
 
     Args:
-        text: 要检查的文本
+        text: 要检查的文本（忽略）。
 
     Returns:
-        命中结果列表，每个元素为 (短语, 首次出现位置)。
-        按出现位置升序排列。
+        始终为空列表。
     """
-    if not text:
-        return []
-
-    hits: list[tuple[str, int]] = []
-    blacklist = _build_flat_list()
-
-    for phrase in blacklist:
-        pos = text.find(phrase)
-        if pos != -1:
-            hits.append((phrase, pos))
-
-    # 按出现位置排序
-    hits.sort(key=lambda x: x[1])
-    return hits
+    return []

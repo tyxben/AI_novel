@@ -63,8 +63,37 @@ _GENRE_STYLE_MAP: dict[str, str] = {
     "轻小说": "light_novel.campus",
 }
 
-_WORDS_PER_CHAPTER = 2500  # 每章约 2000-3000 字
+_WORDS_PER_CHAPTER = 2500  # 每章约 2000-3000 字（default 兜底，见 _resolve_target_words）
 _CHAPTERS_PER_VOLUME = 30  # 每卷约 30 章
+
+
+def _resolve_target_words(chapter: Any | None = None) -> int:
+    """解析章节目标字数。
+
+    Phase 0 架构重构：去掉硬编码阈值。优先读 chapter 模型上的
+    ``target_words`` / ``estimated_words`` 字段；缺失时退回
+    ``_WORDS_PER_CHAPTER`` 兜底。
+
+    Args:
+        chapter: ``Chapter`` / ``ChapterOutline`` / dict 三种形态。None 则直接用默认。
+
+    Returns:
+        int 目标字数。永远 > 0。
+    """
+    if chapter is None:
+        return _WORDS_PER_CHAPTER
+    # 支持 dict
+    if isinstance(chapter, dict):
+        val = chapter.get("target_words") or chapter.get("estimated_words")
+    else:
+        val = getattr(chapter, "target_words", None) or getattr(
+            chapter, "estimated_words", None
+        )
+    try:
+        ival = int(val) if val is not None else 0
+    except (TypeError, ValueError):
+        ival = 0
+    return ival if ival > 0 else _WORDS_PER_CHAPTER
 
 # Outline.template Literal 值 → outline_templates.py 中的模板名称
 _TEMPLATE_ALIAS: dict[str, str] = {
@@ -420,7 +449,12 @@ class NovelDirector:
         # 提取世界观和角色信息
         world_setting = novel_data.get("world_setting", {})
         characters = novel_data.get("characters", [])
-        genre = novel_data.get("genre", "玄幻")
+        # Phase 0 架构重构：零默认体裁。项目数据必须带 genre。
+        genre = novel_data.get("genre")
+        if not genre:
+            raise ValueError(
+                "novel_data 缺少 genre 字段（Phase 0 架构重构：禁止默认回退到玄幻）"
+            )
         theme = novel_data.get("theme", "")
 
         world_info = ""
@@ -1230,7 +1264,12 @@ def novel_director_node(state: NovelState) -> dict[str, Any]:
         return result
 
     # ---- 情况 2：全新创作，分析输入 + 生成大纲 ----
-    genre = state.get("genre", "玄幻")
+    # Phase 0 架构重构：零默认体裁。立项必须显式指定 genre。
+    genre = state.get("genre")
+    if not genre:
+        raise ValueError(
+            "genre 必须显式指定（Phase 0 架构重构：禁止默认回退到玄幻）"
+        )
     theme = state.get("theme", "成长与冒险")
     target_words = state.get("target_words", 100000)
     custom_ideas = state.get("custom_style_reference")

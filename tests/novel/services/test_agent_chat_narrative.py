@@ -116,8 +116,15 @@ class TestToolDefinitions:
         assert "get_narrative_overview" in names
 
     def test_total_tool_count(self):
-        # 9 original + 1 generate_chapters + 6 narrative + 1 rebuild + 2 volume/arc + 1 plan_chapters + 1 rename_chapter = 21
-        assert len(TOOLS) == 21
+        # 9 original + 1 generate_chapters + 6 narrative + 2 volume/arc
+        # + 1 plan_chapters + 1 rename_chapter
+        # + 6 smart-editor/health (get_change_history, rollback_change, analyze_change_impact,
+        #                          batch_edit_settings, get_foreshadowing_graph, get_health_dashboard)
+        # + 4 self-refine/reflexion (verify_chapter, critique_chapter, refine_chapter, get_reflexion_log)
+        # = 30
+        # NOTE: "rebuild_narrative" 已随 NarrativeRebuildService 移除
+        # (architecture-rework-2026 Phase 0)，总数由 31 降为 30。
+        assert len(TOOLS) == 30
 
     def test_tools_description_includes_new(self):
         desc = _tools_description()

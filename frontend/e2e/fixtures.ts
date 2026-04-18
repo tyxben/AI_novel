@@ -383,9 +383,7 @@ export async function setupApiMocks(page: Page, mocks: ApiMocks = {}) {
   );
 
   // Narrative
-  await page.route(`${API}/api/novels/*/narrative/rebuild`, (route) =>
-    route.fulfill({ json: { task_id: "task_narrative_rebuild" } })
-  );
+  // NOTE: /narrative/rebuild route removed (architecture-rework-2026 Phase 0).
   await page.route(`${API}/api/novels/*/narrative/overview`, (route) =>
     route.fulfill({
       json: mocks.narrativeOverview ?? {

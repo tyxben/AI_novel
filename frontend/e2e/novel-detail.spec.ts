@@ -958,14 +958,8 @@ test.describe("Novel Detail - Narrative", () => {
     await expect(overviewPanel.getByText("0").first()).toBeVisible(); // overdue_debts
   });
 
-  test("should display rebuild narrative button", async ({ page }) => {
-    await page.goto("/novel/novel_test001");
-    await page.getByRole("button", { name: "叙事控制" }).click();
-
-    await expect(
-      page.getByRole("button", { name: "从已有章节重建叙事数据" })
-    ).toBeVisible();
-  });
+  // NOTE: "should display rebuild narrative button" test removed with
+  // NarrativeRebuildService (architecture-rework-2026 Phase 0).
 
   test("should display volume settlement panel", async ({ page }) => {
     await page.goto("/novel/novel_test001");
@@ -1079,18 +1073,8 @@ test.describe("Novel Detail - Narrative", () => {
     await expect(page.getByText("导师")).toBeVisible();
   });
 
-  test("clicking rebuild button should submit rebuild request", async ({ page }) => {
-    await page.goto("/novel/novel_test001");
-    await page.getByRole("button", { name: "叙事控制" }).click();
-
-    await page
-      .getByRole("button", { name: "从已有章节重建叙事数据" })
-      .click();
-
-    // The mock returns { task_id: "task_narrative_rebuild" }
-    // Then task poll returns completed -> shows result
-    await expect(page.getByText(/重建完成/)).toBeVisible({ timeout: 10000 });
-  });
+  // NOTE: "clicking rebuild button should submit rebuild request" test
+  // removed with NarrativeRebuildService (architecture-rework-2026 Phase 0).
 
   test("switching debt filter tabs should work", async ({ page }) => {
     await page.goto("/novel/novel_test001");

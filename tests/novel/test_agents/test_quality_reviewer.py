@@ -112,13 +112,13 @@ class TestRuleCheck:
         assert result.ai_flavor_issues == []
 
     def test_detects_ai_flavor(self) -> None:
-        """应检测到 AI 味短语。"""
+        """Phase 0 架构重构：AI 味黑名单已废弃，rule_check 不再返回 AI 味命中。
+
+        TODO(phase-1): StyleProfile 接管后改写此测试覆盖新的检测路径。
+        """
         result = self.tool.rule_check(_AI_FLAVOR_TEXT)
-        assert result.passed is False
-        assert len(result.ai_flavor_issues) > 0
-        # 至少应命中 "内心翻涌"、"嘴角勾起一抹" 等
-        all_issues_text = " ".join(result.ai_flavor_issues)
-        assert "内心翻涌" in all_issues_text
+        # Stubbed blacklist returns no hits — field guaranteed empty now.
+        assert result.ai_flavor_issues == []
 
     def test_detects_repetition(self) -> None:
         """应检测到重复句。"""
@@ -234,12 +234,15 @@ class TestEvaluateChapter:
         assert report.scores["writing_quality"] == 0.0
 
     def test_evaluate_ai_flavor_text_has_rule_issues(self) -> None:
-        """AI 味文本的规则检查应不通过。"""
+        """Phase 0 架构重构：AI 味黑名单废弃，rule_check 不再抓 AI 味短语。
+
+        TODO(phase-1): StyleProfile 接管后重写这个场景。
+        """
         llm = _make_fake_llm()
         tool = QualityCheckTool(llm)
         report = tool.evaluate_chapter(_AI_FLAVOR_TEXT)
-        assert report.rule_check.passed is False
-        assert len(report.rule_check.ai_flavor_issues) > 0
+        # Stubbed blacklist — AI flavor issues always empty.
+        assert report.rule_check.ai_flavor_issues == []
 
 
 # ---------------------------------------------------------------------------
@@ -262,13 +265,12 @@ class TestReviewChapter:
         assert "scores" in report
 
     def test_full_pipeline_ai_flavor_text(self) -> None:
-        """AI 味文本应需要重写。"""
-        llm = _make_fake_llm()
-        reviewer = QualityReviewer(llm)
-        report = reviewer.review_chapter(_AI_FLAVOR_TEXT)
-        assert report["rule_check"]["passed"] is False
-        assert report["need_rewrite"] is True
-        assert len(report["suggestions"]) > 0
+        """Phase 0 架构重构：AI 味黑名单废弃；此文本现在走 rule_check 会通过。
+
+        TODO(phase-1): StyleProfile 接管后让该类文本重新触发重写。
+        """
+        import pytest
+        pytest.skip("AI flavor blacklist deprecated in Phase 0; rewrite trigger待 StyleProfile 接管")
 
     def test_budget_mode_skips_llm(self) -> None:
         """省钱模式应跳过 LLM 评分。"""
@@ -393,7 +395,10 @@ class TestQualityReviewerNode:
 
     @patch("src.novel.agents.quality_reviewer.create_llm_client")
     def test_node_with_ai_flavor_text(self, mock_create_llm: MagicMock) -> None:
-        """AI 味文本应触发重写。"""
+        """Phase 0 架构重构：AI 味黑名单废弃后 rule_check 会通过。
+
+        TODO(phase-1): StyleProfile 接管后重写这个节点级断言。
+        """
         mock_create_llm.return_value = _make_fake_llm()
         state: dict[str, Any] = {
             "current_chapter_text": _AI_FLAVOR_TEXT,
@@ -407,7 +412,8 @@ class TestQualityReviewerNode:
         result = quality_reviewer_node(state)
         assert "quality_reviewer" in result["completed_nodes"]
         quality = result["current_chapter_quality"]
-        assert quality["rule_check"]["passed"] is False
+        # Stub returns empty ai_flavor_issues — rule_check no longer fails on flavor text.
+        assert quality["rule_check"]["ai_flavor_issues"] == []
 
     @patch("src.novel.agents.quality_reviewer.create_llm_client")
     def test_node_llm_unavailable(self, mock_create_llm: MagicMock) -> None:
