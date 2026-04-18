@@ -222,20 +222,21 @@ class TestDifferentModelsPerStage:
 class TestNodeIntegrationRouting:
     """Verify that node functions pass the stage-specific model to create_llm_client."""
 
-    @patch("src.novel.agents.quality_reviewer.create_llm_client")
-    def test_quality_reviewer_uses_quality_review_model(
+    @patch("src.llm.llm_client.create_llm_client")
+    def test_reviewer_uses_quality_review_model(
         self, mock_create_llm: MagicMock
     ) -> None:
-        from src.novel.agents.quality_reviewer import quality_reviewer_node
+        """Phase 2-β: quality_reviewer_node → reviewer_node, still routes via
+        stage 'quality_review'."""
+        from src.novel.agents.reviewer import reviewer_node
 
         mock_llm = MagicMock()
         mock_llm.chat.return_value = MagicMock(
             content=json.dumps({
-                "plot_coherence": 8.0,
-                "writing_quality": 7.5,
-                "character_portrayal": 7.0,
-                "ai_flavor_score": 8.0,
-                "summary": "ok",
+                "strengths": ["ok"],
+                "issues": [],
+                "specific_revisions": [],
+                "overall_assessment": "ok",
             }),
             model="test",
             usage=None,
@@ -254,7 +255,7 @@ class TestNodeIntegrationRouting:
             "current_chapter": 1,
             "auto_approve_threshold": 6.0,
         }
-        quality_reviewer_node(state)
+        reviewer_node(state)
 
         # Verify create_llm_client was called with the quality_review model
         call_config = mock_create_llm.call_args[0][0]

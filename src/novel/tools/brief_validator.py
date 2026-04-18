@@ -1,7 +1,8 @@
 """BriefValidator — checks if a generated chapter fulfilled its chapter_brief task list.
 
-Called by QualityReviewer after chapter generation. Uses LLM to evaluate
-whether the chapter text satisfies each item in the chapter_brief.
+Historically called by QualityReviewer (Phase 0). After Phase 2-β merge the
+QualityReviewer → Reviewer, this validator is available for the new Reviewer
+or Verifier to call but no longer wired into the chapter graph by default.
 """
 
 from __future__ import annotations

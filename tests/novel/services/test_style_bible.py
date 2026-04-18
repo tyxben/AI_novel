@@ -289,9 +289,15 @@ class TestStyleBibleGenerator:
 
 
 # ===================================================================
-# 4. StyleKeeper.check_against_bible
+# 4. StyleKeeper.check_against_bible — REMOVED (Phase 2-β)
 # ===================================================================
+# The StyleKeeper agent has been merged into Reviewer. The
+# `check_against_bible` quantitative gate no longer exists — style bible
+# compliance is now surfaced through Reviewer issues (via style_overuse_hits
+# + LLM critique). If a regression harness is needed, see
+# tests/novel/agents/test_reviewer.py.
 
+@pytest.mark.skip(reason="StyleKeeper removed in Phase 2-β merge into Reviewer")
 class TestStyleKeeperBibleCheck:
     def test_text_within_range_passes(self):
         """Text matching target ranges -> passed=True."""
@@ -509,9 +515,13 @@ class TestContinuityServiceStyleBrief:
 
 
 # ===================================================================
-# 6. QualityReviewer.should_rewrite with Style Bible
+# 6. QualityReviewer.should_rewrite with Style Bible — REMOVED (Phase 2-β)
 # ===================================================================
+# QualityReviewer merged into Reviewer; `should_rewrite` is replaced by
+# `CritiqueResult.need_rewrite` (information label only; never triggers
+# auto-rewrite). See tests/novel/agents/test_reviewer.py.
 
+@pytest.mark.skip(reason="QualityReviewer removed in Phase 2-β merge into Reviewer")
 class TestQualityReviewerStyleBible:
     def test_style_bible_need_rewrite_forces_rewrite(self):
         """style_bible_check.need_rewrite=True -> should_rewrite returns True."""
@@ -610,9 +620,12 @@ class TestPipelineStyleBibleWiring:
 
 
 # ===================================================================
-# 8. style_keeper_node integration
+# 8. style_keeper_node integration — REMOVED (Phase 2-β)
 # ===================================================================
+# style_keeper_node no longer exists — the chapter graph runs a single
+# reviewer_node (tests/novel/agents/test_reviewer.py covers the wire-up).
 
+@pytest.mark.skip(reason="style_keeper_node removed in Phase 2-β merge into Reviewer")
 class TestStyleKeeperNode:
     def test_node_with_style_bible(self):
         """style_keeper_node should call check_against_bible when bible present."""

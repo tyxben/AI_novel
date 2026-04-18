@@ -191,42 +191,42 @@ def _mock_writer_node(state: dict) -> dict:
     }
 
 
-def _mock_consistency_checker_node(state: dict) -> dict:
+def _mock_reviewer_node_pass(state: dict) -> dict:
+    """Merged Reviewer (Phase 2-β): replaces old consistency_checker +
+    style_keeper + quality_reviewer trio."""
     return {
-        "current_chapter_quality": {"consistency_check": {"passed": True}},
-        "decisions": [{"agent": "ConsistencyChecker", "step": "test", "decision": "ok", "reason": "test"}],
+        "current_chapter_quality": {
+            "need_rewrite": False,
+            "rule_check": {"passed": True},
+            "strengths": [],
+            "issues": [],
+            "style_overuse_hits": [],
+            "consistency_flags": [],
+        },
+        "decisions": [
+            {"agent": "Reviewer", "step": "test", "decision": "审稿通过", "reason": "test"}
+        ],
         "errors": [],
-        "completed_nodes": ["consistency_checker"],
+        "completed_nodes": ["reviewer"],
     }
 
 
-def _mock_style_keeper_node(state: dict) -> dict:
-    quality = dict(state.get("current_chapter_quality") or {})
-    quality["style_similarity"] = 0.9
+def _mock_reviewer_node_fail(state: dict) -> dict:
     return {
-        "current_chapter_quality": quality,
-        "decisions": [{"agent": "StyleKeeper", "step": "test", "decision": "ok", "reason": "test"}],
-        "errors": [],
-        "completed_nodes": ["style_keeper"],
-    }
-
-
-def _mock_quality_reviewer_node_pass(state: dict) -> dict:
-    return {
-        "current_chapter_quality": {"need_rewrite": False, "rule_check": {"passed": True}},
-        "decisions": [{"agent": "QualityReviewer", "step": "test", "decision": "质量通过", "reason": "test"}],
-        "errors": [],
-        "completed_nodes": ["quality_reviewer"],
-    }
-
-
-def _mock_quality_reviewer_node_fail(state: dict) -> dict:
-    return {
-        "current_chapter_quality": {"need_rewrite": True, "rule_check": {"passed": False}},
+        "current_chapter_quality": {
+            "need_rewrite": True,
+            "rule_check": {"passed": False},
+            "strengths": [],
+            "issues": [{"type": "pacing", "severity": "high", "quote": "", "reason": "mocked fail"}],
+            "style_overuse_hits": [],
+            "consistency_flags": [],
+        },
         "retry_counts": {state.get("current_chapter", 1): 1},
-        "decisions": [{"agent": "QualityReviewer", "step": "test", "decision": "需要重写", "reason": "test"}],
+        "decisions": [
+            {"agent": "Reviewer", "step": "test", "decision": "需要重写(仅报告)", "reason": "test"}
+        ],
         "errors": [],
-        "completed_nodes": ["quality_reviewer"],
+        "completed_nodes": ["reviewer"],
     }
 
 
@@ -241,9 +241,7 @@ def _get_mock_nodes(quality_pass: bool = True) -> dict:
         "character_designer": _mock_character_designer_node,
         "plot_planner": _mock_plot_planner_node,
         "writer": _mock_writer_node,
-        "consistency_checker": _mock_consistency_checker_node,
-        "style_keeper": _mock_style_keeper_node,
-        "quality_reviewer": _mock_quality_reviewer_node_pass if quality_pass else _mock_quality_reviewer_node_fail,
+        "reviewer": _mock_reviewer_node_pass if quality_pass else _mock_reviewer_node_fail,
     }
 
 
@@ -303,7 +301,7 @@ class TestGraph:
                 assert result["current_chapter_text"] is not None
                 assert len(result["current_chapter_text"]) > 0
                 assert "writer" in result["completed_nodes"]
-                assert "quality_reviewer" in result["completed_nodes"]
+                assert "reviewer" in result["completed_nodes"]
 
     def test_chapter_graph_single_pass_even_on_quality_fail(self):
         """档 4: quality 标 fail 也不触发回写, writer 只跑一次."""
@@ -389,9 +387,7 @@ class TestGraph:
             nodes={
                 "plot_planner": ok_planner,
                 "writer": failing_writer,
-                "consistency_checker": counting_checker,
-                "style_keeper": counting_checker,
-                "quality_reviewer": counting_checker,
+                "reviewer": counting_checker,
             },
         )
         result = runner.invoke({"current_chapter_text": None})

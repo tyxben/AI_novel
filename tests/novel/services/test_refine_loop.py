@@ -18,7 +18,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.llm.llm_client import LLMResponse
-from src.novel.agents.chapter_critic import ChapterCritic, CritiqueResult, Issue
+# Phase 2-β: ChapterCritic 合并进 Reviewer；refine_loop 仍暴露 ChapterCritic 别名以兼容旧测试
+from src.novel.agents.reviewer import Reviewer as ChapterCritic
+from src.novel.models.critique_result import CritiqueIssue as Issue, CritiqueResult
 from src.novel.models.refine_report import RefineReport
 from src.novel.services.chapter_verifier import ChapterVerifier
 from src.novel.services.refine_loop import (

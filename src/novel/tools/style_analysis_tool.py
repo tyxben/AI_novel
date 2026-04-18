@@ -1,6 +1,7 @@
 """风格分析工具 - 纯规则驱动，不依赖 LLM。
 
-提供文本风格特征提取与对比能力，用于 StyleKeeper Agent。
+提供文本风格特征提取与对比能力。Phase 2-β 后 StyleKeeper Agent 已合入
+Reviewer；本工具仍被 pipeline.polish_chapters 等路径直接调用，供展示/对比用。
 """
 
 from __future__ import annotations

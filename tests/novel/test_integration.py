@@ -192,38 +192,22 @@ def _mock_writer_node(state: dict) -> dict:
     }
 
 
-def _mock_consistency_checker_node(state: dict) -> dict:
+def _mock_reviewer_pass(state: dict) -> dict:
+    """Merged Reviewer mock (Phase 2-β) — subsumes old trio."""
     return {
-        "current_chapter_quality": {"consistency_check": {"passed": True}},
+        "current_chapter_quality": {
+            "need_rewrite": False,
+            "rule_check": {"passed": True},
+            "strengths": [],
+            "issues": [],
+            "style_overuse_hits": [],
+            "consistency_flags": [],
+        },
         "decisions": [
-            {"agent": "ConsistencyChecker", "step": "check", "decision": "一致", "reason": "integration test"}
+            {"agent": "Reviewer", "step": "review", "decision": "审稿通过", "reason": "integration test"}
         ],
         "errors": [],
-        "completed_nodes": ["consistency_checker"],
-    }
-
-
-def _mock_style_keeper_node(state: dict) -> dict:
-    quality = dict(state.get("current_chapter_quality") or {})
-    quality["style_similarity"] = 0.92
-    return {
-        "current_chapter_quality": quality,
-        "decisions": [
-            {"agent": "StyleKeeper", "step": "check", "decision": "风格匹配", "reason": "integration test"}
-        ],
-        "errors": [],
-        "completed_nodes": ["style_keeper"],
-    }
-
-
-def _mock_quality_reviewer_pass(state: dict) -> dict:
-    return {
-        "current_chapter_quality": {"need_rewrite": False, "rule_check": {"passed": True}, "score": 8.5},
-        "decisions": [
-            {"agent": "QualityReviewer", "step": "review", "decision": "质量通过", "reason": "integration test"}
-        ],
-        "errors": [],
-        "completed_nodes": ["quality_reviewer"],
+        "completed_nodes": ["reviewer"],
     }
 
 
@@ -234,9 +218,7 @@ def _get_mock_nodes(quality_pass: bool = True) -> dict:
         "character_designer": _mock_character_designer_node,
         "plot_planner": _mock_plot_planner_node,
         "writer": _mock_writer_node,
-        "consistency_checker": _mock_consistency_checker_node,
-        "style_keeper": _mock_style_keeper_node,
-        "quality_reviewer": _mock_quality_reviewer_pass,
+        "reviewer": _mock_reviewer_pass,
     }
 
 
@@ -395,9 +377,9 @@ class TestMultiChapterConsistency:
             assert "novel_director" in completed
             assert "world_builder" in completed
             assert "character_designer" in completed
-            # Each chapter adds: plot_planner, writer, consistency_checker, style_keeper, quality_reviewer
+            # Each chapter adds: plot_planner, writer, reviewer (Phase 2-β merged)
             assert completed.count("writer") == 5
-            assert completed.count("quality_reviewer") == 5
+            assert completed.count("reviewer") == 5
 
             # chapters list should have 5 entries
             assert len(ckpt["chapters"]) == 5
@@ -408,7 +390,7 @@ class TestMultiChapterConsistency:
             agents_seen = {d["agent"] for d in decisions}
             assert "NovelDirector" in agents_seen
             assert "Writer" in agents_seen
-            assert "QualityReviewer" in agents_seen
+            assert "Reviewer" in agents_seen
 
             # current_chapter should be 5 (the last one generated)
             assert ckpt["current_chapter"] == 5
@@ -581,15 +563,15 @@ class TestQualityReviewerSinglePass:
                     "rule_check": {"passed": False},
                 },
                 "decisions": [
-                    {"agent": "QualityReviewer", "step": "review", "decision": "标记需重写(仅报告)", "reason": "test"}
+                    {"agent": "Reviewer", "step": "review", "decision": "标记需重写(仅报告)", "reason": "test"}
                 ],
                 "errors": [],
-                "completed_nodes": ["quality_reviewer"],
+                "completed_nodes": ["reviewer"],
             }
 
         nodes = _get_mock_nodes()
         nodes["writer"] = counting_writer
-        nodes["quality_reviewer"] = always_fail_reviewer
+        nodes["reviewer"] = always_fail_reviewer
 
         with _patch_nodes(nodes), _patch_langgraph():
             result = pipeline.create_novel(

@@ -92,11 +92,15 @@ class NovelState(TypedDict, total=False):
     debt_summary: str  # Debt summary for writer
 
     # === 质量反馈注入 ===
-    feedback_injector: Any  # FeedbackInjector instance (bridges QualityReviewer → Writer)
+    feedback_injector: Any  # FeedbackInjector instance (bridges Reviewer → Writer feedback_prompt)
 
     # === 当前章重写反馈 ===
-    current_chapter_rewrite_prompt: str  # Rewrite-specific feedback from QualityReviewer
+    current_chapter_rewrite_prompt: str  # Rewrite-specific feedback from Reviewer
 
     # === 风格锚定 (Intervention D) ===
     style_bible: dict | None  # StyleBible.model_dump() — per-project style anchoring
     current_volume: int | None  # Current volume number (for volume_overrides)
+
+    # === Ledger / StyleProfile（Phase 1 基础设施，Phase 2-β Reviewer 使用） ===
+    ledger_store: Any | None  # LedgerStore instance; None → Reviewer skips ledger dim
+    style_profile: Any | None  # StyleProfile.model_dump()-like; None → Reviewer skips overuse dim

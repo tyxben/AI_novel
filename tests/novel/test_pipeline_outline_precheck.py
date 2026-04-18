@@ -118,26 +118,18 @@ def _mock_writer(state: dict) -> dict:
     }
 
 
-def _mock_consistency(state: dict) -> dict:
+def _mock_reviewer_pass(state: dict) -> dict:
+    """Merged Reviewer mock (Phase 2-β)."""
     return {
-        "current_chapter_quality": {"consistency_check": {"passed": True}},
-        "decisions": [], "errors": [], "completed_nodes": ["consistency_checker"],
-    }
-
-
-def _mock_style_keeper(state: dict) -> dict:
-    quality = dict(state.get("current_chapter_quality") or {})
-    quality["style_similarity"] = 0.9
-    return {
-        "current_chapter_quality": quality,
-        "decisions": [], "errors": [], "completed_nodes": ["style_keeper"],
-    }
-
-
-def _mock_quality_pass(state: dict) -> dict:
-    return {
-        "current_chapter_quality": {"need_rewrite": False, "rule_check": {"passed": True}},
-        "decisions": [], "errors": [], "completed_nodes": ["quality_reviewer"],
+        "current_chapter_quality": {
+            "need_rewrite": False,
+            "rule_check": {"passed": True},
+            "strengths": [],
+            "issues": [],
+            "style_overuse_hits": [],
+            "consistency_flags": [],
+        },
+        "decisions": [], "errors": [], "completed_nodes": ["reviewer"],
     }
 
 
@@ -145,9 +137,7 @@ def _get_mock_nodes() -> dict:
     return {
         "plot_planner": _mock_plot_planner,
         "writer": _mock_writer,
-        "consistency_checker": _mock_consistency,
-        "style_keeper": _mock_style_keeper,
-        "quality_reviewer": _mock_quality_pass,
+        "reviewer": _mock_reviewer_pass,
     }
 
 

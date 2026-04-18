@@ -18,7 +18,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-from src.novel.agents.chapter_critic import ChapterCritic, CritiqueResult
+from src.novel.agents.reviewer import Reviewer
+from src.novel.models.critique_result import CritiqueResult
+
+# Backwards-compat alias: older call sites imported ChapterCritic from here.
+ChapterCritic = Reviewer
 from src.novel.models.refine_report import RefineReport
 from src.novel.services.chapter_verifier import ChapterVerifier, VerifyReport
 from src.novel.utils.chapter_sanitizer import sanitize_chapter
@@ -88,7 +92,7 @@ def run_refine_loop(
     draft_fn: DraftFn,
     rewrite_fn: RewriteFn | None = None,  # deprecated, ignored
     verifier: ChapterVerifier,
-    critic: ChapterCritic | None = None,
+    critic: Reviewer | None = None,
     must_fulfill_debts: list[dict] | None = None,
     must_collect_foreshadowings: list[dict] | None = None,
     banned_phrases: Iterable[str] | None = None,
@@ -150,12 +154,14 @@ def run_refine_loop(
     if cfg.enable_critic and critic is not None:
         prev_tail = (prev_chapter_text or "")[-500:] if prev_chapter_text else ""
         try:
+            # Use the .critique() alias so legacy call sites and tests that
+            # MagicMock `critic.critique` keep working.
             critique = critic.critique(
                 text,
                 chapter_number=chapter_number,
                 chapter_title=chapter_title,
                 chapter_goal=chapter_goal,
-                prev_chapter_tail=prev_tail,
+                previous_tail=prev_tail,
                 prior_critiques=[],
             )
             trace.critique_attempts.append(critique)

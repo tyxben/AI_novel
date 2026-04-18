@@ -232,7 +232,14 @@ TOOLS = [
     },
     {
         "name": "critique_chapter",
-        "description": "对已落盘章节调 ChapterCritic 做结构化批评（LLM 调用）：返回 strengths / issues / specific_revisions。不修改正文。",
+        "description": "对已落盘章节调 Reviewer 做结构化批评（LLM + Ledger + StyleProfile）：返回 strengths / issues / specific_revisions / style_overuse_hits / consistency_flags。不修改正文。",
+        "parameters": {
+            "chapter_number": {"type": "integer", "description": "章节号"},
+        },
+    },
+    {
+        "name": "review_chapter",
+        "description": "critique_chapter 的别名（Phase 2-β 重构后规范命名）。对已落盘章节跑 Reviewer 得 CritiqueResult，不修改正文。",
         "parameters": {
             "chapter_number": {"type": "integer", "description": "章节号"},
         },
@@ -1368,9 +1375,8 @@ class AgentToolExecutor:
     def _global_banned_phrases(self) -> list[str]:
         """读 ``NovelConfig.quality.ai_flavor_hard_ban``（**只取硬禁**）。
 
-        软观察 watchlist 不参与 verifier，由 ChapterCritic 按场景判断。
+        软观察 watchlist 不参与 verifier，由 Reviewer 按场景判断。
         优先 ``config.yaml`` 用户配置；不可用时回退 schema 默认。
-        兼容旧的 ``ai_flavor_blacklist`` 字段（视为 hard_ban）。
         """
         from src.novel.config import NovelConfig, load_novel_config
 
@@ -1379,10 +1385,6 @@ class AgentToolExecutor:
         except Exception:
             cfg = NovelConfig()
         hard = list(cfg.quality.ai_flavor_hard_ban or [])
-        # 旧字段兼容
-        legacy = cfg.quality.ai_flavor_blacklist or {}
-        if isinstance(legacy, dict):
-            hard.extend(legacy.keys())
         if not hard:
             # 用户显式清空过 → 用 schema 默认，工具才有意义
             hard = list(NovelConfig().quality.ai_flavor_hard_ban)
@@ -1484,7 +1486,7 @@ class AgentToolExecutor:
         }
 
     def _tool_critique_chapter(self, chapter_number: int) -> dict:
-        from src.novel.agents.chapter_critic import ChapterCritic
+        from src.novel.agents.reviewer import Reviewer
         from src.novel.storage.file_manager import FileManager
 
         text = self._load_chapter_text(chapter_number)
@@ -1505,16 +1507,18 @@ class AgentToolExecutor:
         except Exception as exc:
             return {"error": f"无可用 LLM: {exc}"}
 
-        critic = ChapterCritic(llm)
-        result = critic.critique(
+        watchlist = self._global_watchlist()
+        reviewer = Reviewer(llm, watchlist=watchlist or None)
+        result = reviewer.review(
             text,
             chapter_number=chapter_number,
             chapter_title=ch_outline.get("title", ""),
             chapter_goal=ch_outline.get("goal", ""),
-            prev_chapter_tail=prev_text[-500:] if prev_text else "",
+            previous_tail=prev_text[-500:] if prev_text else "",
         )
         return {
             "chapter_number": chapter_number,
+            "need_rewrite": result.need_rewrite,
             "needs_refine": result.needs_refine,
             "high_severity_count": result.high_severity_count,
             "medium_severity_count": result.medium_severity_count,
@@ -1532,8 +1536,14 @@ class AgentToolExecutor:
                 {"target": r.target, "suggestion": r.suggestion}
                 for r in result.specific_revisions[:8]
             ],
+            "style_overuse_hits": result.style_overuse_hits[:15],
+            "consistency_flags": [f.model_dump() for f in result.consistency_flags[:10]],
             "overall_assessment": result.overall_assessment[:500],
         }
+
+    # Alias: new canonical name per Phase 2-β design
+    def _tool_review_chapter(self, chapter_number: int) -> dict:
+        return self._tool_critique_chapter(chapter_number)
 
     def _tool_refine_chapter(
         self,
@@ -1546,7 +1556,7 @@ class AgentToolExecutor:
         出一份 ``RefineReport``（verifier + critic 结构化报告），**不改章节正文、
         不落盘**。作者读完报告若决定重写，显式调用 ``rewrite_chapter`` 工具。
         """
-        from src.novel.agents.chapter_critic import ChapterCritic
+        from src.novel.agents.reviewer import Reviewer
         from src.novel.services.chapter_verifier import ChapterVerifier
         from src.novel.services.refine_loop import RefineConfig, run_refine_loop
         from src.novel.storage.file_manager import FileManager
@@ -1611,7 +1621,12 @@ class AgentToolExecutor:
         except Exception:
             pass
 
-        critic = ChapterCritic(llm) if (enable_critic and llm is not None) else None
+        watchlist = self._global_watchlist()
+        critic = (
+            Reviewer(llm, watchlist=watchlist or None)
+            if (enable_critic and llm is not None)
+            else None
+        )
         config = RefineConfig(enable_critic=bool(enable_critic and critic is not None))
 
         trace = run_refine_loop(

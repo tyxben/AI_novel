@@ -1,12 +1,14 @@
 """LangGraph 图构建 - 小说创作流水线
 
-chapter graph:
-  dynamic_outline -> plot_planner -> writer -> consistency_checker
-  -> style_keeper -> quality_reviewer -> state_writeback -> END
+Chapter graph (Phase 2-β 合并后)::
 
-Phase 0 档 4: 零自动重写 — Verifier/Reviewer 只标不改。
-quality_reviewer 的 need_rewrite 字段仍作为信息标签产出，
-但不再触发 Writer 回边（作者看报告后主动决定）。
+    dynamic_outline -> plot_planner -> writer -> reviewer -> state_writeback -> END
+
+``reviewer`` 节点是三合一产物：取代了
+``consistency_checker + style_keeper + quality_reviewer``，零打分零自动重写。
+Reviewer 只产报告（``CritiqueResult``）写进 ``state["current_chapter_quality"]``，
+然后由 state_writeback 持久化。作者看报告后主动决定是否调 ``apply_feedback`` /
+``rewrite_chapter`` 工具改文。
 
 LangGraph 为可选依赖。如果未安装，提供 sequential fallback。
 """
@@ -46,9 +48,7 @@ def _get_node_functions() -> dict[str, Callable]:
     from src.novel.agents.dynamic_outline import dynamic_outline_node
     from src.novel.agents.plot_planner import plot_planner_node
     from src.novel.agents.writer import writer_node
-    from src.novel.agents.consistency_checker import consistency_checker_node
-    from src.novel.agents.style_keeper import style_keeper_node
-    from src.novel.agents.quality_reviewer import quality_reviewer_node
+    from src.novel.agents.reviewer import reviewer_node
     from src.novel.agents.state_writeback import state_writeback_node
 
     return {
@@ -58,9 +58,7 @@ def _get_node_functions() -> dict[str, Callable]:
         "dynamic_outline": dynamic_outline_node,
         "plot_planner": plot_planner_node,
         "writer": writer_node,
-        "consistency_checker": consistency_checker_node,
-        "style_keeper": style_keeper_node,
-        "quality_reviewer": quality_reviewer_node,
+        "reviewer": reviewer_node,
         "state_writeback": state_writeback_node,
     }
 
@@ -73,15 +71,12 @@ def _get_node_functions() -> dict[str, Callable]:
 def build_chapter_graph() -> Any:
     """Build the per-chapter generation graph.
 
-    Flow (单向线性，无自动回边):
-        dynamic_outline -> plot_planner -> writer -> consistency_checker
-        -> style_keeper -> quality_reviewer -> state_writeback -> END
+    Flow::
 
-    quality_reviewer / checker 只产报告（need_rewrite 等信息字段），
-    不再自动触发 Writer 回写。作者主动调 apply_feedback / rewrite_chapter
-    工具才会改文。
+        dynamic_outline -> plot_planner -> writer -> reviewer -> state_writeback -> END
 
-    Returns a compiled LangGraph graph, or a _ChapterRunner fallback.
+    Reviewer 是合并后的单节点（取代 consistency_checker + style_keeper +
+    quality_reviewer）。只产报告（``CritiqueResult``），不触发 Writer 回写。
     """
     nodes = _get_node_functions()
 
@@ -90,19 +85,14 @@ def build_chapter_graph() -> Any:
         graph.add_node("dynamic_outline", nodes["dynamic_outline"])
         graph.add_node("plot_planner", nodes["plot_planner"])
         graph.add_node("writer", nodes["writer"])
-        graph.add_node("consistency_checker", nodes["consistency_checker"])
-        graph.add_node("style_keeper", nodes["style_keeper"])
-        graph.add_node("quality_reviewer", nodes["quality_reviewer"])
+        graph.add_node("reviewer", nodes["reviewer"])
         graph.add_node("state_writeback", nodes["state_writeback"])
 
         graph.set_entry_point("dynamic_outline")
         graph.add_edge("dynamic_outline", "plot_planner")
         graph.add_edge("plot_planner", "writer")
-        graph.add_edge("writer", "consistency_checker")
-        graph.add_edge("consistency_checker", "style_keeper")
-        graph.add_edge("style_keeper", "quality_reviewer")
-        # 档 4: quality_reviewer 不再条件跳回 writer，直接进 state_writeback
-        graph.add_edge("quality_reviewer", "state_writeback")
+        graph.add_edge("writer", "reviewer")
+        graph.add_edge("reviewer", "state_writeback")
         graph.add_edge("state_writeback", END)
 
         return graph.compile()
@@ -111,11 +101,8 @@ def build_chapter_graph() -> Any:
     fallback_nodes = {
         "plot_planner": nodes["plot_planner"],
         "writer": nodes["writer"],
-        "consistency_checker": nodes["consistency_checker"],
-        "style_keeper": nodes["style_keeper"],
-        "quality_reviewer": nodes["quality_reviewer"],
+        "reviewer": nodes["reviewer"],
     }
-    # Optional nodes (may be absent in test mocks)
     if "dynamic_outline" in nodes:
         fallback_nodes["dynamic_outline"] = nodes["dynamic_outline"]
     if "state_writeback" in nodes:
@@ -157,18 +144,14 @@ class _SequentialRunner:
             log.info("执行节点: %s (fallback)", name)
             try:
                 result = node_fn(current_state)
-                # Ensure completed_nodes is set on success even if node forgot
                 if "completed_nodes" not in result:
                     result["completed_nodes"] = [name]
                 current_state = _merge_state(current_state, result)
             except Exception as exc:
                 log.error("节点 %s 执行失败: %s", name, exc)
-                # Do NOT add to completed_nodes on failure — only record the error
                 current_state = _merge_state(
                     current_state,
-                    {
-                        "errors": [{"agent": name, "message": str(exc)}],
-                    },
+                    {"errors": [{"agent": name, "message": str(exc)}]},
                 )
         return current_state
 
@@ -176,7 +159,7 @@ class _SequentialRunner:
 class _ChapterRunner:
     """Fallback for chapter graph — single linear pass, 无重写循环。
 
-    档 4: quality_reviewer 只产报告，不再触发 writer 回写。
+    Phase 2-β: reviewer 单节点，只产报告不触发 writer 回写。
     """
 
     def __init__(self, nodes: dict[str, Callable]) -> None:
@@ -185,54 +168,34 @@ class _ChapterRunner:
     def invoke(self, state: dict) -> dict:
         current_state = dict(state)
 
-        # Step 0: dynamic_outline (revise outline based on actual progress)
         if "dynamic_outline" in self.nodes:
             current_state = self._run_node("dynamic_outline", current_state)
 
-        # Step 1: plot_planner
         current_state = self._run_node("plot_planner", current_state)
-
-        # Step 2: writer (single shot)
         current_state = self._run_node("writer", current_state)
 
-        # Step 3-5: checkers + reviewer (report-only, no rewrite loop)
         if current_state.get("current_chapter_text"):
-            current_state = self._run_checkers(current_state)
-            current_state = self._run_node("quality_reviewer", current_state)
+            current_state = self._run_node("reviewer", current_state)
         else:
-            log.error("Writer 未产生文本，跳过检查节点")
+            log.error("Writer 未产生文本，跳过 reviewer 节点")
 
-        # Step 6: state_writeback (persist changes back to state/DB)
         if "state_writeback" in self.nodes:
             current_state = self._run_node("state_writeback", current_state)
 
         return current_state
 
-    def _run_checkers(self, state: dict) -> dict:
-        """串行执行 consistency_checker 和 style_keeper（与 LangGraph 图语义一致）。"""
-        merged = dict(state)
-        for name in ["consistency_checker", "style_keeper"]:
-            if name in self.nodes:
-                result = self._run_node(name, merged)
-                merged = result
-        return merged
-
     def _run_node(self, name: str, state: dict) -> dict:
         node_fn = self.nodes[name]
         try:
             result = node_fn(state)
-            # Ensure completed_nodes is set on success even if node forgot
             if "completed_nodes" not in result:
                 result["completed_nodes"] = [name]
             return _merge_state(state, result)
         except Exception as exc:
             log.error("节点 %s 执行失败: %s", name, exc)
-            # Do NOT add to completed_nodes on failure — only record the error
             return _merge_state(
                 state,
-                {
-                    "errors": [{"agent": name, "message": str(exc)}],
-                },
+                {"errors": [{"agent": name, "message": str(exc)}]},
             )
 
 

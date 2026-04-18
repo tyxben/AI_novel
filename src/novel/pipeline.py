@@ -2206,12 +2206,10 @@ class NovelPipeline:
         from src.novel.models.novel import ChapterOutline
         from src.novel.models.world import WorldSetting
         from src.novel.tools.style_analysis_tool import StyleAnalysisTool
-        from src.novel.tools.quality_check_tool import QualityCheckTool
 
         novel_id = Path(project_path).name
         fm = self._get_file_manager()
         style_tool = StyleAnalysisTool()
-        quality_tool = QualityCheckTool()
 
         # Load checkpoint
         state = self._load_checkpoint(novel_id)
@@ -2349,9 +2347,9 @@ class NovelPipeline:
             log.info("=== 精修第 %d/%d 章 ===", ch_num, total_chapters)
 
             try:
-                # Step 0: 改前指标（零成本，纯规则）
+                # Step 0: 改前指标（零成本，纯规则；rule_check 已随 quality_check_tool
+                # 一起砍，这里只剩 style 指标）
                 before_style = style_tool.analyze(chapter_text)
-                before_rules = quality_tool.rule_check(chapter_text)
 
                 # Step 1: 自审
                 log.info("第%d章：自审中...", ch_num)
@@ -2384,7 +2382,6 @@ class NovelPipeline:
 
                 # Step 3: 改后指标（零成本，纯规则）
                 after_style = style_tool.analyze(polished_text)
-                after_rules = quality_tool.rule_check(polished_text)
 
                 # 解析审稿意见分类
                 issues = _parse_critique_issues(critique)
@@ -2405,8 +2402,6 @@ class NovelPipeline:
                     "issues": issues,
                     "before_style": before_style.model_dump(),
                     "after_style": after_style.model_dump(),
-                    "before_rules": before_rules.model_dump(),
-                    "after_rules": after_rules.model_dump(),
                 })
 
                 log.info(

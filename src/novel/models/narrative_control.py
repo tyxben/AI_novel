@@ -77,8 +77,9 @@ class StyleBible(BaseModel):
     """风格圣经 - 项目专属风格锚定文档。
 
     Quantitative targets lock in the novel's writing voice. Generated once
-    at project creation and consulted every chapter by Writer (via brief)
-    and StyleKeeper (via gate check).
+    at project creation and consulted every chapter by Writer (via brief).
+    Phase 2-β: 旧 StyleKeeper gate-check 已废弃；对 style bible 的日常复核
+    由 Reviewer 在 CritiqueResult 里以 issues 形式回报。
     """
 
     quantitative_targets: dict[str, Any] = Field(

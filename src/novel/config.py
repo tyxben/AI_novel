@@ -104,13 +104,9 @@ class QualityConfig(BaseModel):
         ),
     )
 
-    # ---- Backwards compat ----
-    # 旧字段 ai_flavor_blacklist 保留只是为了不破坏读旧 config.yaml 的代码。
-    # 新代码请用 ai_flavor_hard_ban / ai_flavor_watchlist。
-    ai_flavor_blacklist: dict[str, int] = Field(
-        default_factory=dict,
-        description="DEPRECATED: 请用 ai_flavor_hard_ban + ai_flavor_watchlist",
-    )
+    # Phase 2-β 合并 Reviewer 后，旧字段 ``ai_flavor_blacklist`` 彻底移除。
+    # 新代码统一用 ``ai_flavor_hard_ban``（verifier）+ ``ai_flavor_watchlist``
+    # （Reviewer / critic 软观察）。StyleProfile 接管按项目学习的口头禅检查。
 
 
 class ConsistencyConfig(BaseModel):

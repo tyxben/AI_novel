@@ -121,10 +121,11 @@ class TestToolDefinitions:
         # + 6 smart-editor/health (get_change_history, rollback_change, analyze_change_impact,
         #                          batch_edit_settings, get_foreshadowing_graph, get_health_dashboard)
         # + 4 self-refine/reflexion (verify_chapter, critique_chapter, refine_chapter, get_reflexion_log)
-        # = 30
+        # + 1 Reviewer alias (review_chapter) — Phase 2-β
+        # = 31
         # NOTE: "rebuild_narrative" 已随 NarrativeRebuildService 移除
-        # (architecture-rework-2026 Phase 0)，总数由 31 降为 30。
-        assert len(TOOLS) == 30
+        # (architecture-rework-2026 Phase 0)；Phase 2-β 新增 review_chapter 别名，总数 31。
+        assert len(TOOLS) == 31
 
     def test_tools_description_includes_new(self):
         desc = _tools_description()
