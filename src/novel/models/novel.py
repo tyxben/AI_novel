@@ -8,6 +8,24 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+# ---------------------------------------------------------------------------
+# 章节类型 & 字数推算常量（Phase 1-B, DESIGN.md Part 1 / Part 6）
+# ---------------------------------------------------------------------------
+
+#: 章节基础字数。`target_words` 缺省时用 `BASE_CHAPTER_WORDS × 倍率` 推算。
+BASE_CHAPTER_WORDS: int = 2500
+
+#: chapter_type → 字数倍率。覆盖 setup/buildup/climax/resolution/interlude 五类。
+CHAPTER_TYPE_WORD_MULTIPLIER: dict[str, float] = {
+    "setup": 0.8,
+    "buildup": 1.0,
+    "climax": 1.5,
+    "resolution": 1.2,
+    "interlude": 0.6,
+}
+
+ChapterType = Literal["setup", "buildup", "climax", "resolution", "interlude"]
+
 
 class OutlineTemplate(BaseModel):
     """大纲模板定义"""
@@ -58,6 +76,19 @@ class ChapterOutline(BaseModel):
         default_factory=list, description="推进的情节线 ID"
     )
     estimated_words: int = Field(2500, ge=500, le=10000)
+    chapter_type: ChapterType = Field(
+        "buildup",
+        description="章节类型，决定字数基数与节奏 (setup/buildup/climax/resolution/interlude)",
+    )
+    target_words: int | None = Field(
+        None,
+        ge=500,
+        le=10000,
+        description=(
+            "本章目标字数。为 None 时由 chapter_type × BASE_CHAPTER_WORDS 推算，"
+            "见 resolved_target_words。"
+        ),
+    )
     mood: Literal["蓄力", "小爽", "大爽", "过渡", "虐心", "反转", "日常"] = Field(
         "蓄力", description="章节情绪基调"
     )
@@ -82,6 +113,18 @@ class ChapterOutline(BaseModel):
     )
     version: int = Field(1, ge=1, description="版本号")
 
+    @property
+    def resolved_target_words(self) -> int:
+        """返回本章目标字数。
+
+        优先级：``target_words`` (显式指定) > ``chapter_type × BASE_CHAPTER_WORDS`` 推算。
+        未知 ``chapter_type`` 退回倍率 1.0 (即 BASE_CHAPTER_WORDS)。
+        """
+        if self.target_words is not None and self.target_words > 0:
+            return int(self.target_words)
+        multiplier = CHAPTER_TYPE_WORD_MULTIPLIER.get(self.chapter_type, 1.0)
+        return int(round(BASE_CHAPTER_WORDS * multiplier))
+
 
 class Outline(BaseModel):
     """三层大纲结构"""
@@ -99,7 +142,7 @@ class Outline(BaseModel):
 
 
 class Volume(BaseModel):
-    """卷实体"""
+    """卷实体（Phase 1-B 升为一等公民）"""
 
     volume_number: int = Field(..., ge=1)
     title: str = Field(..., min_length=1)
@@ -110,6 +153,33 @@ class Volume(BaseModel):
     snapshot: VolumeSnapshot | None = None
     story_units: list = Field(
         default_factory=list, description="StoryUnit arcs in this volume"
+    )
+
+    # --- Phase 1-B：卷一等公民字段 ---
+    volume_goal: str = Field(
+        "",
+        description="本卷核心目标（一句话），例：'主角开启修炼之路并结识队友'",
+    )
+    volume_outline: list[int] = Field(
+        default_factory=list,
+        description=(
+            "本卷章节号列表，冗余于 chapters 保持向后兼容；新链路（VolumeDirector）"
+            "优先读本字段。"
+        ),
+    )
+    settlement: dict | None = Field(
+        None,
+        description=(
+            "本卷结算报告：应兑现/未兑现伏笔、回收率、留给下一卷的钩子等；"
+            "卷未写完时为 None。"
+        ),
+    )
+    chapter_type_dist: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "本卷各 chapter_type 配额，例：{'setup':2,'buildup':10,'climax':3,"
+            "'resolution':1,'interlude':1}。值为章节数，总和应等于本卷章数。"
+        ),
     )
 
 

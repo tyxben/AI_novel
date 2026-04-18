@@ -26,6 +26,47 @@ class ConcurrentModificationError(RuntimeError):
     """当另一个进程已持有同一小说的写锁时抛出。"""
 
 
+# ---------------------------------------------------------------------------
+# Phase 1-B：旧版 novel.json 字段兜底（内存中补，不落盘）
+# ---------------------------------------------------------------------------
+
+_V3_CHAPTER_OUTLINE_DEFAULTS: dict[str, Any] = {
+    "chapter_type": "buildup",
+    "target_words": None,
+}
+_V3_VOLUME_DEFAULTS: dict[str, Any] = {
+    "volume_goal": "",
+    "volume_outline": [],
+    "settlement": None,
+    "chapter_type_dist": {},
+}
+
+
+def _apply_v3_defaults_in_memory(novel: dict[str, Any]) -> None:
+    """给旧项目在加载时补齐 Phase 1-B 新字段（仅内存中，不写回）。
+
+    幂等 + 安全：只在字段缺失时写入默认，已有字段原样保留。
+    """
+    outline = novel.get("outline")
+    if isinstance(outline, dict):
+        for ch in outline.get("chapters", []) or []:
+            if not isinstance(ch, dict):
+                continue
+            for k, default in _V3_CHAPTER_OUTLINE_DEFAULTS.items():
+                ch.setdefault(k, default)
+
+    for vol in novel.get("volumes", []) or []:
+        if not isinstance(vol, dict):
+            continue
+        for k, default in _V3_VOLUME_DEFAULTS.items():
+            if k not in vol:
+                # default_factory 等价：每次赋值新对象，避免共享引用
+                if isinstance(default, (dict, list)):
+                    vol[k] = type(default)()
+                else:
+                    vol[k] = default
+
+
 class FileManager:
     """管理 workspace/novels/{novel_id}/ 目录
 
@@ -123,12 +164,22 @@ class FileManager:
 
         Returns:
             Novel dict 或 None（文件不存在时）
+
+        Notes:
+            Phase 1-B 起：在内存中为旧版本项目兜底补齐
+            ``ChapterOutline.chapter_type`` / ``Volume.volume_goal`` 等新字段，
+            不写回文件（长期迁移请走 scripts/migrate_novel_v2_to_v3.py）。
         """
         path = self._novel_dir(novel_id) / "novel.json"
         if not path.exists():
             return None
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        try:
+            _apply_v3_defaults_in_memory(data)
+        except Exception:  # pragma: no cover - 兜底不阻断加载
+            pass
+        return data
 
     # ========== Chapter 操作 ==========
 
@@ -515,6 +566,40 @@ class FileManager:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(arcs, f, ensure_ascii=False, indent=2)
         return path
+
+    # ========== StyleProfile 缓存 ==========
+
+    def _style_profile_path(self, novel_id: str) -> Path:
+        """StyleProfile JSON 路径：{novel_dir}/.cache/style_profile.json"""
+        cache_dir = self._novel_dir(novel_id) / ".cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / "style_profile.json"
+
+    def save_style_profile(
+        self, novel_id: str, profile_data: dict[str, Any]
+    ) -> Path:
+        """保存 StyleProfile 为 JSON 到 ``{novel_dir}/.cache/style_profile.json``
+
+        Args:
+            novel_id: 小说 ID
+            profile_data: ``StyleProfile.model_dump()`` 的结果
+
+        Returns:
+            保存的文件路径
+        """
+        path = self._style_profile_path(novel_id)
+        with self._novel_lock(novel_id):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(profile_data, f, ensure_ascii=False, indent=2)
+        return path
+
+    def load_style_profile(self, novel_id: str) -> dict[str, Any] | None:
+        """加载 StyleProfile JSON；不存在时返回 None（首次构建前的正常状态）。"""
+        path = self._style_profile_path(novel_id)
+        if not path.exists():
+            return None
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
 
     # ========== 导出 ==========
 
