@@ -3183,6 +3183,112 @@ class NovelPipeline:
         return {"rewritten": rewritten, "errors": errors}
 
     # ------------------------------------------------------------------
+    # VolumeDirector entry points (Phase 2-α, 架构重构 2026-04)
+    #
+    # 这两个入口提供卷级进/出规划的工具调用，当前 **不自动触发**，
+    # 只作为 CLI / MCP / Agent Chat 后续 wire 的预留接口。
+    # ``generate_chapters`` 主流程暂未走 VolumeDirector。
+    # ------------------------------------------------------------------
+
+    def propose_volume_outline(
+        self,
+        project_path: str,
+        volume_number: int,
+        previous_settlement: dict | None = None,
+    ) -> dict:
+        """进入新卷时生成 proposal（不落盘）。
+
+        Args:
+            project_path: 小说项目路径（workspace/novels/novel_xxx）。
+            volume_number: 要规划的卷号。
+            previous_settlement: 可选，上一卷的 settlement dict。
+
+        Returns:
+            ``VolumeOutlineProposal.to_dict()`` — 调用方 accept 后自行落盘。
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.novel.agents.volume_director import VolumeDirector
+
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+        novel_data = fm.load_novel(novel_id)
+        if novel_data is None:
+            raise FileNotFoundError(f"找不到项目: {project_path}")
+
+        # 用 outline_generation 阶段的 LLM 配置
+        state: dict = {"config": self.config.model_dump()}
+        llm_config = get_stage_llm_config(state, "outline_generation")
+        llm = create_llm_client(llm_config)
+        director = VolumeDirector(
+            llm=llm, workspace=self.workspace, config=self.config
+        )
+        proposal = director.propose_volume_outline(
+            novel=novel_data,
+            volume_number=volume_number,
+            previous_settlement=previous_settlement,
+        )
+        return proposal.to_dict()
+
+    def settle_volume(
+        self,
+        project_path: str,
+        volume_number: int,
+        use_ledger: bool = True,
+    ) -> dict:
+        """出卷结算。
+
+        Args:
+            project_path: 小说项目路径。
+            volume_number: 要结算的卷号。
+            use_ledger: 是否尝试构造 LedgerStore（需要 db/kg 可达）。
+
+        Returns:
+            ``VolumeSettlementReport.to_dict()``。
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.novel.agents.volume_director import VolumeDirector
+
+        novel_id = Path(project_path).name
+        fm = self._get_file_manager()
+        novel_data = fm.load_novel(novel_id)
+        if novel_data is None:
+            raise FileNotFoundError(f"找不到项目: {project_path}")
+
+        ledger = None
+        if use_ledger:
+            try:
+                from src.novel.services.ledger_store import LedgerStore
+                from src.novel.storage.novel_memory import NovelMemory
+
+                memory = NovelMemory(novel_id, self.workspace)
+                ledger = LedgerStore(
+                    project_path=project_path,
+                    db=getattr(memory, "structured_db", None),
+                    kg=getattr(memory, "knowledge_graph", None),
+                    vector_store=getattr(memory, "vector_store", None),
+                    novel_data=novel_data,
+                )
+            except Exception as exc:
+                log.warning("settle_volume: 无法构造 LedgerStore (%s)，降级", exc)
+                ledger = None
+
+        state: dict = {"config": self.config.model_dump()}
+        llm_config = get_stage_llm_config(state, "outline_generation")
+        try:
+            llm = create_llm_client(llm_config)
+        except Exception:
+            llm = None  # settle_volume 不强依赖 LLM
+        director = VolumeDirector(
+            llm=llm, workspace=self.workspace, config=self.config
+        )
+        report = director.settle_volume(
+            novel=novel_data,
+            volume_number=volume_number,
+            ledger=ledger,
+        )
+        return report.to_dict()
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
