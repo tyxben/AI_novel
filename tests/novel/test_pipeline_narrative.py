@@ -576,22 +576,16 @@ class TestCreateNovelStoryArcs:
             },
         }
 
-        mock_director = MagicMock()
-        mock_director.generate_story_arcs.return_value = [
-            {
-                "arc_id": "arc_1",
-                "name": "开篇弧",
-                "chapters": [1, 2],
-            },
-            {
-                "arc_id": "arc_2",
-                "name": "发展弧",
-                "chapters": [3],
-            },
+        fake_arcs = [
+            {"arc_id": "arc_1", "name": "开篇弧", "chapters": [1, 2]},
+            {"arc_id": "arc_2", "name": "发展弧", "chapters": [3]},
         ]
 
+        # Phase 3-B1: arc generation now lives on ProjectArchitect; patch the
+        # impl directly so we can both stub the return value and assert the call.
+        from src.novel.agents.project_architect import ProjectArchitect as _PA
         with patch("src.novel.agents.graph._get_node_functions", return_value=mock_nodes), \
-             patch("src.novel.agents.novel_director.NovelDirector", return_value=mock_director), \
+             patch.object(_PA, "_generate_story_arcs", return_value=fake_arcs) as mock_arcs, \
              patch("src.llm.llm_client.create_llm_client", return_value=MagicMock()):
 
             result = pipeline.create_novel(
@@ -602,11 +596,10 @@ class TestCreateNovelStoryArcs:
 
             assert "novel_id" in result
             assert "outline" in result
-            # Director should have been asked to generate story arcs
-            mock_director.generate_story_arcs.assert_called_once()
+            mock_arcs.assert_called_once()
 
-    def test_create_novel_works_without_generate_story_arcs(self, pipeline, tmp_workspace):
-        """create_novel should work even if director has no generate_story_arcs."""
+    def test_create_novel_works_when_arc_impl_returns_empty(self, pipeline, tmp_workspace):
+        """create_novel should work even if the arc impl returns no arcs."""
         mock_nodes = {
             "novel_director": lambda s: {
                 "outline": _make_outline_dict(3),
@@ -631,11 +624,9 @@ class TestCreateNovelStoryArcs:
             },
         }
 
-        # Director without generate_story_arcs method
-        mock_director = MagicMock(spec=[])  # no attributes at all
-
+        from src.novel.agents.project_architect import ProjectArchitect as _PA
         with patch("src.novel.agents.graph._get_node_functions", return_value=mock_nodes), \
-             patch("src.novel.agents.novel_director.NovelDirector", return_value=mock_director), \
+             patch.object(_PA, "_generate_story_arcs", return_value=[]), \
              patch("src.llm.llm_client.create_llm_client", return_value=MagicMock()):
 
             result = pipeline.create_novel(
@@ -644,7 +635,6 @@ class TestCreateNovelStoryArcs:
                 target_words=15000,
             )
 
-            # Should complete successfully despite no generate_story_arcs
             assert "novel_id" in result
             assert result["outline"] is not None
 
@@ -674,14 +664,16 @@ class TestCreateNovelStoryArcs:
             },
         }
 
-        # Make the NovelDirector import raise an error inside the try block
-        with patch("src.novel.agents.graph._get_node_functions", return_value=mock_nodes):
+        # Phase 3-B1: arc generation is guarded by propose_story_arcs'
+        # try/except; raising from the impl must not crash create_novel.
+        from src.novel.agents.project_architect import ProjectArchitect as _PA
+        with patch("src.novel.agents.graph._get_node_functions", return_value=mock_nodes), \
+             patch.object(_PA, "_generate_story_arcs", side_effect=RuntimeError("x")):
             result = pipeline.create_novel(
                 genre="玄幻",
                 theme="修仙逆袭",
                 target_words=15000,
             )
 
-            # Should succeed even if arc generation fails
             assert "novel_id" in result
             assert result["outline"] is not None

@@ -336,7 +336,8 @@ class TestProposeStoryArcs:
         assert isinstance(result, ArcsProposal)
         assert result.arcs == []
 
-    def test_delegates_to_novel_director(self):
+    def test_uses_local_arc_impl(self):
+        """Phase 3-B1: propose_story_arcs now calls self._generate_story_arcs."""
         llm = _fake_llm()
         arch = ProjectArchitect(llm)
         meta = {
@@ -347,24 +348,24 @@ class TestProposeStoryArcs:
             },
         }
         fake_arcs = [{"arc_id": "arc_1_1", "name": "新生", "chapters": [1, 2]}]
-        with patch(
-            "src.novel.agents.novel_director.NovelDirector"
-        ) as MockDirector:
-            MockDirector.return_value.generate_story_arcs.return_value = fake_arcs
+        with patch.object(
+            ProjectArchitect, "_generate_story_arcs", return_value=fake_arcs
+        ):
             result = arch.propose_story_arcs(meta, synopsis="s")
         assert result.arcs == fake_arcs
 
-    def test_director_exception_is_non_fatal(self):
+    def test_arc_impl_exception_is_non_fatal(self):
         llm = _fake_llm()
         arch = ProjectArchitect(llm)
         meta = {
             "genre": "玄幻",
             "outline": {"chapters": [{"chapter_number": 1}]},
         }
-        with patch(
-            "src.novel.agents.novel_director.NovelDirector"
-        ) as MockDirector:
-            MockDirector.return_value.generate_story_arcs.side_effect = RuntimeError("x")
+        with patch.object(
+            ProjectArchitect,
+            "_generate_story_arcs",
+            side_effect=RuntimeError("x"),
+        ):
             result = arch.propose_story_arcs(meta, synopsis="")
         assert result.arcs == []
 
