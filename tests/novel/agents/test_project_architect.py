@@ -219,7 +219,7 @@ class TestProposeMainCharacters:
             return_value=[{"name": "林辰", "role": "主角"}, {"name": "苏瑶", "role": "爱情线"}]
         )
         arch._character_service.generate_profile = MagicMock(  # type: ignore[method-assign]
-            side_effect=lambda name, role, genre, context: _make_profile(name=name, role=role)
+            side_effect=lambda name, role, genre, outline_context: _make_profile(name=name, role=role)
         )
         result = arch.propose_main_characters({"genre": "玄幻", "theme": "t"}, synopsis="林辰复仇")
         assert isinstance(result, CharactersProposal)
@@ -233,7 +233,7 @@ class TestProposeMainCharacters:
             return_value=[{"name": "", "role": "主角"}, {"name": "苏瑶", "role": "配角"}]
         )
         arch._character_service.generate_profile = MagicMock(  # type: ignore[method-assign]
-            side_effect=lambda name, role, genre, context: _make_profile(name=name, role=role)
+            side_effect=lambda name, role, genre, outline_context: _make_profile(name=name, role=role)
         )
         result = arch.propose_main_characters({"genre": "玄幻"})
         # 空 name 被跳过
@@ -247,7 +247,7 @@ class TestProposeMainCharacters:
             return_value=[{"name": "A", "role": "主角"}, {"name": "B", "role": "配角"}]
         )
 
-        def _raising_profile(name, role, genre, context):
+        def _raising_profile(name, role, genre, outline_context):
             if name == "A":
                 raise RuntimeError("boom")
             return _make_profile(name=name, role=role)
@@ -262,6 +262,19 @@ class TestProposeMainCharacters:
         arch._character_service.extract_characters = MagicMock(side_effect=RuntimeError("x"))  # type: ignore[method-assign]
         result = arch.propose_main_characters({"genre": "玄幻"})
         assert result.characters == []
+
+    def test_generate_profile_kwarg_matches_signature(self):
+        """回归: 确保 propose_main_characters 传给 generate_profile 的 kwargs
+        与 CharacterService.generate_profile 真实签名一致。Mock 会无视未知 kwarg,
+        所以用真实 CharacterService 实例但 mock 底层 LLM。"""
+        import inspect
+        from src.novel.services.character_service import CharacterService
+        sig = inspect.signature(CharacterService.generate_profile)
+        params = set(sig.parameters.keys()) - {"self"}
+        # propose_main_characters 传的 kwargs 必须都在签名里
+        assert {"name", "role", "genre", "outline_context"}.issubset(params), (
+            f"generate_profile 签名变了: {params}"
+        )
 
     def test_accept_into_dict(self):
         proposal = CharactersProposal(characters=[_make_profile("林辰", "主角")])

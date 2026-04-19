@@ -559,7 +559,7 @@ class ProjectArchitect:
                     name=name,
                     role=role,
                     genre=genre,
-                    context=outline_summary,
+                    outline_context=outline_summary,
                 )
                 profiles.append(profile)
             except Exception as exc:
