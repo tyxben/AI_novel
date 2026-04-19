@@ -793,22 +793,29 @@ class NovelPipeline:
                 protagonist_names.append(first.get("name", ""))
 
         # --- Story Arc Generation (optional) ---
+        # Phase 3: drop the direct NovelDirector coupling — ProjectArchitect
+        # is the single entry point for立项/骨架 generation. The architect
+        # still defers the actual arc LLM call into NovelDirector internally
+        # (legacy shim), but callers no longer know or care.
         try:
-            from src.novel.agents.novel_director import NovelDirector
+            from src.novel.agents.project_architect import ProjectArchitect
             from src.llm.llm_client import create_llm_client as _create_llm
 
             _llm_config = get_stage_llm_config(state, "outline_generation")
             _llm = _create_llm(_llm_config)
-            director = NovelDirector(_llm)
+            _arch = ProjectArchitect(_llm, config=self.config)
 
             outline_data = state.get("outline", {})
             chapters = outline_data.get("chapters", []) if isinstance(outline_data, dict) else []
-            if chapters and hasattr(director, 'generate_story_arcs'):
-                arcs = director.generate_story_arcs(
-                    volume_outline=outline_data,
-                    chapter_outlines=chapters,
-                    genre=genre,
+            if chapters:
+                _arcs_proposal = _arch.propose_story_arcs(
+                    meta={"genre": genre, "outline": outline_data},
+                    synopsis=(
+                        state.get("main_storyline", {}).get("protagonist_goal", "")
+                        or theme
+                    ),
                 )
+                arcs = list(_arcs_proposal.arcs or [])
                 if arcs:
                     state.setdefault("story_arcs", []).extend(arcs)
                     # Update chapter arc_ids
@@ -1059,16 +1066,19 @@ class NovelPipeline:
             else:
                 state["debt_summary"] = ""
 
-            # Generate continuity brief
+            # Generate continuity brief via BriefAssembler (Ledger-first +
+            # inherited rule-based sections). Phase 3 swap — the returned
+            # assembler is stashed on state so ChapterPlanner can reuse it.
             try:
-                from src.novel.services.continuity_service import ContinuityService as _ContinuityService
+                from src.novel.services.brief_assembler import BriefAssembler
                 _mem = getattr(self, "memory", None)
-                continuity_svc = _ContinuityService(
+                brief_assembler = BriefAssembler(
                     db=getattr(_mem, "structured_db", None) if _mem else None,
                     obligation_tracker=obligation_tracker,
                     knowledge_graph=getattr(_mem, "knowledge_graph", None) if _mem else None,
+                    ledger=state.get("ledger_store"),
                 )
-                continuity_brief = continuity_svc.generate_brief(
+                continuity_brief = brief_assembler.generate_brief(
                     chapter_number=ch_num,
                     chapters=state.get("chapters") or [],
                     chapter_brief=ch_outline.get("chapter_brief", {}),
@@ -1077,10 +1087,17 @@ class NovelPipeline:
                     style_bible=state.get("style_bible"),
                     current_volume=state.get("current_volume"),
                 )
-                state["continuity_brief"] = continuity_svc.format_for_prompt(continuity_brief)
+                state["continuity_brief"] = brief_assembler.format_for_prompt(continuity_brief)
             except Exception as exc:
                 log.warning("连续性摘要生成失败: %s", exc)
                 state["continuity_brief"] = ""
+
+            # Provide real novel_data so ChapterPlanner/BriefAssembler can
+            # fall back to the persisted roster when the Ledger lacks active chars.
+            try:
+                state["novel_data"] = fm.load_novel(novel_id) or {}
+            except Exception:
+                state["novel_data"] = {}
 
             # Run chapter_planner_node to revise outline (and plan scenes).
             # We only keep the revised outline + reason; scenes generated here
@@ -1553,15 +1570,16 @@ class NovelPipeline:
             else:
                 state["current_chapter_brief"] = {}
 
-            # --- Narrative Control: generate continuity brief ---
+            # --- Narrative Control: generate continuity brief (BriefAssembler) ---
             try:
-                from src.novel.services.continuity_service import ContinuityService as _ContinuityService
+                from src.novel.services.brief_assembler import BriefAssembler
 
                 _mem = getattr(self, "memory", None)
-                continuity_svc = _ContinuityService(
+                continuity_svc = BriefAssembler(
                     db=getattr(_mem, "structured_db", None) if _mem else None,
                     obligation_tracker=obligation_tracker,
                     knowledge_graph=getattr(_mem, "knowledge_graph", None) if _mem else None,
+                    ledger=state.get("ledger_store"),
                 )
                 # Ensure chapters have full_text for continuity extraction
                 _chapters_for_brief = []
@@ -1584,6 +1602,9 @@ class NovelPipeline:
                     _novel_data_for_milestones = fm.load_novel(novel_id)
                 except Exception:
                     pass
+                # Expose to ChapterPlanner via state (Phase 3: replace stub
+                # {"characters": state["characters"]} with real novel_data).
+                state["novel_data"] = _novel_data_for_milestones or {}
 
                 # --- Auto-generate milestones if current volume has none ---
                 if _novel_data_for_milestones and _current_volume:

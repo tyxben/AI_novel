@@ -740,12 +740,15 @@ def chapter_planner_node(state: dict) -> dict:
     continuity_brief = state.get("continuity_brief", "")
     volume_number = state.get("current_volume") or 1
 
-    # Build pseudo-novel dict for default-active-character fallback
-    novel_stub = {"characters": state.get("characters") or []}
+    # Pass the real novel_data when available (Phase 3 ChapterFlow wiring);
+    # fall back to a character-only stub so earlier call sites keep working.
+    novel_data = state.get("novel_data")
+    if not novel_data:
+        novel_data = {"characters": state.get("characters") or []}
 
     try:
         proposal = planner.propose_chapter_brief(
-            novel=novel_stub,
+            novel=novel_data,
             volume_number=volume_number,
             chapter_number=chapter_number,
             chapter_outline=chapter_outline,
