@@ -219,6 +219,41 @@ class ArcsProposal:
 
 
 @dataclass
+class MainOutlineProposal:
+    """主干大纲草案（outline + style_bible + template/style 推断）。
+
+    Phase 3-B2 产物：替代 ``novel_director_node`` 输出。pipeline 拿到本
+    dataclass 后把字段直接写入 state，保留原有字段形状。
+    """
+
+    outline: dict[str, Any] = field(default_factory=dict)
+    template: str = ""
+    style_name: str = ""
+    style_bible: dict[str, Any] | None = None
+    total_chapters: int = 0
+    decisions: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "outline": self.outline,
+            "template": self.template,
+            "style_name": self.style_name,
+            "style_bible": self.style_bible,
+            "total_chapters": self.total_chapters,
+        }
+
+    def accept_into(self, novel: Any) -> Any:
+        if isinstance(novel, dict):
+            novel["outline"] = self.outline
+            novel["template"] = self.template
+            novel["style_name"] = self.style_name
+            if self.style_bible is not None:
+                novel["style_bible"] = self.style_bible
+        return novel
+
+
+@dataclass
 class VolumeBreakdownProposal:
     """卷骨架草案（每卷一两句 — 不是单卷细纲！单卷细纲见 VolumeDirector）。"""
 
@@ -316,6 +351,97 @@ class ProjectArchitect:
     # ==================================================================
     # 1. 立项 ProjectMeta
     # ==================================================================
+
+    def propose_main_outline(
+        self,
+        genre: str,
+        theme: str,
+        target_words: int,
+        template_name: str = "",
+        style_name: str = "",
+        custom_ideas: str | None = None,
+    ) -> MainOutlineProposal:
+        """生成主干大纲（三层 outline + style_bible）。
+
+        Phase 3-B2：取代 ``novel_director_node`` 的 outline 生成职责。pipeline
+        拿到 ``MainOutlineProposal`` 后把字段合并进 state；``NovelDirector.
+        generate_outline`` 当前仍是该方法的底层实现（B3 拆离）。
+
+        - 未指定 ``template_name`` 时按 genre 查 ``_GENRE_DEFAULT_TEMPLATE``。
+        - 未指定 ``style_name`` 时按 genre 查 ``_GENRE_DEFAULT_STYLE``。
+        - style_bible 生成失败不阻塞 outline 返回。
+        """
+        if not genre:
+            raise ValueError(
+                "genre 必须显式指定（Phase 0 架构重构：禁止默认回退到玄幻）"
+            )
+
+        decisions: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+
+        resolved_template = (template_name or "").strip() or _GENRE_DEFAULT_TEMPLATE.get(
+            genre, "cyclic_upgrade"
+        )
+        resolved_style = (style_name or "").strip() or _GENRE_DEFAULT_STYLE.get(
+            genre, "webnovel.shuangwen"
+        )
+
+        # --- Outline 本体（legacy shim 到 NovelDirector.generate_outline） ---
+        from src.novel.agents.novel_director import NovelDirector
+
+        director = NovelDirector(self.llm)
+        outline = director.generate_outline(
+            genre=genre,
+            theme=theme,
+            target_words=target_words,
+            template_name=resolved_template,
+            style_name=resolved_style,
+            custom_ideas=custom_ideas,
+        )
+        outline_dict = outline.model_dump()
+        total_chapters = len(outline.chapters)
+        decisions.append({
+            "agent": "ProjectArchitect",
+            "step": "propose_main_outline",
+            "decision": (
+                f"大纲生成完成: {len(outline.acts)} 幕, "
+                f"{len(outline.volumes)} 卷, {total_chapters} 章"
+            ),
+            "reason": "Phase 3-B2 propose_main_outline",
+        })
+
+        # --- Style Bible（可选，非阻塞） ---
+        style_bible_data: dict[str, Any] | None = None
+        try:
+            from src.novel.services.style_bible_generator import StyleBibleGenerator
+
+            bible_gen = StyleBibleGenerator(self.llm)
+            bible = bible_gen.generate(
+                genre=genre, theme=theme, style_name=resolved_style
+            )
+            style_bible_data = bible.model_dump()
+            decisions.append({
+                "agent": "ProjectArchitect",
+                "step": "generate_style_bible",
+                "decision": "风格圣经生成完成",
+                "reason": f"基于风格预设 {resolved_style} 生成量化目标",
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.warning("风格圣经生成失败（非阻塞）: %s", exc)
+            errors.append({
+                "agent": "ProjectArchitect",
+                "message": f"风格圣经生成失败: {exc}",
+            })
+
+        return MainOutlineProposal(
+            outline=outline_dict,
+            template=resolved_template,
+            style_name=resolved_style,
+            style_bible=style_bible_data,
+            total_chapters=total_chapters,
+            decisions=decisions,
+            errors=errors,
+        )
 
     def propose_project_setup(
         self,

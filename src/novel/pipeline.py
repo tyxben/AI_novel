@@ -674,12 +674,53 @@ class NovelPipeline:
 
         if progress_callback:
             progress_callback(0.1, "正在生成大纲（可能需要1-2分钟）...")
+        # Phase 3-B2：outline 生成从 novel_director_node 迁到
+        # ProjectArchitect.propose_main_outline。LLM 初始化或 propose 失败
+        # 时回退到 legacy node（与 world/character 阶段的回退逻辑对齐）。
+        _main_outline_ok = False
         try:
-            result = nodes["novel_director"](state)
-            state = _merge_state(state, result)
+            from src.novel.agents.project_architect import ProjectArchitect as _PA_Outline
+            from src.llm.llm_client import create_llm_client as _create_llm_outline
+
+            _outline_llm_cfg = get_stage_llm_config(state, "outline_generation")
+            _outline_llm = _create_llm_outline(_outline_llm_cfg)
+            _outline_architect = _PA_Outline(_outline_llm, config=self.config)
+
+            outline_proposal = _outline_architect.propose_main_outline(
+                genre=genre,
+                theme=theme,
+                target_words=target_words,
+                template_name=template,
+                style_name=style,
+                custom_ideas=custom_ideas,
+            )
+            state["outline"] = outline_proposal.outline
+            state["template"] = outline_proposal.template
+            state["style_name"] = outline_proposal.style_name
+            state["style_bible"] = outline_proposal.style_bible
+            state["total_chapters"] = outline_proposal.total_chapters
+            state["current_chapter"] = 0
+            state["should_continue"] = True
+            state.setdefault("decisions", []).extend(outline_proposal.decisions)
+            if outline_proposal.errors:
+                state.setdefault("errors", []).extend(outline_proposal.errors)
+            state.setdefault("completed_nodes", []).append(
+                "project_architect.main_outline"
+            )
+            _main_outline_ok = True
         except Exception as e:
-            log.error("大纲生成失败: %s", e)
-            raise RuntimeError(f"大纲生成失败: {e}") from e
+            log.warning(
+                "ProjectArchitect.propose_main_outline 失败，回退 novel_director node: %s",
+                e,
+            )
+
+        if not _main_outline_ok:
+            try:
+                result = nodes["novel_director"](state)
+                state = _merge_state(state, result)
+            except Exception as e:
+                log.error("大纲生成失败: %s", e)
+                raise RuntimeError(f"大纲生成失败: {e}") from e
 
         # 校验大纲是否有效
         outline = state.get("outline")
