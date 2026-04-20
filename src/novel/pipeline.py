@@ -1676,7 +1676,7 @@ class NovelPipeline:
                 )
                 state["continuity_brief"] = continuity_svc.format_for_prompt(continuity_brief)
 
-                # Store structured volume_progress for PlotPlanner (Intervention A)
+                # Store structured volume_progress for ChapterPlanner (Intervention A)
                 state["volume_progress"] = continuity_brief.get("volume_progress", {})
             except Exception as exc:
                 log.warning("连续性摘要生成失败: %s", exc)
@@ -1746,14 +1746,14 @@ class NovelPipeline:
                     for _od in _overdue_descs[:3]:
                         _enforce_text += f"  - {_od}\n"
                     _enforce_text += (
-                        "PlotPlanner 必须将第一个场景设定为推进上述里程碑。\n"
+                        "ChapterPlanner 必须将第一个场景设定为推进上述里程碑。\n"
                         "Writer 必须在该场景中产出实质性进展，不能仅提及。\n"
                     )
-                    # Inject into both debt_summary (PlotPlanner reads) and continuity_brief (Writer reads)
+                    # Inject into both debt_summary (ChapterPlanner reads) and continuity_brief (Writer reads)
                     state["debt_summary"] = (state.get("debt_summary", "") or "") + _enforce_text
                     state["continuity_brief"] = (state.get("continuity_brief", "") or "") + _enforce_text
                     log.warning(
-                        "里程碑强制约束注入: %d 个逾期里程碑写入 PlotPlanner+Writer 约束",
+                        "里程碑强制约束注入: %d 个逾期里程碑写入 ChapterPlanner+Writer 约束",
                         len(_overdue_descs[:3]),
                     )
 
@@ -4209,7 +4209,7 @@ class NovelPipeline:
             if ch.get("goal") not in ("待规划", ""):
                 return
 
-            # Title: prefer current_chapter_outline's title (from dynamic_outline/PlotPlanner)
+            # Title: prefer current_chapter_outline's title (from ChapterPlanner)
             cur_outline = state.get("current_chapter_outline", {})
             title = cur_outline.get("title", "")
             # Always sanitize outline-provided titles

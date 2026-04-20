@@ -8,7 +8,7 @@ Covers:
 - NovelPipeline._is_stale_outline(): stale outline detection based on
   chapter references and prior-chapter divergence.
 - Milestone enforcement: mandatory scene injection when critical milestones
-  are ignored by the PlotPlanner scene plan.
+  are ignored by the ChapterPlanner scene plan.
 """
 from __future__ import annotations
 
@@ -475,7 +475,7 @@ class TestMilestoneEnforcement:
     """Tests for milestone enforcement constraint injection.
 
     The enforcement logic injects hard constraint text into debt_summary
-    and continuity_brief BEFORE the chapter graph runs, so PlotPlanner
+    and continuity_brief BEFORE the chapter graph runs, so ChapterPlanner
     and Writer are forced to address overdue milestones.
     """
 
@@ -497,7 +497,7 @@ class TestMilestoneEnforcement:
                 for _od in _overdue_descs[:3]:
                     _enforce_text += f"  - {_od}\n"
                 _enforce_text += (
-                    "PlotPlanner 必须将第一个场景设定为推进上述里程碑。\n"
+                    "ChapterPlanner 必须将第一个场景设定为推进上述里程碑。\n"
                     "Writer 必须在该场景中产出实质性进展，不能仅提及。\n"
                 )
                 state["debt_summary"] = (state.get("debt_summary", "") or "") + _enforce_text
