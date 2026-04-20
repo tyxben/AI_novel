@@ -57,8 +57,10 @@ def _get_node_functions() -> dict[str, Callable]:
     :func:`chapter_planner_node`。两个旧 key 仍返回一个兼容 shim（直接
     转发给 chapter_planner），方便外部测试过渡；新代码请直接使用
     ``chapter_planner``。
+
+    Phase 3-B3：``novel_director`` 节点已由 ``ProjectArchitect.propose_main_outline``
+    取代，pipeline 直接调 ProjectArchitect 不经本字典。
     """
-    from src.novel.agents.novel_director import novel_director_node
     from src.novel.agents.chapter_planner import chapter_planner_node
     from src.novel.agents.writer import writer_node
     from src.novel.agents.reviewer import reviewer_node
@@ -72,7 +74,7 @@ def _get_node_functions() -> dict[str, Callable]:
                         "agent": "ProjectArchitect",
                         "step": "entry",
                         "decision": f"{_name} 节点已废弃，请使用 ProjectArchitect",
-                        "reason": "Phase 2-γ Agent 合并",
+                        "reason": "Phase 2-γ/3-B3 Agent 合并",
                     }
                 ],
                 "completed_nodes": [_name],
@@ -82,7 +84,6 @@ def _get_node_functions() -> dict[str, Callable]:
         return _fn
 
     return {
-        "novel_director": novel_director_node,
         "world_builder": _removed_node_stub("world_builder"),
         "character_designer": _removed_node_stub("character_designer"),
         "chapter_planner": chapter_planner_node,

@@ -44,14 +44,17 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from src.novel.models.character import CharacterProfile
+from src.novel.models.novel import Act, ChapterOutline, Outline, VolumeOutline
 from src.novel.models.world import WorldSetting
 from src.novel.services.character_service import CharacterService
 from src.novel.services.world_service import WorldService
+from src.novel.templates.outline_templates import get_template
 from src.novel.utils.json_extract import extract_json_obj
 
 log = logging.getLogger("novel.agents.project_architect")
@@ -323,6 +326,61 @@ _GENRE_DEFAULT_TEMPLATE: dict[str, str] = {
     "科幻": "scifi_crisis",
 }
 
+# Outline.template Literal → outline_templates.py 模板名映射
+_TEMPLATE_ALIAS: dict[str, str] = {
+    "four_act": "classic_four_act",
+    "custom": "cyclic_upgrade",
+}
+
+# 大纲拆章用的默认常量（仅 ProjectArchitect 内部使用；generate_volume_outline
+# 的 _CHAPTERS_PER_VOLUME 还在 novel_director，数字相同但各自独立）。
+_OUTLINE_WORDS_PER_CHAPTER = 2500
+_OUTLINE_CHAPTERS_PER_VOLUME = 30
+
+# Prompt-leak 关键词 —— _parse_outline 做 title fallback 时的黑名单，
+# 与 pipeline._sanitize_title 的 _BAD_PATTERNS 保持一致（手动同步，避免
+# 反向 import 循环）。
+_TITLE_BAD_PATTERNS = (
+    "字数", "场景", "目标", "要求", "注意", "提示", "格式",
+    "左右", "以上", "以下", "不超过", "大约",
+)
+
+
+def _derive_title_from_outline_fields(
+    goal: Any, key_events: Any
+) -> str | None:
+    """Derive a 4-8 char chapter title from outline ``goal`` / ``key_events``.
+
+    Pure local logic — 不调 LLM。命中 ``_TITLE_BAD_PATTERNS`` 返回 None。
+    """
+
+    def _from_phrase(phrase: str) -> str | None:
+        if not phrase:
+            return None
+        head = re.split(r"[，,。.！!？?；;、]", phrase)[0].strip()
+        head = head.strip("\"'\u201c\u201d\u300c\u300d\u300e\u300f")
+        if len(head) > 12:
+            head = head[:8]
+        if len(head) < 2:
+            return None
+        if any(p in head for p in _TITLE_BAD_PATTERNS):
+            return None
+        return head
+
+    if isinstance(goal, str):
+        candidate = _from_phrase(goal)
+        if candidate:
+            return candidate
+
+    if isinstance(key_events, list) and key_events:
+        first = key_events[0]
+        if isinstance(first, str):
+            candidate = _from_phrase(first)
+            if candidate:
+                return candidate
+
+    return None
+
 
 class ProjectArchitect:
     """立项 + 骨架架构师。每段独立 LLM 调用，作者可按段重生。
@@ -363,9 +421,9 @@ class ProjectArchitect:
     ) -> MainOutlineProposal:
         """生成主干大纲（三层 outline + style_bible）。
 
-        Phase 3-B2：取代 ``novel_director_node`` 的 outline 生成职责。pipeline
-        拿到 ``MainOutlineProposal`` 后把字段合并进 state；``NovelDirector.
-        generate_outline`` 当前仍是该方法的底层实现（B3 拆离）。
+        Phase 3-B3：outline 生成已物理迁入本模块（``_generate_outline`` /
+        ``_build_outline_prompt`` / ``_parse_outline``），不再依赖
+        ``NovelDirector``。
 
         - 未指定 ``template_name`` 时按 genre 查 ``_GENRE_DEFAULT_TEMPLATE``。
         - 未指定 ``style_name`` 时按 genre 查 ``_GENRE_DEFAULT_STYLE``。
@@ -386,16 +444,12 @@ class ProjectArchitect:
             genre, "webnovel.shuangwen"
         )
 
-        # --- Outline 本体（legacy shim 到 NovelDirector.generate_outline） ---
-        from src.novel.agents.novel_director import NovelDirector
-
-        director = NovelDirector(self.llm)
-        outline = director.generate_outline(
+        # --- Outline 本体（Phase 3-B3：物理迁入本模块） ---
+        outline = self._generate_outline(
             genre=genre,
             theme=theme,
             target_words=target_words,
             template_name=resolved_template,
-            style_name=resolved_style,
             custom_ideas=custom_ideas,
         )
         outline_dict = outline.model_dump()
@@ -441,6 +495,287 @@ class ProjectArchitect:
             total_chapters=total_chapters,
             decisions=decisions,
             errors=errors,
+        )
+
+    # ------------------------------------------------------------------
+    # Outline 生成内部实现（Phase 3-B3 从 NovelDirector 物理迁入）
+    # ------------------------------------------------------------------
+
+    MAX_OUTLINE_RETRIES = 3
+
+    def _generate_outline(
+        self,
+        genre: str,
+        theme: str,
+        target_words: int,
+        template_name: str,
+        custom_ideas: str | None = None,
+    ) -> Outline:
+        """通过 LLM 生成三层大纲。"""
+        tpl_lookup = _TEMPLATE_ALIAS.get(template_name, template_name)
+        try:
+            tpl = get_template(tpl_lookup)
+        except KeyError:
+            tpl = get_template("cyclic_upgrade")
+            template_name = "cyclic_upgrade"
+
+        total_chapters = max(1, target_words // _OUTLINE_WORDS_PER_CHAPTER)
+        volume_count = max(1, total_chapters // _OUTLINE_CHAPTERS_PER_VOLUME)
+        chapters_per_volume = max(1, total_chapters // volume_count)
+
+        is_long_novel = total_chapters > _OUTLINE_CHAPTERS_PER_VOLUME
+        prompt_chapters = chapters_per_volume if is_long_novel else total_chapters
+
+        prompt = self._build_outline_prompt(
+            genre=genre,
+            theme=theme,
+            target_words=target_words,
+            template_name=template_name,
+            act_count=tpl.act_count,
+            volume_count=volume_count,
+            chapters_per_volume=chapters_per_volume,
+            total_chapters=total_chapters,
+            custom_ideas=custom_ideas,
+            first_volume_only=is_long_novel,
+        )
+
+        outline_data: dict | None = None
+        last_error: str = ""
+
+        for attempt in range(self.MAX_OUTLINE_RETRIES):
+            try:
+                response = self.llm.chat(
+                    messages=[
+                        {"role": "system", "content": "你是一位资深网络小说策划编辑。请严格按照 JSON 格式返回大纲。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.8,
+                    json_mode=True,
+                    max_tokens=8192,
+                )
+                outline_data = extract_json_obj(response.content)
+                if outline_data is not None:
+                    break
+                last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"
+            except Exception as exc:
+                last_error = f"LLM 调用失败: {exc}"
+                log.warning("大纲生成第 %d 次尝试失败: %s", attempt + 1, last_error)
+                if attempt < self.MAX_OUTLINE_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+
+        if outline_data is None:
+            raise RuntimeError(
+                f"大纲生成失败，已重试 {self.MAX_OUTLINE_RETRIES} 次。最后错误: {last_error}"
+            )
+
+        return self._parse_outline(outline_data, template_name, prompt_chapters)
+
+    def _build_outline_prompt(
+        self,
+        genre: str,
+        theme: str,
+        target_words: int,
+        template_name: str,
+        act_count: int,
+        volume_count: int,
+        chapters_per_volume: int,
+        total_chapters: int,
+        custom_ideas: str | None = None,
+        first_volume_only: bool = False,
+    ) -> str:
+        """构建大纲生成的 LLM prompt（中文）。"""
+        custom_part = f"\n用户额外要求：{custom_ideas}" if custom_ideas else ""
+
+        if first_volume_only:
+            chapter_instruction = (
+                f"\n【超长篇模式】这是一部超长篇小说（共{total_chapters}章/{volume_count}卷），"
+                f"chapters 数组只需要生成第1卷的详细章节大纲（第1-{chapters_per_volume}章，"
+                f"共{chapters_per_volume}章）。但 acts 和 volumes 必须覆盖全书所有卷的概要框架。\n"
+            )
+            chapter_count_instruction = (
+                f"1. chapters 数组：章节号从 1 开始连续递增，总共 {chapters_per_volume} 章（仅第1卷）"
+            )
+        else:
+            chapter_instruction = ""
+            chapter_count_instruction = (
+                f"1. 章节号从 1 开始连续递增，总共 {total_chapters} 章"
+            )
+
+        return f"""请为以下小说生成完整三层大纲：
+
+题材：{genre}
+主题：{theme}
+目标字数：{target_words} 字
+大纲模板：{template_name}
+幕数量：{act_count}
+卷数量：{volume_count}
+每卷章节数：{chapters_per_volume}
+总章节数：{total_chapters}{custom_part}
+{chapter_instruction}
+【专业写作原则 — 必须严格遵守】
+1. 主线为王：整部小说必须有一条清晰的主线（主角目标→障碍→成长→达成/失败）
+2. 开场即冲突：第1章必须用冲突或悬念抓住读者，禁止慢热开场
+3. 三章定生死：前3章内读者必须能明确感知到核心矛盾是什么
+4. 每章必推进：每章必须在主线上有实质性推进，不允许原地踏步的过渡章
+5. 赌注递增：故事赌注随章节推进不断升级，让读者越来越紧张
+6. 角色弧线：主角必须有内在成长，从开始到结束是不同的人
+
+请严格按以下 JSON 格式返回：
+{{
+  "main_storyline": {{
+    "protagonist": "主角姓名",
+    "protagonist_goal": "主角的核心目标/欲望（贯穿全书）",
+    "core_conflict": "主角实现目标的最大障碍",
+    "character_arc": "主角从什么状态变成什么状态（内在成长）",
+    "stakes": "如果主角失败会怎样（赌注）",
+    "theme_statement": "故事想传达的核心主题（一句话）"
+  }},
+  "acts": [
+    {{
+      "name": "第一幕：xxx",
+      "description": "描述这一幕的主要内容",
+      "start_chapter": 1,
+      "end_chapter": 10
+    }}
+  ],
+  "volumes": [
+    {{
+      "volume_number": 1,
+      "title": "卷名",
+      "core_conflict": "本卷核心矛盾",
+      "resolution": "本卷如何解决",
+      "chapters": [1, 2, 3, ...]
+    }}
+  ],
+  "chapters": [
+    {{
+      "chapter_number": 1,
+      "title": "章节标题",
+      "goal": "本章目标",
+      "key_events": ["事件1", "事件2"],
+      "involved_characters": [],
+      "plot_threads": [],
+      "estimated_words": 2500,
+      "mood": "蓄力",
+      "storyline_progress": "本章如何推进主线（必须具体，不能空泛）",
+      "chapter_summary": "本章内容2-3句话摘要",
+      "chapter_brief": {{
+        "main_conflict": "本章主冲突是什么（必须具体）",
+        "payoff": "本章必须兑现的爽点/情绪回报",
+        "character_arc_step": "主角在本章的变化（从X到Y）",
+        "foreshadowing_plant": ["本章要埋的伏笔"],
+        "foreshadowing_collect": ["本章要回收的伏笔"],
+        "end_hook_type": "悬疑|危机|反转|情感|发现|无"
+      }}
+    }}
+  ]
+}}
+
+mood 可选值：蓄力、小爽、大爽、过渡、虐心、反转、日常。
+请确保：
+{chapter_count_instruction}
+2. 每卷的 chapters 列表对应正确的章节号
+3. 每幕的 start_chapter 和 end_chapter 不重叠
+4. 情节有起伏，节奏合理
+5. 【主线清晰】每章的 storyline_progress 必须明确说明本章如何推进主角目标
+6. 【开场钩子】第1章必须以冲突/悬念/危机开场，禁止用日常铺垫开头
+7. 【节奏紧凑】前3章内必须进入核心冲突，不允许超过2章的纯铺垫
+8. 【章节摘要】每章必须有具体的 chapter_summary，不能为空
+9. 【赌注升级】随着故事推进，赌注必须不断升级（个人→团队→世界）
+10. 【章节任务书】每章必须有 chapter_brief，包含 main_conflict、payoff、character_arc_step、foreshadowing_plant、foreshadowing_collect、end_hook_type
+"""
+
+    def _parse_outline(
+        self,
+        data: dict,
+        template_name: str,
+        total_chapters: int,
+    ) -> Outline:
+        """将 LLM 返回的 JSON 解析为 Outline 模型。缺字段走兜底。"""
+        acts: list[Act] = []
+        for act_data in data.get("acts", []):
+            try:
+                acts.append(Act(**act_data))
+            except Exception:
+                log.warning("跳过无效 act 数据: %s", act_data)
+
+        volumes: list[VolumeOutline] = []
+        for vol_data in data.get("volumes", []):
+            try:
+                volumes.append(VolumeOutline(**vol_data))
+            except Exception:
+                log.warning("跳过无效 volume 数据: %s", vol_data)
+
+        chapters: list[ChapterOutline] = []
+        for ch_data in data.get("chapters", []):
+            try:
+                if "chapter_brief" not in ch_data or not isinstance(ch_data.get("chapter_brief"), dict):
+                    ch_data["chapter_brief"] = {}
+                ch_num_raw = ch_data.get("chapter_number") or len(chapters) + 1
+                title_raw = (ch_data.get("title") or "").strip()
+                placeholder = f"第{ch_num_raw}章"
+                if not title_raw or title_raw == placeholder:
+                    log.warning(
+                        "chapter %s 标题缺失或为占位符，尝试从 goal 派生",
+                        ch_num_raw,
+                    )
+                    fallback = _derive_title_from_outline_fields(
+                        ch_data.get("goal"),
+                        ch_data.get("key_events"),
+                    )
+                    if fallback:
+                        ch_data["title"] = fallback
+                chapters.append(ChapterOutline(**ch_data))
+            except Exception:
+                log.warning("跳过无效 chapter 数据: %s", ch_data)
+
+        existing_nums = {ch.chapter_number for ch in chapters}
+        for i in range(1, total_chapters + 1):
+            if i not in existing_nums:
+                chapters.append(
+                    ChapterOutline(
+                        chapter_number=i,
+                        title=f"第{i}章",
+                        goal="待规划",
+                        key_events=["待规划"],
+                        estimated_words=4000,
+                        mood="蓄力",
+                    )
+                )
+
+        chapters.sort(key=lambda c: c.chapter_number)
+
+        if not acts:
+            acts = [
+                Act(
+                    name="第一幕：开端",
+                    description="故事铺垫与主角登场",
+                    start_chapter=1,
+                    end_chapter=total_chapters,
+                )
+            ]
+
+        if not volumes:
+            volumes = [
+                VolumeOutline(
+                    volume_number=1,
+                    title="第一卷",
+                    core_conflict="主线矛盾",
+                    resolution="阶段性解决",
+                    chapters=list(range(1, total_chapters + 1)),
+                )
+            ]
+
+        main_storyline = data.get("main_storyline") or {}
+        if not isinstance(main_storyline, dict):
+            main_storyline = {}
+
+        return Outline(
+            template=template_name,
+            main_storyline=main_storyline,
+            acts=acts,
+            volumes=volumes,
+            chapters=chapters,
         )
 
     def propose_project_setup(

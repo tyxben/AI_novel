@@ -674,10 +674,8 @@ class NovelPipeline:
 
         if progress_callback:
             progress_callback(0.1, "正在生成大纲（可能需要1-2分钟）...")
-        # Phase 3-B2：outline 生成从 novel_director_node 迁到
-        # ProjectArchitect.propose_main_outline。LLM 初始化或 propose 失败
-        # 时回退到 legacy node（与 world/character 阶段的回退逻辑对齐）。
-        _main_outline_ok = False
+        # Phase 3-B3：outline 由 ProjectArchitect.propose_main_outline 生成，
+        # novel_director_node 已删除。
         try:
             from src.novel.agents.project_architect import ProjectArchitect as _PA_Outline
             from src.llm.llm_client import create_llm_client as _create_llm_outline
@@ -707,20 +705,9 @@ class NovelPipeline:
             state.setdefault("completed_nodes", []).append(
                 "project_architect.main_outline"
             )
-            _main_outline_ok = True
         except Exception as e:
-            log.warning(
-                "ProjectArchitect.propose_main_outline 失败，回退 novel_director node: %s",
-                e,
-            )
-
-        if not _main_outline_ok:
-            try:
-                result = nodes["novel_director"](state)
-                state = _merge_state(state, result)
-            except Exception as e:
-                log.error("大纲生成失败: %s", e)
-                raise RuntimeError(f"大纲生成失败: {e}") from e
+            log.error("大纲生成失败: %s", e)
+            raise RuntimeError(f"大纲生成失败: {e}") from e
 
         # 校验大纲是否有效
         outline = state.get("outline")

@@ -373,10 +373,12 @@ class TestMultiChapterConsistency:
             assert ckpt is not None
 
             # completed_nodes should have entries from init + all 5 chapters
+            # Phase 3-B3: novel_director / world_builder / character_designer
+            # 节点合并进 ProjectArchitect，完成标记改为 project_architect.*
             completed = ckpt["completed_nodes"]
-            assert "novel_director" in completed
-            assert "world_builder" in completed
-            assert "character_designer" in completed
+            assert "project_architect.main_outline" in completed
+            assert "project_architect.world" in completed
+            assert "project_architect.characters" in completed
             # Each chapter adds: chapter_planner, writer, reviewer (Phase 2-δ merged)
             assert completed.count("writer") == 5
             assert completed.count("reviewer") == 5
@@ -388,7 +390,7 @@ class TestMultiChapterConsistency:
             decisions = ckpt["decisions"]
             assert len(decisions) > 0
             agents_seen = {d["agent"] for d in decisions}
-            assert "NovelDirector" in agents_seen
+            assert "ProjectArchitect" in agents_seen
             assert "Writer" in agents_seen
             assert "Reviewer" in agents_seen
 

@@ -679,15 +679,15 @@ class TestCheckpointRoundTrip:
 
 
 # ===================================================================
-# 10. novel_director_node style bible generation
+# 10. ProjectArchitect.propose_main_outline style bible generation
+#     (Phase 3-B3：从 novel_director_node 迁入)
 # ===================================================================
 
-class TestNovelDirectorStyleBible:
-    def test_novel_director_node_generates_style_bible(self):
-        """novel_director_node should include style_bible in result."""
-        from src.novel.agents.novel_director import novel_director_node
+class TestProjectArchitectMainOutlineStyleBible:
+    def test_propose_main_outline_generates_style_bible(self):
+        """ProjectArchitect.propose_main_outline 产出 MainOutlineProposal 应带 style_bible。"""
+        from src.novel.agents.project_architect import ProjectArchitect
 
-        # Create a mock state for new novel creation
         llm_response_outline = _make_llm_response(json.dumps({
             "title": "测试小说",
             "acts": [{"act_name": "第一幕", "description": "开端"}],
@@ -716,20 +716,15 @@ class TestNovelDirectorStyleBible:
         llm_response_bible = _make_llm_response(_make_llm_bible_json())
 
         mock_llm = MagicMock()
-        # First call = outline, second call = style bible
         mock_llm.chat.side_effect = [llm_response_outline, llm_response_bible]
 
-        with patch("src.novel.agents.novel_director.create_llm_client", return_value=mock_llm):
-            state = {
-                "genre": "玄幻",
-                "theme": "修炼",
-                "target_words": 10000,
-                "style_name": "",
-                "template": "",
-                "custom_style_reference": None,
-                "config": {},
-            }
-            result = novel_director_node(state)
+        architect = ProjectArchitect(mock_llm)
+        proposal = architect.propose_main_outline(
+            genre="玄幻",
+            theme="修炼",
+            target_words=10000,
+        )
 
-        # style_bible should be in result (may be None if LLM failed, but key should exist)
-        assert "style_bible" in result
+        assert proposal.style_bible is not None
+        assert proposal.template
+        assert proposal.style_name

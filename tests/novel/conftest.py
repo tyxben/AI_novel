@@ -139,6 +139,167 @@ def make_character_dict(name: str = "主角", role: str = "主角") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline Mock Helpers — patch ProjectArchitect.propose_main_outline for
+# tests that mock graph nodes (Phase 3-B3：novel_director_node 已移除)
+# ---------------------------------------------------------------------------
+
+
+def make_main_outline_proposal(
+    mock_nodes: dict | None = None,
+    total_chapters: int = 5,
+    outline_dict: dict | None = None,
+    template: str = "cyclic_upgrade",
+    style_name: str = "webnovel.shuangwen",
+):
+    """Build a ``MainOutlineProposal`` for tests that used to rely on a
+    ``nodes["novel_director"]`` mock.
+
+    Priority:
+    1. If ``mock_nodes`` contains ``novel_director``, call it with a blank
+       state dict to obtain the outline — preserves legacy mock behaviour.
+    2. Else if ``outline_dict`` is provided, use it directly.
+    3. Else build one from ``make_outline_dict(total_chapters)``.
+    """
+    from src.novel.agents.project_architect import MainOutlineProposal
+
+    if mock_nodes and callable(mock_nodes.get("novel_director")):
+        result = mock_nodes["novel_director"]({})
+        return MainOutlineProposal(
+            outline=result.get("outline") or {},
+            template=result.get("template", template),
+            style_name=result.get("style_name", style_name),
+            style_bible=result.get("style_bible"),
+            total_chapters=result.get("total_chapters", total_chapters),
+            decisions=result.get("decisions") or [],
+            errors=result.get("errors") or [],
+        )
+
+    outline = outline_dict or make_outline_dict(total_chapters)
+    return MainOutlineProposal(
+        outline=outline,
+        template=template,
+        style_name=style_name,
+        style_bible=None,
+        total_chapters=total_chapters,
+        decisions=[{"agent": "ProjectArchitect", "step": "propose_main_outline", "decision": "ok", "reason": "test"}],
+        errors=[],
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_pa_outline_when_graph_mocked(request, monkeypatch):
+    """Auto-patch ``ProjectArchitect.propose_main_outline`` when the test
+    uses ``patch("src.novel.agents.graph._get_node_functions", ...)``.
+
+    Phase 3-B3：pipeline 不再经过 ``nodes["novel_director"]``，直接调
+    ``ProjectArchitect.propose_main_outline``。旧测试挂的是 graph 节点
+    mock，这里做一个兜底：每次调用 ``propose_main_outline`` 先看 graph 有
+    没有被 mock，若是则从 ``nodes["novel_director"]`` 取大纲；否则走原
+    实现。同时兜底 ``create_llm_client`` 在无 API key 的环境下不要抛异常
+    （只要后续真正用到 llm 的路径自己 mock）。
+    """
+    from src.novel.agents import graph as _graph
+    from src.novel.agents.project_architect import ProjectArchitect as _PA
+
+    # Skip for tests that explicitly care about the real propose_main_outline path
+    if "no_stub_pa_outline" in request.keywords:
+        yield
+        return
+
+    original_outline = _PA.propose_main_outline
+    original_world = _PA.propose_world_setting
+    original_chars = _PA.propose_main_characters
+
+    def _graph_nodes():
+        try:
+            return _graph._get_node_functions()
+        except Exception:
+            return None
+
+    def _delegating_outline(self, genre, theme, target_words, template_name="", style_name="", custom_ideas=None):
+        nodes = _graph_nodes()
+        if nodes and callable(nodes.get("novel_director")):
+            return make_main_outline_proposal(
+                mock_nodes=nodes,
+                template=template_name or "cyclic_upgrade",
+                style_name=style_name or "webnovel.shuangwen",
+            )
+        return original_outline(self, genre, theme, target_words, template_name, style_name, custom_ideas)
+
+    def _delegating_world(self, meta, synopsis=""):
+        nodes = _graph_nodes()
+        if nodes and callable(nodes.get("world_builder")):
+            result = nodes["world_builder"]({})
+            raw = result.get("world_setting")
+            # Only delegate if the node actually returns a world_setting
+            # (default graph.py stub does not — we want to fall through to
+            # the real propose_world_setting for PA unit tests).
+            if raw:
+                from src.novel.agents.project_architect import WorldProposal
+                from src.novel.models.world import WorldSetting
+
+                try:
+                    world = WorldSetting(**raw)
+                except Exception:
+                    try:
+                        world = WorldSetting.model_construct(**raw)
+                    except Exception:
+                        world = WorldSetting(era="test", location="test")
+                return WorldProposal(world=world)
+        return original_world(self, meta, synopsis)
+
+    def _delegating_chars(self, meta, synopsis=""):
+        nodes = _graph_nodes()
+        if nodes and callable(nodes.get("character_designer")):
+            result = nodes["character_designer"]({})
+            raw_list = result.get("characters")
+            # Only delegate if the node actually returns characters.
+            if raw_list:
+                from src.novel.agents.project_architect import CharactersProposal
+                from src.novel.models.character import CharacterProfile
+
+                chars = []
+                for c in raw_list:
+                    if isinstance(c, CharacterProfile):
+                        chars.append(c)
+                        continue
+                    if not isinstance(c, dict):
+                        continue
+                    try:
+                        chars.append(CharacterProfile(**c))
+                    except Exception:
+                        chars.append(CharacterProfile.model_construct(**c))
+                return CharactersProposal(characters=chars)
+        return original_chars(self, meta, synopsis)
+
+    monkeypatch.setattr(_PA, "propose_main_outline", _delegating_outline)
+    monkeypatch.setattr(_PA, "propose_world_setting", _delegating_world)
+    monkeypatch.setattr(_PA, "propose_main_characters", _delegating_chars)
+
+    # 兜底 create_llm_client —— 只有当 graph 被 mock 了（即测试正在用
+    # ``patch(_get_node_functions, ...)`` 走 mock 流水线）时才返回安全的
+    # MagicMock。否则透传给真实 factory，避免影响不依赖这个 mock 的测试。
+    import src.llm.llm_client as _llm_client_mod
+
+    original_create = _llm_client_mod.create_llm_client
+
+    def _safe_create(config):
+        nodes = _graph_nodes()
+        if nodes and callable(nodes.get("novel_director")):
+            fake = MagicMock()
+            fake_response = MagicMock()
+            fake_response.content = ""
+            fake_response.model = "fake-safe"
+            fake_response.usage = None
+            fake.chat.return_value = fake_response
+            return fake
+        return original_create(config)
+
+    monkeypatch.setattr(_llm_client_mod, "create_llm_client", _safe_create)
+    yield
+
+
+# ---------------------------------------------------------------------------
 # Pipeline Mock Nodes
 # ---------------------------------------------------------------------------
 

@@ -610,11 +610,13 @@ class TestBuildPreviousSummary:
 
 
 class TestLargeNovelOutlineGeneration:
-    """Test that generate_outline produces only first-volume chapters for large novels."""
+    """Test that ProjectArchitect._generate_outline (Phase 3-B3 从 NovelDirector 迁入)
+    produces only first-volume chapters for large novels."""
 
     def test_long_novel_only_generates_first_volume(self):
         """For 100k+ words, should only generate first volume chapters."""
-        from src.novel.agents.novel_director import NovelDirector, _CHAPTERS_PER_VOLUME
+        from src.novel.agents.novel_director import _CHAPTERS_PER_VOLUME
+        from src.novel.agents.project_architect import ProjectArchitect
 
         mock_llm = MagicMock()
 
@@ -659,11 +661,12 @@ class TestLargeNovelOutlineGeneration:
             content=json.dumps(llm_response, ensure_ascii=False)
         )
 
-        director = NovelDirector(mock_llm)
-        outline = director.generate_outline(
+        architect = ProjectArchitect(mock_llm)
+        outline = architect._generate_outline(
             genre="玄幻",
             theme="少年修炼逆天改命",
             target_words=1000000,  # 100万字
+            template_name="cyclic_upgrade",
         )
 
         # Should only have first volume chapters (30), not all 400
@@ -679,7 +682,7 @@ class TestLargeNovelOutlineGeneration:
 
     def test_small_novel_generates_all_chapters(self):
         """For <75k words, should generate all chapters at once."""
-        from src.novel.agents.novel_director import NovelDirector
+        from src.novel.agents.project_architect import ProjectArchitect
 
         mock_llm = MagicMock()
 
@@ -717,11 +720,12 @@ class TestLargeNovelOutlineGeneration:
             content=json.dumps(llm_response, ensure_ascii=False)
         )
 
-        director = NovelDirector(mock_llm)
-        outline = director.generate_outline(
+        architect = ProjectArchitect(mock_llm)
+        outline = architect._generate_outline(
             genre="玄幻",
             theme="少年冒险",
             target_words=50000,
+            template_name="cyclic_upgrade",
         )
 
         # All 20 chapters should be present
@@ -729,7 +733,7 @@ class TestLargeNovelOutlineGeneration:
 
     def test_first_volume_only_prompt_contains_instruction(self):
         """For long novels, prompt should include first_volume_only instruction."""
-        from src.novel.agents.novel_director import NovelDirector
+        from src.novel.agents.project_architect import ProjectArchitect
 
         mock_llm = MagicMock()
         mock_llm.chat.return_value = FakeLLMResponse(
@@ -745,11 +749,12 @@ class TestLargeNovelOutlineGeneration:
             }, ensure_ascii=False)
         )
 
-        director = NovelDirector(mock_llm)
-        director.generate_outline(
+        architect = ProjectArchitect(mock_llm)
+        architect._generate_outline(
             genre="玄幻",
             theme="测试",
             target_words=1000000,
+            template_name="cyclic_upgrade",
         )
 
         # Check that the prompt sent to LLM contains the first_volume_only instruction

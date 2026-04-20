@@ -185,25 +185,25 @@ def test_uniqueness_no_collision_keeps_title():
 
 
 # ---------------------------------------------------------------------------
-# NovelDirector._parse_outline title fallback
+# ProjectArchitect._parse_outline title fallback (Phase 3-B3：从 NovelDirector 迁入)
 # ---------------------------------------------------------------------------
 
 
 def test_derive_title_from_outline_fields_goal():
-    from src.novel.agents.novel_director import _derive_title_from_outline_fields
+    from src.novel.agents.project_architect import _derive_title_from_outline_fields
 
     assert _derive_title_from_outline_fields("林辰初战告捷", None) == "林辰初战告捷"
 
 
 def test_derive_title_from_outline_fields_key_events_fallback():
-    from src.novel.agents.novel_director import _derive_title_from_outline_fields
+    from src.novel.agents.project_architect import _derive_title_from_outline_fields
 
     result = _derive_title_from_outline_fields("", ["夜袭黑风寨"])
     assert result == "夜袭黑风寨"
 
 
 def test_derive_title_from_outline_fields_long_phrase_truncated():
-    from src.novel.agents.novel_director import _derive_title_from_outline_fields
+    from src.novel.agents.project_architect import _derive_title_from_outline_fields
 
     long_goal = "林辰带领二十三名流民深入乱石坡矿脉发动突袭并顺利获取灵石"
     result = _derive_title_from_outline_fields(long_goal, None)
@@ -212,7 +212,7 @@ def test_derive_title_from_outline_fields_long_phrase_truncated():
 
 
 def test_derive_title_from_outline_fields_returns_none_when_empty():
-    from src.novel.agents.novel_director import _derive_title_from_outline_fields
+    from src.novel.agents.project_architect import _derive_title_from_outline_fields
 
     assert _derive_title_from_outline_fields("", []) is None
     assert _derive_title_from_outline_fields(None, None) is None
@@ -220,9 +220,9 @@ def test_derive_title_from_outline_fields_returns_none_when_empty():
 
 def test_parse_outline_backfills_missing_title():
     from unittest.mock import MagicMock
-    from src.novel.agents.novel_director import NovelDirector
+    from src.novel.agents.project_architect import ProjectArchitect
 
-    director = NovelDirector(llm_client=MagicMock())
+    architect = ProjectArchitect(llm=MagicMock())
     data = {
         "main_storyline": {"protagonist_goal": "登顶"},
         "chapters": [
@@ -252,7 +252,7 @@ def test_parse_outline_backfills_missing_title():
             },
         ],
     }
-    outline = director._parse_outline(data, "cyclic_upgrade", 3)
+    outline = architect._parse_outline(data, "cyclic_upgrade", 3)
     assert outline.chapters[0].title == "林辰下山"
     assert outline.chapters[1].title == "初入尘世"
     assert outline.chapters[2].title == "正常标题"
