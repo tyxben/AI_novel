@@ -1014,62 +1014,8 @@ class Writer:
         return rewritten
 
     # ------------------------------------------------------------------
-    # 自审 + 精修
+    # 精修
     # ------------------------------------------------------------------
-
-    def self_critique(
-        self,
-        chapter_text: str,
-        chapter_outline: ChapterOutline,
-        context: str = "",
-        all_chapter_summaries: str = "",
-    ) -> str:
-        """AI 自审：以编辑视角审读章节，找出具体问题。
-
-        Returns:
-            具体问题列表和修改建议（文本）
-        """
-        system_prompt = (
-            "你是一位严格的小说编辑，正在审稿。你的任务是找出章节中的具体问题，"
-            "而不是泛泛而谈。每个问题必须指出具体的文字位置。\n\n"
-            "审稿标准：\n"
-            "1. 【重复】是否有场景、描写、比喻、对话在本章或前文中重复出现？指出具体重复的内容\n"
-            "2. 【对话】每个角色说话是否有区分度？是否所有人说话语气雷同？指出具体台词\n"
-            "3. 【逻辑】是否有情节矛盾、角色消失、方案悬而未决？指出具体位置\n"
-            "4. 【节奏】是否有拖沓段落？哪些段落可以删减或压缩？\n"
-            "5. 【细节】数字、距离、时间等是否前后一致？\n"
-            "6. 【AI味】是否有空洞抒情、无意义排比、过度使用'仿佛'/'宛如'？\n"
-            "7. 【转折】关键转折是否依赖巧合？是否有铺垫？\n\n"
-            "请用以下格式输出（不要输出 JSON）：\n"
-            "【问题1】类型：重复\n"
-            "位置：第X段「具体引用原文几个字」\n"
-            "问题：XXX\n"
-            "建议：XXX\n\n"
-            "【问题2】...\n\n"
-            "如果章节质量很好没有明显问题，输出「审稿通过，无需修改」"
-        )
-
-        user_prompt = f"## 第{chapter_outline.chapter_number}章「{chapter_outline.title}」\n\n"
-        user_prompt += f"本章目标：{chapter_outline.goal}\n\n"
-
-        if all_chapter_summaries:
-            user_prompt += f"【前文各章摘要（用于检查重复和一致性）】\n{all_chapter_summaries}\n\n"
-
-        if context:
-            trimmed = truncate_text(context, 1500)
-            user_prompt += f"【上一章结尾】\n{trimmed}\n\n"
-
-        user_prompt += f"【待审章节全文】\n{chapter_text}"
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        response = self.llm.chat(messages, temperature=0.3, max_tokens=2048)
-        if not response or not response.content:
-            raise ValueError("LLM 返回空响应")
-        return response.content.strip()
 
     def polish_chapter(
         self,
@@ -1081,16 +1027,16 @@ class Writer:
         context: str,
         style_name: str,
     ) -> str:
-        """精修章节：根据自审结果改稿。
+        """精修章节：根据 Reviewer 批注改稿。
 
         与 rewrite_chapter 的区别：
         - rewrite_chapter 是根据外部反馈重写（可能大改）
-        - polish_chapter 是根据自审结果精修（保留好的部分，只改有问题的部分）
-        """
-        if "审稿通过" in critique and "无需修改" in critique:
-            log.info("第%d章审稿通过，无需精修", chapter_outline.chapter_number)
-            return chapter_text
+        - polish_chapter 是根据 Reviewer 批注精修（保留好的部分，只改有问题的部分）
 
+        critique 参数固定接收 ``CritiqueResult.to_writer_prompt()`` 产出的结构化
+        批注文本。调用方（pipeline.polish_chapters）在更上层用
+        ``CritiqueResult.issues`` 判断是否跳过精修，这里不再做文本字面量守卫。
+        """
         char_desc = self._build_character_description(characters)
         world_desc = self._build_world_description(world_setting)
         style = self._get_style_prompt(style_name)

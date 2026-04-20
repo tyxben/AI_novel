@@ -320,23 +320,6 @@ class TestPolishChapterContinuation:
         assert "精修结尾部分" in result
         assert writer.llm.chat.call_count == 2
 
-    def test_polish_skip_if_passed(self):
-        """Polish should skip if critique says 审稿通过."""
-        writer = _make_writer([])
-
-        result = writer.polish_chapter(
-            chapter_text="原文不动",
-            critique="审稿通过，无需修改",
-            chapter_outline=_minimal_chapter_outline(),
-            characters=[_minimal_character()],
-            world_setting=_minimal_world(),
-            context="",
-            style_name="webnovel.shuangwen",
-        )
-
-        assert result == "原文不动"
-        writer.llm.chat.assert_not_called()
-
 
 # ---------------------------------------------------------------------------
 # max_tokens value

@@ -252,69 +252,6 @@ def _title_from_outline(ch_outline: dict | None, ch_num: int) -> str:
 
 _DEFAULT_WORKSPACE = "workspace"
 
-# 审稿意见类型图标
-_ISSUE_ICONS: dict[str, str] = {
-    "重复": "🔁",
-    "对话": "💬",
-    "逻辑": "🧩",
-    "节奏": "⏱️",
-    "细节": "🔍",
-    "AI味": "🤖",
-    "转折": "↪️",
-    "角色": "👤",
-    "风格": "🎨",
-    "其他": "📝",
-}
-
-
-def _parse_critique_issues(critique: str) -> list[dict]:
-    """Parse Writer.self_critique() plain-text output into structured issues.
-
-    Expected format per issue:
-        【问题N】类型：X / 位置：Y / 问题：Z / 建议：W
-    Also handles multi-line variants and partial matches.
-    """
-    if not critique:
-        return []
-
-    issues: list[dict] = []
-
-    # Split by 【问题...】 markers
-    blocks = re.split(r"【问题\d*】", critique)
-    for block in blocks[1:]:  # skip preamble before first marker
-        block = block.strip()
-        if not block:
-            continue
-
-        issue: dict[str, str] = {}
-
-        # Extract structured fields: 类型：X / 位置：Y / ...
-        for field, key in [("类型", "type"), ("位置", "location"),
-                           ("问题", "problem"), ("建议", "suggestion")]:
-            m = re.search(rf"{field}[：:]\s*(.+?)(?:\s*/\s*|\n|$)", block)
-            if m:
-                issue[key] = m.group(1).strip()
-
-        # Fallback: if no structured fields, use the whole block as problem
-        if not issue:
-            issue["problem"] = block[:200]
-            issue["type"] = "其他"
-
-        # Normalize type to known categories
-        raw_type = issue.get("type", "其他")
-        matched = False
-        for known in _ISSUE_ICONS:
-            if known in raw_type:
-                issue["type"] = known
-                matched = True
-                break
-        if not matched:
-            issue["type"] = "其他"
-
-        issues.append(issue)
-
-    return issues
-
 
 # ---------------------------------------------------------------------------
 # NovelPipeline
@@ -2323,7 +2260,7 @@ class NovelPipeline:
         - apply_feedback 需要人工输入反馈文本
         - polish_chapters 是 AI 自己当编辑，自动发现问题并修改
 
-        流程：自审(self_critique) → 精修(polish_chapter)
+        流程：审稿(Reviewer.review) → 精修(Writer.polish_chapter)
 
         Args:
             project_path: 项目路径
@@ -2335,6 +2272,7 @@ class NovelPipeline:
             dict with polished_chapters, skipped_chapters, errors
         """
         from src.llm.llm_client import create_llm_client
+        from src.novel.agents.reviewer import Reviewer
         from src.novel.agents.writer import Writer
         from src.novel.models.character import CharacterProfile
         from src.novel.models.novel import ChapterOutline
@@ -2359,10 +2297,18 @@ class NovelPipeline:
         if end_chapter is None:
             end_chapter = total_chapters
 
-        # Initialize LLM + Writer
+        # Initialize LLM + Writer + Reviewer
         llm_config = get_stage_llm_config(state, "scene_writing")
         llm = create_llm_client(llm_config)
         writer = Writer(llm)
+        # 参考 chapter 生成图里的 Reviewer 构造（src/novel/agents/reviewer.py 的
+        # build_and_review_node），把 ledger + watchlist 接进来；
+        # 没有这两项 Reviewer 会静默退化（ledger consistency / style_overuse 失效）。
+        # TODO(polish): 接 StyleProfile 进一步丰富 watchlist 与节拍命中
+        ledger = state.get("ledger_store")
+        quality_cfg = (state.get("config") or {}).get("quality", {}) or {}
+        watchlist = quality_cfg.get("ai_flavor_watchlist") or None
+        reviewer = Reviewer(llm, ledger=ledger, watchlist=watchlist)
 
         # 设置主线上下文
         main_storyline = state.get("main_storyline", {})
@@ -2400,27 +2346,6 @@ class NovelPipeline:
             text = fm.load_chapter_text(novel_id, ch_num)
             if text:
                 chapter_texts[ch_num] = text
-
-        # 构建各章摘要（用于跨章重复检测）
-        def build_chapter_summaries(exclude_chapter: int) -> str:
-            """构建除当前章外的所有章节摘要"""
-            summaries = []
-            for ch_num in sorted(chapter_texts.keys()):
-                if ch_num == exclude_chapter:
-                    continue
-                text = chapter_texts[ch_num]
-                # 取前150字+后150字
-                if len(text) > 300:
-                    summary = text[:150] + "…" + text[-150:]
-                else:
-                    summary = text
-                ch_title = ""
-                for ch_outline in outline_chapters:
-                    if ch_outline.get("chapter_number") == ch_num:
-                        ch_title = ch_outline.get("title", "")
-                        break
-                summaries.append(f"第{ch_num}章「{ch_title}」: {summary}")
-            return "\n\n".join(summaries)
 
         # 精修结果
         result: dict = {
@@ -2485,28 +2410,36 @@ class NovelPipeline:
                 # 一起砍，这里只剩 style 指标）
                 before_style = style_tool.analyze(chapter_text)
 
-                # Step 1: 自审
-                log.info("第%d章：自审中...", ch_num)
-                all_summaries = build_chapter_summaries(ch_num)
-                critique = writer.self_critique(
+                # Step 1: 审稿（Reviewer）
+                log.info("第%d章：审稿中...", ch_num)
+                critique = reviewer.review(
                     chapter_text=chapter_text,
-                    chapter_outline=ch_outline,
-                    context=context,
-                    all_chapter_summaries=all_summaries,
+                    chapter_number=ch_outline.chapter_number,
+                    chapter_title=ch_outline.title,
+                    chapter_goal=ch_outline.goal,
+                    previous_tail=context[-500:],
                 )
 
-                log.info("第%d章审稿意见:\n%s", ch_num, critique[:200])
+                log.info(
+                    "第%d章审稿意见:\n%s",
+                    ch_num,
+                    critique.overall_assessment[:200],
+                )
 
                 # Step 2: 精修
-                if "审稿通过" in critique and "无需修改" in critique:
-                    log.info("第%d章审稿通过，跳过精修", ch_num)
+                # polish_chapters 是用户显式调用的"主动挑刺精修"入口，语义是
+                # "只要 Reviewer 挑出任何 issue 就改"。不走 needs_refine（那是
+                # refine_loop 更保守的阈值：high>0 or medium>=2）。
+                if not critique.issues:
+                    log.info("第%d章审稿通过（无 issue），跳过精修", ch_num)
                     result["skipped_chapters"].append(ch_num)
                     continue
 
                 log.info("第%d章：精修中...", ch_num)
+                critique_prompt = critique.to_writer_prompt()
                 polished_text = writer.polish_chapter(
                     chapter_text=chapter_text,
-                    critique=critique,
+                    critique=critique_prompt,
                     chapter_outline=ch_outline,
                     characters=characters,
                     world_setting=world_setting,
@@ -2517,8 +2450,16 @@ class NovelPipeline:
                 # Step 3: 改后指标（零成本，纯规则）
                 after_style = style_tool.analyze(polished_text)
 
-                # 解析审稿意见分类
-                issues = _parse_critique_issues(critique)
+                # 审稿意见分类（直接取自 CritiqueResult.issues）
+                issues = [
+                    {
+                        "type": i.type,
+                        "severity": i.severity,
+                        "quote": i.quote,
+                        "reason": i.reason,
+                    }
+                    for i in critique.issues
+                ]
 
                 # 备份原文，保存精修版
                 fm.save_chapter_revision(novel_id, ch_num, chapter_text)
@@ -2531,8 +2472,8 @@ class NovelPipeline:
                     "chapter_number": ch_num,
                     "original_chars": len(chapter_text),
                     "polished_chars": len(polished_text),
-                    "critique_summary": critique[:200],
-                    "critique_full": critique,
+                    "critique_summary": critique.overall_assessment[:200],
+                    "critique_full": critique_prompt,
                     "issues": issues,
                     "before_style": before_style.model_dump(),
                     "after_style": after_style.model_dump(),

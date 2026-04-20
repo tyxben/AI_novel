@@ -1,9 +1,9 @@
-"""精修功能（self_critique + polish_chapter + polish_chapters pipeline）测试
+"""精修功能（polish_chapter + polish_chapters pipeline）测试
 
 覆盖：
-- Writer.self_critique: 返回值、上下文注入、温度、审稿标准
 - Writer.polish_chapter: 正常精修、跳过逻辑、prompt 内容、温度、主线注入
-- NovelPipeline.polish_chapters: 缺失项目、基本流程、跳过无文本章节
+- NovelPipeline.polish_chapters: 缺失项目、基本流程（Reviewer.review → polish）、
+  跳过通过章节、跳过无文本章节、progress callback
 """
 
 from __future__ import annotations
@@ -15,11 +15,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.llm.llm_client import LLMResponse
+from src.novel.agents.reviewer import Reviewer
 from src.novel.agents.writer import Writer
 from src.novel.models.character import (
     Appearance,
     CharacterProfile,
     Personality,
+)
+from src.novel.models.critique_result import (
+    CritiqueIssue,
+    CritiqueResult,
 )
 from src.novel.models.novel import ChapterOutline
 from src.novel.models.world import WorldSetting
@@ -34,14 +39,6 @@ def _make_llm(text: str = "精修后的内容。") -> MagicMock:
     """创建返回固定文本的 Mock LLM 客户端。"""
     client = MagicMock()
     client.chat.return_value = LLMResponse(content=text, model="mock-model")
-    return client
-
-
-def _make_llm_sequential(texts: list[str]) -> MagicMock:
-    """创建按顺序返回不同文本的 Mock LLM 客户端。"""
-    client = MagicMock()
-    responses = [LLMResponse(content=t, model="mock-model") for t in texts]
-    client.chat.side_effect = responses
     return client
 
 
@@ -86,123 +83,33 @@ def _make_world() -> WorldSetting:
     return WorldSetting(era="2180年", location="深空")
 
 
-# ---------------------------------------------------------------------------
-# TestSelfCritique
-# ---------------------------------------------------------------------------
+def _make_critique_needs_refine(chapter_number: int = 1) -> CritiqueResult:
+    """构造一个 needs_refine=True 的 CritiqueResult（≥1 high issue）。"""
+    return CritiqueResult(
+        chapter_number=chapter_number,
+        strengths=["节奏紧凑"],
+        issues=[
+            CritiqueIssue(
+                type="pacing",
+                severity="high",
+                quote="某段原文",
+                reason="前半段拖沓，建议精简",
+            ),
+        ],
+        specific_revisions=[],
+        overall_assessment="整体可以，但节奏需要调整。",
+    )
 
 
-class TestSelfCritique:
-    """测试 Writer.self_critique() 方法"""
-
-    def test_self_critique_returns_string(self) -> None:
-        """自审应该返回字符串。"""
-        llm = _make_llm(
-            "【问题1】类型：重复\n位置：第2段\n问题：导弹攻击场景重复\n建议：删除重复段落"
-        )
-        writer = Writer(llm)
-        outline = _make_chapter_outline()
-
-        result = writer.self_critique(
-            chapter_text="这是测试章节内容...",
-            chapter_outline=outline,
-        )
-
-        assert isinstance(result, str)
-        assert "问题" in result
-
-    def test_self_critique_pass_returns_string(self) -> None:
-        """审稿通过时也应返回字符串。"""
-        llm = _make_llm("审稿通过，无需修改")
-        writer = Writer(llm)
-        outline = _make_chapter_outline()
-
-        result = writer.self_critique(
-            chapter_text="很好的章节内容",
-            chapter_outline=outline,
-        )
-
-        assert isinstance(result, str)
-        assert "审稿通过" in result
-
-    def test_self_critique_with_context(self) -> None:
-        """带上下文的自审：prompt 应包含前文摘要和上一章结尾。"""
-        llm = _make_llm("审稿通过，无需修改")
-        writer = Writer(llm)
-        outline = _make_chapter_outline(chapter_number=3, title="第三章")
-
-        result = writer.self_critique(
-            chapter_text="章节内容",
-            chapter_outline=outline,
-            context="前文内容",
-            all_chapter_summaries="第1章摘要\n第2章摘要",
-        )
-
-        assert "审稿通过" in result
-
-        # 验证 prompt 中包含了上下文
-        call_args = llm.chat.call_args
-        messages = call_args[0][0]
-        user_msg = messages[1]["content"]
-        assert "前文各章摘要" in user_msg
-        assert "上一章结尾" in user_msg
-
-    def test_self_critique_uses_low_temperature(self) -> None:
-        """自审应该使用低温度（0.3）。"""
-        llm = _make_llm("审稿通过，无需修改")
-        writer = Writer(llm)
-        outline = _make_chapter_outline()
-
-        writer.self_critique("内容", outline)
-
-        call_args = llm.chat.call_args
-        # Writer uses positional: chat(messages, temperature=0.3, max_tokens=2048)
-        # Check kwargs or positional
-        if call_args[1]:
-            assert call_args[1].get("temperature") == 0.3
-        else:
-            # positional: messages, temperature
-            assert call_args[0][1] == 0.3
-
-    def test_self_critique_system_prompt_has_criteria(self) -> None:
-        """自审 system prompt 应包含审稿标准（重复、对话、逻辑等）。"""
-        llm = _make_llm("审稿通过，无需修改")
-        writer = Writer(llm)
-        outline = _make_chapter_outline()
-
-        writer.self_critique("内容", outline)
-
-        call_args = llm.chat.call_args
-        messages = call_args[0][0]
-        system_msg = messages[0]["content"]
-        assert "重复" in system_msg
-        assert "对话" in system_msg
-        assert "逻辑" in system_msg
-
-    def test_self_critique_without_context_omits_sections(self) -> None:
-        """无上下文时，user prompt 不应包含前文摘要和上一章结尾 section。"""
-        llm = _make_llm("审稿通过，无需修改")
-        writer = Writer(llm)
-        outline = _make_chapter_outline()
-
-        writer.self_critique("内容", outline)
-
-        messages = llm.chat.call_args[0][0]
-        user_msg = messages[1]["content"]
-        assert "前文各章摘要" not in user_msg
-        assert "上一章结尾" not in user_msg
-
-    def test_self_critique_includes_chapter_info(self) -> None:
-        """user prompt 应包含章节号和标题。"""
-        llm = _make_llm("审稿通过，无需修改")
-        writer = Writer(llm)
-        outline = _make_chapter_outline(chapter_number=7, title="暗流涌动")
-
-        writer.self_critique("内容", outline)
-
-        messages = llm.chat.call_args[0][0]
-        user_msg = messages[1]["content"]
-        assert "7" in user_msg
-        assert "暗流涌动" in user_msg
+def _make_critique_pass(chapter_number: int = 1) -> CritiqueResult:
+    """构造一个 needs_refine=False 的 CritiqueResult（无 issue）。"""
+    return CritiqueResult(
+        chapter_number=chapter_number,
+        strengths=["节奏稳定", "人物立体"],
+        issues=[],
+        specific_revisions=[],
+        overall_assessment="本章完成度很高，无需修改。",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -232,16 +139,19 @@ class TestPolishChapter:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    def test_polish_skips_when_no_issues(self) -> None:
-        """审稿通过时应跳过精修，返回原文。LLM 不应被调用。"""
-        llm = _make_llm("不应被调用")
+    def test_polish_no_textual_shortcircuit_guard(self) -> None:
+        """即使 critique 包含"审稿通过/无需修改"字面量，Writer 也不再短路。
+
+        跳过逻辑统一收到 pipeline 层（按 CritiqueResult.issues 判），Writer 层
+        只要被调用就照样走 LLM。
+        """
+        llm = _make_llm("精修后的内容")
         writer = Writer(llm)
         outline = _make_chapter_outline()
 
-        original = "这是原始章节内容"
         result = writer.polish_chapter(
-            chapter_text=original,
-            critique="审稿通过，无需修改",
+            chapter_text="原始内容",
+            critique="审稿通过，无需修改",  # 旧守卫会命中，现在不该短路
             chapter_outline=outline,
             characters=[_make_character()],
             world_setting=_make_world(),
@@ -249,11 +159,11 @@ class TestPolishChapter:
             style_name="webnovel.shuangwen",
         )
 
-        assert result == original
-        llm.chat.assert_not_called()
+        llm.chat.assert_called_once()
+        assert result == "精修后的内容"
 
     def test_polish_skips_partial_match_not_triggered(self) -> None:
-        """只有'审稿通过'但无'无需修改'时不应跳过。"""
+        """历史守卫用的"审稿通过+无需修改"已整段移除；任何 critique 都会走 LLM。"""
         llm = _make_llm("精修结果")
         writer = Writer(llm)
         outline = _make_chapter_outline()
@@ -268,7 +178,6 @@ class TestPolishChapter:
             style_name="webnovel.shuangwen",
         )
 
-        # "无需修改" not in critique, so LLM should be called
         llm.chat.assert_called_once()
         assert result == "精修结果"
 
@@ -518,7 +427,7 @@ class TestPolishPipeline:
             pipe.polish_chapters(str(tmp_path / "novels" / "novel_nonexist"))
 
     def test_polish_chapters_basic_flow(self, tmp_path: Path) -> None:
-        """基本精修流程：自审发现问题 → 精修 → 返回结果。"""
+        """基本精修流程：Reviewer 发现问题 → Writer 精修 → 返回结果。"""
         from src.novel.pipeline import NovelPipeline
 
         # 准备项目目录和检查点
@@ -536,6 +445,7 @@ class TestPolishPipeline:
                         "chapter_number": 1,
                         "title": "测试章",
                         "goal": "测试目标",
+                        "key_events": ["关键事件 1"],
                         "estimated_words": 2500,
                     }
                 ],
@@ -553,15 +463,21 @@ class TestPolishPipeline:
         with open(chapters_dir / "chapter_001.txt", "w", encoding="utf-8") as f:
             f.write("这是原始章节的内容。")
 
-        # Mock LLM：第一次调用返回审稿意见，第二次返回精修结果
-        mock_llm = _make_llm_sequential([
-            "【问题1】类型：重复\n位置：第1段\n问题：有重复\n建议：删除",
-            "精修后的章节内容。",
-        ])
+        # 走 Reviewer.review 路径：返回 needs_refine=True 的 CritiqueResult
+        # Writer 的 polish_chapter 走 LLM，所以 LLM 还要 mock 一次精修响应
+        mock_llm = _make_llm("精修后的章节内容。")
 
         pipe = NovelPipeline(workspace=str(tmp_path))
 
-        with patch("src.llm.llm_client.create_llm_client", return_value=mock_llm):
+        critique = _make_critique_needs_refine(chapter_number=1)
+
+        with patch(
+            "src.llm.llm_client.create_llm_client", return_value=mock_llm
+        ), patch.object(
+            Reviewer,
+            "review",
+            return_value=critique,
+        ) as mock_review:
             result = pipe.polish_chapters(str(novel_dir))
 
         assert result["novel_id"] == novel_id
@@ -569,23 +485,36 @@ class TestPolishPipeline:
         assert isinstance(result["skipped_chapters"], list)
         assert isinstance(result["errors"], list)
 
-        # 至少有一个精修结果（如果章节被成功加载）
-        if result["polished_chapters"]:
-            ch = result["polished_chapters"][0]
-            assert ch["chapter_number"] == 1
-            assert "original_chars" in ch
-            assert "polished_chars" in ch
-            # New rich fields
-            assert "before_style" in ch
-            assert "after_style" in ch
-            assert "before_rules" in ch
-            assert "after_rules" in ch
-            assert "issues" in ch
-            assert isinstance(ch["issues"], list)
-            assert "critique_full" in ch
+        # Reviewer.review 应被调用一次，且 kwargs 与检查点里的 outline 对齐
+        mock_review.assert_called_once()
+        kwargs = mock_review.call_args.kwargs
+        assert kwargs["chapter_number"] == 1
+        assert kwargs["chapter_title"] == "测试章"
+        assert kwargs["chapter_goal"] == "测试目标"
+        # 首章没有前文，previous_tail 必须是空串
+        assert kwargs["previous_tail"] == ""
+
+        # 精修结果
+        assert len(result["polished_chapters"]) == 1
+        ch = result["polished_chapters"][0]
+        assert ch["chapter_number"] == 1
+        assert "original_chars" in ch
+        assert "polished_chars" in ch
+        assert "before_style" in ch
+        assert "after_style" in ch
+        assert "issues" in ch
+        assert isinstance(ch["issues"], list)
+        assert len(ch["issues"]) == 1
+        assert ch["issues"][0]["type"] == "pacing"
+        assert ch["issues"][0]["severity"] == "high"
+        assert ch["issues"][0]["reason"] == "前半段拖沓，建议精简"
+        assert "critique_full" in ch
+        # critique_full 是 to_writer_prompt() 的输出
+        assert "编辑批注" in ch["critique_full"]
+        assert ch["critique_summary"].startswith("整体可以")
 
     def test_polish_chapters_skips_when_pass(self, tmp_path: Path) -> None:
-        """审稿通过的章节应被跳过。"""
+        """needs_refine=False 的章节应被跳过。"""
         from src.novel.pipeline import NovelPipeline
 
         novel_id = "novel_skip"
@@ -600,6 +529,7 @@ class TestPolishPipeline:
                         "chapter_number": 1,
                         "title": "好章",
                         "goal": "测试",
+                        "key_events": ["关键事件 1"],
                         "estimated_words": 2500,
                     }
                 ],
@@ -616,17 +546,27 @@ class TestPolishPipeline:
         with open(chapters_dir / "chapter_001.txt", "w", encoding="utf-8") as f:
             f.write("这是一个质量很好的章节。")
 
-        # LLM 返回审稿通过
-        mock_llm = _make_llm("审稿通过，无需修改")
+        # LLM 不应被用于精修（审稿通过）
+        mock_llm = _make_llm("不应被精修调用")
 
         pipe = NovelPipeline(workspace=str(tmp_path))
+        critique = _make_critique_pass(chapter_number=1)
 
-        with patch("src.llm.llm_client.create_llm_client", return_value=mock_llm):
+        with patch(
+            "src.llm.llm_client.create_llm_client", return_value=mock_llm
+        ), patch.object(
+            Reviewer,
+            "review",
+            return_value=critique,
+        ), patch.object(Writer, "polish_chapter") as mock_polish:
             result = pipe.polish_chapters(str(novel_dir))
 
         # 章节应被跳过
         assert 1 in result["skipped_chapters"]
         assert len(result["polished_chapters"]) == 0
+        # 直接断言 Writer.polish_chapter 未被调用（而非依赖 LLM 未触发的间接证据）
+        mock_polish.assert_not_called()
+        mock_llm.chat.assert_not_called()
 
     def test_polish_chapters_no_outline_raises(self, tmp_path: Path) -> None:
         """大纲不存在时应抛出 ValueError。"""
@@ -665,6 +605,7 @@ class TestPolishPipeline:
                         "chapter_number": 1,
                         "title": "空章",
                         "goal": "测试",
+                        "key_events": ["关键事件 1"],
                         "estimated_words": 2500,
                     }
                 ],
@@ -704,6 +645,7 @@ class TestPolishPipeline:
                         "chapter_number": 1,
                         "title": "章节一",
                         "goal": "测试",
+                        "key_events": ["关键事件 1"],
                         "estimated_words": 2500,
                     }
                 ],
@@ -724,8 +666,15 @@ class TestPolishPipeline:
         callback = MagicMock()
 
         pipe = NovelPipeline(workspace=str(tmp_path))
+        critique = _make_critique_pass(chapter_number=1)
 
-        with patch("src.llm.llm_client.create_llm_client", return_value=mock_llm):
+        with patch(
+            "src.llm.llm_client.create_llm_client", return_value=mock_llm
+        ), patch.object(
+            Reviewer,
+            "review",
+            return_value=critique,
+        ):
             pipe.polish_chapters(str(novel_dir), progress_callback=callback)
 
         assert callback.call_count >= 1
@@ -733,75 +682,87 @@ class TestPolishPipeline:
         last_call = callback.call_args_list[-1]
         assert last_call[0][0] == 1.0
 
+    def test_polish_chapters_preserves_all_issue_fields(
+        self, tmp_path: Path
+    ) -> None:
+        """Reviewer 返回多字段 issue 时，pipeline 要把 type/severity/quote/reason
+        全部无损翻译成 result["polished_chapters"][i]["issues"] 里的 dict。
+        """
+        from src.novel.pipeline import NovelPipeline
 
-# ---------------------------------------------------------------------------
-# TestParseCritiqueIssues
-# ---------------------------------------------------------------------------
+        novel_id = "novel_issue_fields"
+        novel_dir = tmp_path / "novels" / novel_id
+        novel_dir.mkdir(parents=True)
 
+        checkpoint = {
+            "config": {"llm": {}},
+            "outline": {
+                "chapters": [
+                    {
+                        "chapter_number": 1,
+                        "title": "多问题章",
+                        "goal": "验证 issue 字段",
+                        "key_events": ["事件 A", "事件 B"],
+                        "estimated_words": 2500,
+                    }
+                ],
+            },
+            "characters": [],
+            "world_setting": {"era": "现代", "location": "城市"},
+            "style_name": "webnovel.shuangwen",
+        }
+        with open(novel_dir / "checkpoint.json", "w", encoding="utf-8") as f:
+            json.dump(checkpoint, f, ensure_ascii=False)
 
-class TestParseCritiqueIssues:
-    """测试 _parse_critique_issues 解析审稿意见。"""
+        chapters_dir = novel_dir / "chapters"
+        chapters_dir.mkdir()
+        with open(chapters_dir / "chapter_001.txt", "w", encoding="utf-8") as f:
+            f.write("原始章节正文。")
 
-    def test_empty_critique(self) -> None:
-        from src.novel.pipeline import _parse_critique_issues
-        assert _parse_critique_issues("") == []
-        assert _parse_critique_issues(None) == []
-
-    def test_standard_format(self) -> None:
-        from src.novel.pipeline import _parse_critique_issues
-
-        critique = (
-            "整体评价：还行。\n\n"
-            "【问题1】类型：重复 / 位置：第3段 / 问题：\"修炼\"重复8次 / 建议：替换\n"
-            "【问题2】类型：AI味 / 位置：第5段 / 问题：程式化 / 建议：修改\n"
+        # 构造一个带 2 条 issue 的 CritiqueResult（1 high + 1 medium）
+        critique = CritiqueResult(
+            chapter_number=1,
+            strengths=["场面感好"],
+            issues=[
+                CritiqueIssue(
+                    type="pacing",
+                    severity="high",
+                    quote="某段拖沓原文片段",
+                    reason="前半节奏过慢，建议压缩两百字",
+                ),
+                CritiqueIssue(
+                    type="dialogue",
+                    severity="medium",
+                    quote="一段对白片段",
+                    reason="角色语气与设定不符",
+                ),
+            ],
+            specific_revisions=[],
+            overall_assessment="两条 issue。",
         )
-        issues = _parse_critique_issues(critique)
+
+        mock_llm = _make_llm("精修后的章节正文。")
+        pipe = NovelPipeline(workspace=str(tmp_path))
+
+        with patch(
+            "src.llm.llm_client.create_llm_client", return_value=mock_llm
+        ), patch.object(Reviewer, "review", return_value=critique):
+            result = pipe.polish_chapters(str(novel_dir))
+
+        assert len(result["polished_chapters"]) == 1
+        issues = result["polished_chapters"][0]["issues"]
         assert len(issues) == 2
-        assert issues[0]["type"] == "重复"
-        assert issues[0]["location"] == "第3段"
-        assert "修炼" in issues[0]["problem"]
-        assert issues[1]["type"] == "AI味"
 
-    def test_multiline_format(self) -> None:
-        from src.novel.pipeline import _parse_critique_issues
-
-        critique = (
-            "【问题1】类型：逻辑\n"
-            "位置：第2段\n"
-            "问题：前后矛盾\n"
-            "建议：统一时间线\n"
-        )
-        issues = _parse_critique_issues(critique)
-        assert len(issues) == 1
-        assert issues[0]["type"] == "逻辑"
-
-    def test_unknown_type_fallback(self) -> None:
-        from src.novel.pipeline import _parse_critique_issues
-
-        critique = "【问题1】类型：奇怪的分类 / 问题：有问题\n"
-        issues = _parse_critique_issues(critique)
-        assert len(issues) == 1
-        assert issues[0]["type"] == "其他"
-
-    def test_no_structured_fields_fallback(self) -> None:
-        from src.novel.pipeline import _parse_critique_issues
-
-        critique = "【问题1】这段对话不自然，需要改进。\n"
-        issues = _parse_critique_issues(critique)
-        assert len(issues) == 1
-        assert issues[0]["type"] == "其他"
-        assert "对话" in issues[0]["problem"]
-
-    def test_multiple_known_types(self) -> None:
-        from src.novel.pipeline import _parse_critique_issues
-
-        critique = (
-            "【问题1】类型：对话 / 问题：缺乏个性\n"
-            "【问题2】类型：节奏 / 问题：太平\n"
-            "【问题3】类型：角色 / 问题：性格不一致\n"
-            "【问题4】类型：转折 / 问题：太突然\n"
-        )
-        issues = _parse_critique_issues(critique)
-        assert len(issues) == 4
-        types = [i["type"] for i in issues]
-        assert types == ["对话", "节奏", "角色", "转折"]
+        # 字段必须与输入逐条一致
+        assert issues[0] == {
+            "type": "pacing",
+            "severity": "high",
+            "quote": "某段拖沓原文片段",
+            "reason": "前半节奏过慢，建议压缩两百字",
+        }
+        assert issues[1] == {
+            "type": "dialogue",
+            "severity": "medium",
+            "quote": "一段对白片段",
+            "reason": "角色语气与设定不符",
+        }
