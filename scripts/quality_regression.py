@@ -855,9 +855,12 @@ def _try_load_ledger(project_dir: Path) -> Any | None:
 
 
 def _try_load_style_profile(project_dir: Path) -> Any | None:
-    """C1 fix 辅助：从 project_dir/.cache/style_profile.json 加载 StyleProfile。
+    """C1 fix 辅助：加载或构建 StyleProfile。
 
-    优先读取已缓存的 profile JSON；失败返回 None。
+    1. 优先读 ``{project_dir}/.cache/style_profile.json``（pipeline 若落盘则用）
+    2. 回退：从 novel.json 重建 Novel 对象 → ``StyleProfileService.build()``
+       生成运行时 profile，不落盘（避免与 pipeline 的写权竞态）
+    3. 都失败返回 None（调用方会降级 D4 overuse=0）
     """
     try:
         from src.novel.models.style_profile import StyleProfile
@@ -869,11 +872,40 @@ def _try_load_style_profile(project_dir: Path) -> Any | None:
         workspace_dir = str(project_dir.parent.parent)
         fm = FileManager(workspace_dir)
         data = fm.load_style_profile(novel_id)
-        if not data:
-            return None
-        return StyleProfile(**data)
+        if data:
+            return StyleProfile(**data)
     except Exception as exc:  # noqa: BLE001
-        log.warning("StyleProfile 加载失败 (project=%s): %s", project_dir, exc)
+        log.warning("StyleProfile 缓存加载失败 (project=%s): %s", project_dir, exc)
+
+    # 回退：从 chapter_*.txt 即席构建。绕开 Novel Pydantic 严格校验——
+    # 只需要 novel_id + 有 .full_text 属性的 chapters 列表即可。
+    try:
+        from types import SimpleNamespace
+
+        from src.novel.services.style_profile_service import StyleProfileService
+
+        novel_id = project_dir.name
+        chapters_dir = project_dir / "chapters"
+        if not chapters_dir.exists():
+            return None
+        chapter_texts: list[SimpleNamespace] = []
+        _CHAPTER_RE = __import__("re").compile(r"chapter_(\d+)\.txt$")
+        for p in sorted(chapters_dir.glob("chapter_*.txt")):
+            m = _CHAPTER_RE.search(p.name)
+            if not m:
+                continue
+            text = p.read_text(encoding="utf-8").strip()
+            if text:
+                chapter_texts.append(
+                    SimpleNamespace(chapter_number=int(m.group(1)), full_text=text)
+                )
+        if not chapter_texts:
+            return None
+        novel_stub = SimpleNamespace(novel_id=novel_id, chapters=chapter_texts)
+        service = StyleProfileService()
+        return service.build(novel_stub)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("StyleProfile 即席构建失败 (project=%s): %s", project_dir, exc)
         return None
 
 
