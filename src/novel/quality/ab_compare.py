@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from src.llm import create_llm_client
+from src.novel.quality import AB_DIMENSIONS
 from src.novel.quality.judge import (
     JudgeConfig,
     _build_llm_config,
@@ -31,13 +32,9 @@ from src.novel.quality.report import ABComparisonResult
 log = logging.getLogger("novel.quality.ab_compare")
 
 
-_AB_DIMENSIONS: tuple[str, ...] = (
-    "narrative_flow",
-    "character_consistency",
-    "plot_advancement",
-    "dialogue_quality",
-    "chapter_hook",
-)
+# H6 fix: 维度列表从 src.novel.quality 模块常量引用，不再此处硬编码。
+# 保留 ``_AB_DIMENSIONS`` 别名以兼容现有测试（test_ab_compare.py 已导入）。
+_AB_DIMENSIONS: tuple[str, ...] = AB_DIMENSIONS
 
 _VALID_VERDICTS: frozenset[str] = frozenset({"a", "b", "tie"})
 
@@ -66,6 +63,8 @@ def pairwise_judge(
     commit_a: str,
     commit_b: str,
     config: JudgeConfig,
+    *,
+    max_chars: int = 6000,
 ) -> ABComparisonResult:
     """A/B 成对比较。
 
@@ -77,13 +76,15 @@ def pairwise_judge(
         commit_a: 版本 A 的 git commit hash（人读/溯源用）。
         commit_b: 版本 B 的 git commit hash。
         config: :class:`JudgeConfig`。
+        max_chars: A/B 比较单段文本截断上限（H4 fix: single/multi judge 的 4000
+            对 A/B 两段同时塞入上下文太紧，默认放宽到 6000；测试时可精确指定）。
 
     Returns:
         :class:`ABComparisonResult`。LLM 解析失败时 winner="tie"，
         ``judge_reasoning`` 带 ``parse_error`` 前缀。
     """
-    sanitized_a = _sanitize_chapter_text(text_a)
-    sanitized_b = _sanitize_chapter_text(text_b)
+    sanitized_a = _sanitize_chapter_text(text_a, max_chars=max_chars)
+    sanitized_b = _sanitize_chapter_text(text_b, max_chars=max_chars)
 
     dim_list = "、".join(_AB_DIMENSIONS)
     dim_json = ", ".join(f'"{d}": "a" | "b" | "tie"' for d in _AB_DIMENSIONS)

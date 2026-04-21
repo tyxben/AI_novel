@@ -78,35 +78,39 @@ class TestForeshadowPayoff:
         assert "红衣女子的身份之谜" in missed_keywords
         assert "第七座高塔的传说" in missed_keywords
 
-    def test_no_due_foreshadowings_returns_100(self, mock_ledger_store):
-        """无到期伏笔 → 100%（0/0 防除零）。"""
+    def test_no_due_foreshadowings_returns_none(self, mock_ledger_store):
+        """无到期伏笔 → score=None + status 字段（H1 fix：0/0 不是满分）。"""
         mock_ledger_store.snapshot_for_chapter.return_value = {
             "collectable_foreshadowings": [],
         }
         result = evaluate_foreshadow_payoff(
             mock_ledger_store, chapter_number=1, chapters_text={1: "开篇第一章。"}
         )
-        assert result.score == 100.0
+        assert result.score is None
         assert result.details["collected"] == 0
         assert result.details["total"] == 0
+        assert result.details["status"] == "no_due_foreshadowings"
+        assert result.scale == "percent"
 
-    def test_empty_snapshot_returns_100(self, mock_ledger_store):
-        """snapshot 返回空 dict → 100%。"""
+    def test_empty_snapshot_returns_none(self, mock_ledger_store):
+        """snapshot 返回空 dict → score=None + status（H1 fix）。"""
         mock_ledger_store.snapshot_for_chapter.return_value = {}
         result = evaluate_foreshadow_payoff(
             mock_ledger_store, chapter_number=1, chapters_text={}
         )
-        assert result.score == 100.0
+        assert result.score is None
         assert result.details["total"] == 0
+        assert result.details["status"] == "no_due_foreshadowings"
 
-    def test_ledger_exception_returns_100(self, mock_ledger_store):
-        """ledger 抛异常 → 兜底 100%（不崩）。"""
+    def test_ledger_exception_returns_none(self, mock_ledger_store):
+        """ledger 抛异常 → score=None + status（H1 fix：不崩，但也不假装满分）。"""
         mock_ledger_store.snapshot_for_chapter.side_effect = RuntimeError("db broken")
         result = evaluate_foreshadow_payoff(
             mock_ledger_store, chapter_number=1, chapters_text={1: "abc"}
         )
-        assert result.score == 100.0
+        assert result.score is None
         assert result.details["total"] == 0
+        assert result.details["status"] == "no_due_foreshadowings"
         assert result.scale == "percent"
 
     def test_uses_description_fallback(self, mock_ledger_store):
@@ -181,18 +185,21 @@ class TestAiFlavorIndex:
         # 通用指示词应几乎未命中
         assert result.details["cliche_count"] == 0
 
-    def test_empty_text_returns_zero(self, sample_style_profile):
-        """空文本 → score=0，所有组件为 0。"""
+    def test_empty_text_returns_none(self, sample_style_profile):
+        """空文本 → score=None + status=empty_text（H2 fix：0 分意味"无 AI 味"，语义错）。"""
         result = evaluate_ai_flavor("", sample_style_profile)
-        assert result.score == 0.0
+        assert result.score is None
+        assert result.details["status"] == "empty_text"
         assert result.details["cliche_count"] == 0
         assert result.details["overuse_hits"] == []
         assert result.details["repetition_rate"] == 0.0
+        assert any("empty_text" in w for w in result.details["warnings"])
 
-    def test_whitespace_only_text_returns_zero(self, sample_style_profile):
-        """纯空白 → score=0。"""
+    def test_whitespace_only_text_returns_none(self, sample_style_profile):
+        """纯空白 → score=None（H2 fix 同上）。"""
         result = evaluate_ai_flavor("   \n\n\t  ", sample_style_profile)
-        assert result.score == 0.0
+        assert result.score is None
+        assert result.details["status"] == "empty_text"
 
     def test_missing_style_profile_still_works(self):
         """无 style_profile 时仅规则层打分，不崩。"""
@@ -218,6 +225,85 @@ class TestAiFlavorIndex:
         text = "不禁" * 1000
         result = evaluate_ai_flavor(text, sample_style_profile)
         assert result.score <= 100.0
+
+    def test_ai_flavor_weights_match_spec(self):
+        """锁 D4 公式的 40/30/30 权重（H3 fix：魔数无测试锁）。
+
+        构造每个分量可隔离验证的输入：
+
+        - 精心制造 1 个 overuse 命中、0 cliche、0 句首重复 → 总分应 = overuse 分量
+        - 翻过来测 cliche only 和 repetition only（后者较难精确构造，用边界断言）
+        - 断言三个分量之和 == 总分（验证加法组合）
+        """
+        from src.novel.models.style_profile import OverusedPhrase, StyleProfile
+
+        # ---- 构造 1: overuse-only ----
+        # 每千字 1 个 overuse 命中 → overuse_density=1.0 → overuse_norm=0.1 →
+        # components["overuse"] = 0.1 * 40 = 4.0
+        # 文本总长 1000 字，包含 1 次"秘密短语"，无通用 cliche 词，句首全不相同
+        # 用随机 10 字句各 100 句 = 1000 字，避免句首 bigram 重复
+        overuse_profile = StyleProfile(
+            novel_id="w_test",
+            overused_phrases=[
+                OverusedPhrase(phrase="秘密短语", chapter_coverage=0.5, total_occurrences=3),
+            ],
+            sample_size=5,
+        )
+        # 构造 100 个差异化 10 字句（句首 bigram 不会在 5 句窗口中重复）
+        opener_pool = "零壹贰叁肆伍陆柒捌玖甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥"
+        sentences = []
+        for i in range(100):
+            a = opener_pool[i % len(opener_pool)]
+            b = opener_pool[(i * 3 + 7) % len(opener_pool)]
+            sentences.append(f"{a}{b}的八字内容啊。")  # 每句 10 字
+        text_overuse_only = "".join(sentences)
+        # 把一个"秘密短语"注入（不影响句首 bigram）
+        text_overuse_only = text_overuse_only + "末尾秘密短语。"
+
+        r_over = evaluate_ai_flavor(text_overuse_only, overuse_profile, genre="test")
+        comps_over = r_over.details["components"]
+        # cliche 必为 0（没通用指示词）
+        assert comps_over["cliche"] == 0.0
+        # repetition 接近 0（非严格为 0，但极低）
+        assert comps_over["repetition"] < 1.0
+        # overuse 分量应是正数，且是主导项
+        assert comps_over["overuse"] > 0
+        # 加法组合验证：总分 = 三分量之和（四舍五入精度）
+        assert r_over.score == pytest.approx(
+            comps_over["overuse"] + comps_over["cliche"] + comps_over["repetition"],
+            abs=0.1,
+        )
+
+        # ---- 构造 2: cliche-only 验证权重 30 ----
+        # 每千字 1 个通用 cliche 指示词
+        empty_profile = StyleProfile(novel_id="w2", overused_phrases=[], sample_size=0)
+        # 1000 字中仅 1 个"不禁"（排除本书短语）
+        cliche_text = "他默默看向远方的山巅啊。" * 90 + "主角不禁轻叹了一声。"
+        # 规模应约 1000 字 (每句 12 字 * 90 = 1080 + 尾 10 = 1090)
+        r_cliche = evaluate_ai_flavor(cliche_text, empty_profile, genre="test")
+        comps_cliche = r_cliche.details["components"]
+        # overuse 必为 0（空 profile）
+        assert comps_cliche["overuse"] == 0.0
+        # cliche 分量 > 0（权重 30）
+        assert comps_cliche["cliche"] > 0
+        # 总分 = 三分量加总
+        assert r_cliche.score == pytest.approx(
+            comps_cliche["overuse"] + comps_cliche["cliche"] + comps_cliche["repetition"],
+            abs=0.1,
+        )
+
+        # ---- 构造 3: repetition-heavy 验证权重 30 ----
+        # 所有句开头都是"今天"（句首 bigram 100% 重复）
+        rep_text = "今天我走在路上啊。" * 100  # 8*100 = 800 字
+        r_rep = evaluate_ai_flavor(rep_text, empty_profile, genre="test")
+        comps_rep = r_rep.details["components"]
+        assert comps_rep["overuse"] == 0.0
+        # 严重重复时 repetition 分量应显著大（接近上限 30）
+        assert comps_rep["repetition"] > 20.0
+        assert r_rep.score == pytest.approx(
+            comps_rep["overuse"] + comps_rep["cliche"] + comps_rep["repetition"],
+            abs=0.1,
+        )
 
 
 # ---------------------------------------------------------------------------

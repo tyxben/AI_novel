@@ -415,7 +415,10 @@ class TestEvaluateNarrativeFlowLlm:
         assert d.scale == "1-5"
         assert d.method == "llm_judge"
         assert d.details["judge_reasoning"] == "流畅"
-        assert d.details["token_usage"] == 120
+        # H5 fix: details 不再直接暴露 "token_usage"; 只保留内部专用键
+        # "_own_token_usage"（evaluate_chapter 在 report 层读取累加）
+        assert "token_usage" not in d.details
+        assert d.details["_own_token_usage"] == 120
         assert d.details["judge_model"] == "gemini-2.5-flash"
 
 
@@ -436,6 +439,9 @@ class TestEvaluatePlotAdvancementLlm:
         assert d.key == "plot_advancement"
         assert d.score == pytest.approx(3.0)
         assert d.details["judge_reasoning"] == "铺垫为主"
+        # H5 fix
+        assert "token_usage" not in d.details
+        assert d.details["_own_token_usage"] == 90
 
 
 class TestEvaluateMultiDimensionLlm:
@@ -459,10 +465,13 @@ class TestEvaluateMultiDimensionLlm:
         keys = [d.key for d in out]
         assert keys == ["character_consistency", "dialogue_quality", "chapter_hook"]
         assert all(d.scale == "1-5" and d.method == "llm_judge" for d in out)
-        # token_usage 只累加到第一条
-        assert out[0].details["token_usage"] == 456
-        assert out[1].details["token_usage"] == 0
-        assert out[2].details["token_usage"] == 0
+        # H5 fix: DimensionScore.details 不再带 "token_usage" 字段；
+        # 只有第一条 details 会有 "_combined_token_usage" 标记供 evaluate_chapter 聚合
+        for d in out:
+            assert "token_usage" not in d.details
+        assert out[0].details["_combined_token_usage"] == 456
+        assert "_combined_token_usage" not in out[1].details
+        assert "_combined_token_usage" not in out[2].details
 
     def test_custom_dimensions(self) -> None:
         # 自定义只评 1 个维度

@@ -244,8 +244,27 @@ def evaluate_chapter(
     judge_config: Any,
     commit_hash: str,
     repeat: int = 1,
+    chapters_text: dict[int, str] | None = None,
 ) -> "Any":
-    """对单章跑 7 维度评估, 返回 ChapterQualityReport."""
+    """对单章跑 7 维度评估, 返回 ChapterQualityReport.
+
+    Args:
+        ctx: 章节上下文，含 ``ledger`` / ``style_profile`` 用于 D3/D4 规则评估。
+            C1 fix 前这两个字段从未被 main 填入，导致 D3/D4 永不执行。
+        judge_config: judge LLM 配置。
+        commit_hash: 当前 git HEAD 短 hash。
+        repeat: judge LLM 重复次数（默认 1，用 median 聚合）。
+        chapters_text: 累计已评章节正文 ``{chapter_number: text}``，D3 伏笔
+            兑现率搜索需要。C1 fix 前未传该参数导致 evaluate_foreshadow_payoff
+            漏 required kwarg 崩溃。
+
+    Returns:
+        :class:`ChapterQualityReport`。
+    """
+    from src.novel.quality.dimensions import (
+        evaluate_chapter_hook_rules,
+        evaluate_dialogue_quality_rules,
+    )
     from src.novel.quality.judge import (
         evaluate_multi_dimension_llm,
         evaluate_narrative_flow_llm,
@@ -260,6 +279,11 @@ def evaluate_chapter(
         "character_names": ctx.character_names,
     }
 
+    # chapters_text 至少包含本章自己（首章也不例外）
+    chapters_text_local: dict[int, str] = dict(chapters_text or {})
+    if ctx.text:
+        chapters_text_local.setdefault(ctx.chapter_number, ctx.text)
+
     scores: list[DimensionScore] = []
     token_usage = 0
 
@@ -268,6 +292,10 @@ def evaluate_chapter(
         evaluate_narrative_flow_llm(ctx.text, llm_context, judge_config)
         for _ in range(max(1, repeat))
     ]
+    # H5 fix: 从 DimensionScore.details["_own_token_usage"] 读 D1 成本
+    token_usage += sum(
+        int(d.details.get("_own_token_usage", 0) or 0) for d in d1_values
+    )
     d1_final = DimensionScore(
         key="narrative_flow",
         score=_aggregate_repeat([d.score for d in d1_values]),
@@ -280,13 +308,15 @@ def evaluate_chapter(
         },
     )
     scores.append(d1_final)
-    token_usage += sum(int(d.details.get("token_usage", 0) or 0) for d in d1_values)
 
     # D5 plot_advancement
     d5_values = [
         evaluate_plot_advancement_llm(ctx.text, llm_context, judge_config)
         for _ in range(max(1, repeat))
     ]
+    token_usage += sum(
+        int(d.details.get("_own_token_usage", 0) or 0) for d in d5_values
+    )
     d5_final = DimensionScore(
         key="plot_advancement",
         score=_aggregate_repeat([d.score for d in d5_values]),
@@ -299,51 +329,118 @@ def evaluate_chapter(
         },
     )
     scores.append(d5_final)
-    token_usage += sum(int(d.details.get("token_usage", 0) or 0) for d in d5_values)
 
     # D2+D6+D7 joint
     multi_samples: list[list[DimensionScore]] = [
         evaluate_multi_dimension_llm(ctx.text, llm_context, judge_config)
         for _ in range(max(1, repeat))
     ]
-    # aggregate: 按 key 取中位数
+    # H5 fix: multi 合并 call 只产一个 combined token usage（在每次采样的第一条 details 里）
+    token_usage += sum(
+        int(sample[0].details.get("_combined_token_usage", 0) or 0)
+        for sample in multi_samples
+    )
+
+    # C2 fix: D6/D7 规则层与 LLM 合并，method="mixed"
+    # 先跑规则层（输入与 LLM 共享的 ctx.text / ctx.previous_tail）
+    d6_rules = evaluate_dialogue_quality_rules(ctx.text) if ctx.text else None
+    d7_rules = (
+        evaluate_chapter_hook_rules(ctx.text, ctx.previous_tail)
+        if ctx.text is not None
+        else None
+    )
+
     if multi_samples:
         keys = [s.key for s in multi_samples[0]]
         for k_idx, key in enumerate(keys):
             samples = [sample[k_idx].score for sample in multi_samples]
             last = multi_samples[-1][k_idx]
+            details: dict[str, Any] = {
+                "judge_reasoning": last.details.get("judge_reasoning", ""),
+                "samples": samples,
+                "judge_model": judge_config.model,
+            }
+            method = "llm_judge"
+            # C2: D6 合并 dialogue rules
+            if key == "dialogue_quality" and d6_rules is not None:
+                details.update(
+                    {
+                        "dialogue_ratio": d6_rules.get("dialogue_ratio", 0.0),
+                        "max_single_line": d6_rules.get("max_single_line", 0),
+                        "line_count": d6_rules.get("line_count", 0),
+                        "warnings": list(d6_rules.get("warnings", [])),
+                    }
+                )
+                method = "mixed"
+            # C2: D7 合并 chapter hook rules
+            elif key == "chapter_hook" and d7_rules is not None:
+                details.update(
+                    {
+                        "opening_match_rate": d7_rules.get(
+                            "opening_match_rate", 0.0
+                        ),
+                        "ending_has_hook": d7_rules.get("ending_has_hook", False),
+                        "ending_indicator": d7_rules.get("ending_indicator", ""),
+                        "warnings": list(d7_rules.get("warnings", [])),
+                    }
+                )
+                method = "mixed"
             scores.append(
                 DimensionScore(
                     key=key,
                     score=_aggregate_repeat(samples),
                     scale="1-5",
-                    method="llm_judge",
-                    details={
-                        "judge_reasoning": last.details.get("judge_reasoning", ""),
-                        "samples": samples,
-                        "judge_model": judge_config.model,
-                    },
+                    method=method,
+                    details=details,
                 )
             )
-        # token usage 只计第一次第一个维度 (避免重复累加)
-        token_usage += sum(
-            int(sample[0].details.get("token_usage", 0) or 0) for sample in multi_samples
-        )
 
-    # D3/D4 纯规则 (懒 import, E2 提供)
+    # D3/D4 纯规则
+    # C1 fix: evaluate_foreshadow_payoff 需要 chapters_text kwarg；
+    # ledger/style_profile 缺失 → 产出 score=None + status 字段，不崩
     try:
         from src.novel.quality import evaluate_ai_flavor, evaluate_foreshadow_payoff
 
         if ctx.ledger is not None:
             scores.append(
                 evaluate_foreshadow_payoff(
-                    ledger=ctx.ledger, chapter_number=ctx.chapter_number
+                    ledger=ctx.ledger,
+                    chapter_number=ctx.chapter_number,
+                    chapters_text=chapters_text_local,
                 )
             )
-        if ctx.style_profile is not None:
-            scores.append(
-                evaluate_ai_flavor(text=ctx.text, style_profile=ctx.style_profile)
+        else:
+            log.info(
+                "ctx.ledger 为 None, 跳过 D3 伏笔兑现率 (genre=%s ch=%d)",
+                ctx.genre_cfg.key,
+                ctx.chapter_number,
             )
+            scores.append(
+                DimensionScore(
+                    key="foreshadow_payoff",
+                    score=None,
+                    scale="percent",
+                    method="rule",
+                    details={
+                        "status": "ledger_missing",
+                        "warnings": ["ledger_missing: LedgerStore 未加载"],
+                    },
+                )
+            )
+
+        # D4 总是跑（StyleProfile 缺失时 overuse 分量为 0，仍然有 cliche/repetition）
+        d4 = evaluate_ai_flavor(
+            text=ctx.text,
+            style_profile=ctx.style_profile,
+            genre=ctx.genre_cfg.genre,
+        )
+        if ctx.style_profile is None:
+            # 标记 profile 缺失情形，details 里追加标识便于报告层渲染
+            d4.details.setdefault("profile_missing", True)
+            d4.details.setdefault(
+                "warnings", []
+            ).append("profile_missing: StyleProfile 未加载 (overuse 分量=0)")
+        scores.append(d4)
     except ImportError:
         log.warning("规则维度 (D3/D4) 尚未由 E2 提供, 跳过")
     except Exception as exc:  # pragma: no cover - 规则计算软失败不阻断 LLM 评估
@@ -354,7 +451,9 @@ def evaluate_chapter(
         genre=ctx.genre_cfg.key,
         commit_hash=commit_hash,
         scores=scores,
-        generated_at=_dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        generated_at=_dt.datetime.now(tz=_dt.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         judge_model=judge_config.model,
         judge_token_usage=token_usage,
     )
@@ -437,15 +536,22 @@ def detect_regressions(
     reports: list[Any],
     baseline_reports: list[Any] | None,
 ) -> list[Regression]:
-    """对比当前 reports 与 baseline_reports, 返回退化记录."""
+    """对比当前 reports 与 baseline_reports, 返回退化记录.
+
+    H1/H2 fix: ``score is None``（无数据维度，如无到期伏笔、空文本）既不
+    参与 baseline 索引，也不参与 regression 对比；遇到 None 产 info 日志
+    并跳过。
+    """
     if not baseline_reports:
         return []
 
-    # 构造 baseline 索引 (genre, chapter) → {dim: score, scale}
+    # 构造 baseline 索引 (genre, chapter) → {dim: (score, scale)}；None 跳过
     baseline_index: dict[tuple[str, int], dict[str, tuple[float, str]]] = {}
     for br in baseline_reports:
         key = (br.genre, br.chapter_number)
-        baseline_index[key] = {s.key: (s.score, s.scale) for s in br.scores}
+        baseline_index[key] = {
+            s.key: (s.score, s.scale) for s in br.scores if s.score is not None
+        }
 
     regressions: list[Regression] = []
     for rep in reports:
@@ -453,6 +559,14 @@ def detect_regressions(
         if not base:
             continue
         for s in rep.scores:
+            if s.score is None:
+                log.info(
+                    "regression: 跳过 %s.%s (current score=None, status=%s)",
+                    rep.genre,
+                    s.key,
+                    s.details.get("status") if isinstance(s.details, dict) else "",
+                )
+                continue
             base_entry = base.get(s.key)
             if not base_entry:
                 continue
@@ -521,6 +635,9 @@ def render_rich_table(
             s = s_by_key.get(key)
             if s is None:
                 return "-"
+            # H1/H2 fix: score=None 时显示 "-" (不是 0 也不是 100)
+            if s.score is None:
+                return "-"
             base = (baseline_index or {}).get((rep.genre, rep.chapter_number), {}).get(key)
             suffix = ""
             if base is not None:
@@ -581,7 +698,12 @@ def generate_markdown_report(
     commit_hash: str,
 ) -> str:
     """组装 markdown 报告文本。"""
-    now = _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    # L3 fix: datetime.utcnow() 已 deprecated，用 timezone-aware now(tz=utc)
+    now = (
+        _dt.datetime.now(tz=_dt.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
     lines: list[str] = []
     lines.append(f"# Quality Regression Report\n")
     lines.append(f"- 生成时间: {now}")
@@ -600,7 +722,12 @@ def generate_markdown_report(
 
         def num(key: str, fmt: str = ".1f") -> str:
             s = s_by_key.get(key)
-            return f"{s.score:{fmt}}" if s is not None else "-"
+            # H1/H2 fix: score=None 显示 N/A（语义上与"维度缺失"区分）
+            if s is None:
+                return "-"
+            if s.score is None:
+                return "N/A"
+            return f"{s.score:{fmt}}"
 
         lines.append(
             f"| {rep.genre} | {rep.chapter_number} | "
@@ -661,6 +788,71 @@ def print_plan(args: argparse.Namespace, genres: list[GenreConfig]) -> None:
         total_llm_calls = len(genres) * args.chapters * 3 * args.repeat
         print(f"  预估 judge LLM 调用: {total_llm_calls} (每章 3 次 * {args.repeat})")
     print("=" * 68)
+
+
+def _try_load_ledger(project_dir: Path) -> Any | None:
+    """C1 fix 辅助：尝试从 project_dir 加载 LedgerStore；失败返回 None。
+
+    典型 project_dir 结构 (NovelPipeline 产出)::
+
+        workspace_quality/novels/novel_xxx/
+        ├── novel.json
+        ├── .cache/style_profile.json
+        └── chapters/chapter_001.txt ...
+
+    NovelMemory 需要 ``novel_id`` + ``workspace_dir``，由 project_dir 推断：
+    ``novel_id = project_dir.name`` / ``workspace_dir = project_dir.parent.parent``.
+    """
+    try:
+        from src.novel.services.ledger_store import LedgerStore
+        from src.novel.storage.file_manager import FileManager
+        from src.novel.storage.novel_memory import NovelMemory
+
+        if not project_dir.exists():
+            return None
+        novel_id = project_dir.name
+        # novels 目录是 project_dir.parent，workspace 是 parent.parent
+        workspace_dir = str(project_dir.parent.parent)
+        fm = FileManager(workspace=workspace_dir)
+        novel_data = fm.load_novel(novel_id) if hasattr(fm, "load_novel") else None
+        try:
+            memory = NovelMemory(novel_id, workspace_dir)
+        except Exception:  # noqa: BLE001 - memory 初始化失败也允许降级
+            memory = None
+        ledger = LedgerStore(
+            project_path=str(project_dir),
+            db=getattr(memory, "structured_db", None) if memory else None,
+            kg=getattr(memory, "knowledge_graph", None) if memory else None,
+            vector_store=getattr(memory, "vector_store", None) if memory else None,
+            novel_data=novel_data or {},
+        )
+        return ledger
+    except Exception as exc:  # noqa: BLE001
+        log.warning("LedgerStore 加载失败 (project=%s): %s", project_dir, exc)
+        return None
+
+
+def _try_load_style_profile(project_dir: Path) -> Any | None:
+    """C1 fix 辅助：从 project_dir/.cache/style_profile.json 加载 StyleProfile。
+
+    优先读取已缓存的 profile JSON；失败返回 None。
+    """
+    try:
+        from src.novel.models.style_profile import StyleProfile
+        from src.novel.storage.file_manager import FileManager
+
+        if not project_dir.exists():
+            return None
+        novel_id = project_dir.name
+        workspace_dir = str(project_dir.parent.parent)
+        fm = FileManager(workspace=workspace_dir)
+        data = fm.load_style_profile(novel_id)
+        if not data:
+            return None
+        return StyleProfile(**data)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("StyleProfile 加载失败 (project=%s): %s", project_dir, exc)
+        return None
 
 
 def _load_report_json(path: Path) -> Any | None:
@@ -786,19 +978,43 @@ def main(
                 log.error("genre=%s 生成失败: %s", g.key, exc)
                 continue
 
+        # C1 fix: 加载 LedgerStore + StyleProfile 到 ctx（失败 warn 继续，不崩）
+        ledger_for_genre = _try_load_ledger(project_dir)
+        style_profile_for_genre = _try_load_style_profile(project_dir)
+        if ledger_for_genre is None:
+            log.warning(
+                "genre=%s 未能加载 LedgerStore → D3 伏笔兑现率将返回 None", g.key
+            )
+        if style_profile_for_genre is None:
+            log.warning(
+                "genre=%s 未能加载 StyleProfile → D4 AI 味 overuse 分量为 0 (cliche/repetition 仍生效)",
+                g.key,
+            )
+
         prev_tail = ""
+        # C1 fix: 累计本 genre 已评章节正文，供 D3 伏笔兑现率搜索
+        genre_chapters_text: dict[int, str] = {}
         for ch_idx, text in enumerate(chapter_texts, start=1):
             if not text:
                 log.warning("genre=%s ch=%d 正文为空, 跳过评估", g.key, ch_idx)
                 continue
+            genre_chapters_text[ch_idx] = text
             ctx = ChapterContext(
                 genre_cfg=g,
                 chapter_number=ch_idx,
                 text=text,
                 previous_tail=prev_tail,
+                ledger=ledger_for_genre,
+                style_profile=style_profile_for_genre,
             )
             try:
-                rep = _evaluate(ctx, judge_config, commit_hash, args.repeat)
+                rep = _evaluate(
+                    ctx,
+                    judge_config,
+                    commit_hash,
+                    args.repeat,
+                    genre_chapters_text,
+                )
             except Exception as exc:  # pragma: no cover
                 log.error("genre=%s ch=%d 评估失败: %s", g.key, ch_idx, exc)
                 continue
@@ -838,8 +1054,11 @@ def main(
     log.info("评估完成, 耗时 %.1fs, 总章节 %d", elapsed, len(all_reports))
 
     # baseline 索引 (用于 rich table delta)
+    # H1/H2 fix: score is None 的维度不入索引 (显示 "-"，不算 delta)
     baseline_index: dict[tuple[str, int], dict[str, float]] = {
-        (br.genre, br.chapter_number): {s.key: s.score for s in br.scores}
+        (br.genre, br.chapter_number): {
+            s.key: s.score for s in br.scores if s.score is not None
+        }
         for br in baseline_reports
     }
 

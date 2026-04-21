@@ -4,6 +4,8 @@
 - pairwise_judge happy path / tie 分支 / parse_error
 - load_baseline 存在 / 不存在
 - prompt 包含两段文本的定界符
+- H4 fix: max_chars 参数透传给 sanitize
+- H6 fix: MULTI_JUDGE_DIMENSIONS / SINGLE_JUDGE_DIMENSIONS / AB_DIMENSIONS 常量关系
 """
 
 from __future__ import annotations
@@ -198,6 +200,94 @@ class TestPairwiseJudge:
         assert len(result.dimension_preferences) == 5
         assert all(v == "tie" for v in result.dimension_preferences.values())
 
+    def test_max_chars_param_propagates_to_sanitize(self) -> None:
+        """H4 fix: ``max_chars`` 参数需透传给 ``_sanitize_chapter_text``。
+
+        传入两段 8000 字文本 + ``max_chars=500`` → user prompt 中每段 <= 500 字
+        + 截断提示。传 ``max_chars=8000`` → 不截断。
+        """
+        payload = {
+            "winner": "tie",
+            "reasoning": "",
+            "dimension_preferences": {d: "tie" for d in _AB_DIMENSIONS},
+        }
+        big_a = "甲" * 8000
+        big_b = "乙" * 8000
+
+        # --- max_chars=500 ---
+        client_small = _client_with_response(json.dumps(payload))
+        with patch("src.novel.quality.ab_compare.create_llm_client", return_value=client_small):
+            pairwise_judge(
+                text_a=big_a,
+                text_b=big_b,
+                genre="g",
+                chapter_number=1,
+                commit_a="x",
+                commit_b="y",
+                config=JudgeConfig(),
+                max_chars=500,
+            )
+        call_args = client_small.chat.call_args
+        messages = call_args.kwargs.get("messages") or call_args.args[0]
+        user_msg = next(m["content"] for m in messages if m["role"] == "user")
+        # 两段均被截断
+        assert user_msg.count("[...文本已被截断以控制成本...]") == 2
+        # 每段 "甲"/"乙" 出现次数不超过 500
+        assert user_msg.count("甲") <= 500
+        assert user_msg.count("乙") <= 500
+
+        # --- max_chars=8000 不截断 ---
+        client_big = _client_with_response(json.dumps(payload))
+        with patch("src.novel.quality.ab_compare.create_llm_client", return_value=client_big):
+            pairwise_judge(
+                text_a=big_a,
+                text_b=big_b,
+                genre="g",
+                chapter_number=1,
+                commit_a="x",
+                commit_b="y",
+                config=JudgeConfig(),
+                max_chars=8000,
+            )
+        call_args = client_big.chat.call_args
+        messages = call_args.kwargs.get("messages") or call_args.args[0]
+        user_msg = next(m["content"] for m in messages if m["role"] == "user")
+        # 不应出现截断提示
+        assert "[...文本已被截断以控制成本...]" not in user_msg
+        assert user_msg.count("甲") == 8000
+        assert user_msg.count("乙") == 8000
+
+    def test_default_max_chars_is_6000(self) -> None:
+        """H4 fix: A/B 默认 max_chars=6000（比 single/multi 的 4000 宽松）。
+
+        传入一段 5500 字文本（小于 6000）→ 不应被截断。
+        """
+        payload = {
+            "winner": "tie",
+            "reasoning": "",
+            "dimension_preferences": {d: "tie" for d in _AB_DIMENSIONS},
+        }
+        text_5500 = "丙" * 5500
+        client = _client_with_response(json.dumps(payload))
+        with patch("src.novel.quality.ab_compare.create_llm_client", return_value=client):
+            pairwise_judge(
+                text_a=text_5500,
+                text_b="短文本",
+                genre="g",
+                chapter_number=1,
+                commit_a="x",
+                commit_b="y",
+                config=JudgeConfig(),
+            )
+        call_args = client.chat.call_args
+        messages = call_args.kwargs.get("messages") or call_args.args[0]
+        user_msg = next(m["content"] for m in messages if m["role"] == "user")
+        # 5500 字未超默认 6000 → 全部保留
+        assert user_msg.count("丙") == 5500
+        # 5500 字场景无截断提示
+        # （若默认仍是 4000 则会出现两次截断提示；6000 则零次）
+        assert user_msg.count("[...文本已被截断以控制成本...]") == 0
+
     def test_prompt_contains_both_texts_in_delimiters(self) -> None:
         """验证两段文本都被 sanitize 包裹进 prompt."""
         payload = {
@@ -281,3 +371,73 @@ class TestLoadBaseline:
         (root / "chapter.txt").write_text("no number", encoding="utf-8")
         out = load_baseline(str(tmp_path / "base"), "g")
         assert out == {1: "ok"}
+
+
+# ---------------------------------------------------------------------------
+# H6 fix: MULTI / SINGLE / AB 维度常量关系
+# ---------------------------------------------------------------------------
+
+
+class TestDimensionConstants:
+    """H6 fix: A/B 5 项 vs multi judge 3 项命名歧义——锁定模块常量关系。"""
+
+    def test_constants_exposed_from_module(self) -> None:
+        """从 src.novel.quality 可直接导入 3 组常量。"""
+        from src.novel.quality import (
+            AB_DIMENSIONS,
+            MULTI_JUDGE_DIMENSIONS,
+            SINGLE_JUDGE_DIMENSIONS,
+        )
+        # 各自非空 + 是 tuple
+        assert isinstance(MULTI_JUDGE_DIMENSIONS, tuple)
+        assert isinstance(SINGLE_JUDGE_DIMENSIONS, tuple)
+        assert isinstance(AB_DIMENSIONS, tuple)
+        assert len(MULTI_JUDGE_DIMENSIONS) == 3
+        assert len(SINGLE_JUDGE_DIMENSIONS) == 2
+        assert len(AB_DIMENSIONS) == 5
+
+    def test_multi_and_single_are_disjoint(self) -> None:
+        """MULTI 与 SINGLE 不重叠。"""
+        from src.novel.quality import MULTI_JUDGE_DIMENSIONS, SINGLE_JUDGE_DIMENSIONS
+        assert set(MULTI_JUDGE_DIMENSIONS).isdisjoint(set(SINGLE_JUDGE_DIMENSIONS))
+
+    def test_ab_equals_multi_union_single(self) -> None:
+        """AB_DIMENSIONS == MULTI ∪ SINGLE（set 比较，不在意顺序）。"""
+        from src.novel.quality import (
+            AB_DIMENSIONS,
+            MULTI_JUDGE_DIMENSIONS,
+            SINGLE_JUDGE_DIMENSIONS,
+        )
+        assert set(AB_DIMENSIONS) == (
+            set(MULTI_JUDGE_DIMENSIONS) | set(SINGLE_JUDGE_DIMENSIONS)
+        )
+
+    def test_expected_keys(self) -> None:
+        """锁定每组具体成员，防未来无意改动。"""
+        from src.novel.quality import (
+            AB_DIMENSIONS,
+            MULTI_JUDGE_DIMENSIONS,
+            SINGLE_JUDGE_DIMENSIONS,
+        )
+        assert set(MULTI_JUDGE_DIMENSIONS) == {
+            "character_consistency",
+            "dialogue_quality",
+            "chapter_hook",
+        }
+        assert set(SINGLE_JUDGE_DIMENSIONS) == {
+            "narrative_flow",
+            "plot_advancement",
+        }
+        assert set(AB_DIMENSIONS) == {
+            "narrative_flow",
+            "character_consistency",
+            "plot_advancement",
+            "dialogue_quality",
+            "chapter_hook",
+        }
+
+    def test_ab_compare_uses_module_constant(self) -> None:
+        """ab_compare._AB_DIMENSIONS 必须引用模块级 AB_DIMENSIONS（不再字符串硬编码）。"""
+        from src.novel.quality import AB_DIMENSIONS as mod_ab
+        from src.novel.quality.ab_compare import _AB_DIMENSIONS as local_ab
+        assert local_ab == mod_ab

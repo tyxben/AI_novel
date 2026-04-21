@@ -152,6 +152,24 @@ class TestChapterQualityReport:
         report = ChapterQualityReport(chapter_number=1, genre="xuanhuan")
         assert report.avg_llm_score() == 0.0
 
+    def test_avg_llm_score_skips_none_scores(self):
+        """H1/H2 fix: score=None 的 1-5 维度被跳过平均计算。"""
+        report = ChapterQualityReport(
+            chapter_number=1,
+            genre="xuanhuan",
+            scores=[
+                DimensionScore(key="narrative_flow", score=4.0, scale="1-5"),
+                # None 不参与：只应算 4.0 / 1 = 4.0
+                DimensionScore(
+                    key="plot_advancement",
+                    score=None,
+                    scale="1-5",
+                    details={"status": "missing"},
+                ),
+            ],
+        )
+        assert report.avg_llm_score() == 4.0
+
     def test_save_json_round_trip(self, tmp_path):
         """save_json 落盘后能被 json.load 回来，数据不丢失。"""
         report = ChapterQualityReport(

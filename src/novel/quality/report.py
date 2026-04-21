@@ -28,6 +28,10 @@ class DimensionScore:
     - ``"0-100"`` — 统计指标映射到 0-100（e.g. AI 味指数，越高越差）
     - ``"percent"`` — 百分比 0-100（e.g. 伏笔兑现率，越高越好）
 
+    ``score`` 可为 ``None``（Phase 5 H1/H2 fix）——当维度没有可评估的输入
+    （e.g. 无到期伏笔、空文本）时，函数返回 ``score=None`` + ``details["status"]``
+    显式表达"无数据"，下游报告层显示 "-" / "N/A"，不参与 regression 对比。
+
     ``method`` 标识评估手段，便于报告层区分哪些维度参与平均分：
 
     - ``"llm_judge"`` — 纯 LLM 评判
@@ -36,7 +40,7 @@ class DimensionScore:
     """
 
     key: str
-    score: float
+    score: float | None
     scale: str = "1-5"
     method: str = "llm_judge"
     details: dict[str, Any] = field(default_factory=dict)
@@ -65,12 +69,15 @@ class ChapterQualityReport:
     judge_token_usage: int = 0
 
     def avg_llm_score(self) -> float:
-        """仅计算 ``scale == "1-5"`` 的维度平均分。
+        """仅计算 ``scale == "1-5"`` 且 ``score is not None`` 的维度平均分。
 
         这是 LLM rubric 维度的综合指标——百分比 / 0-100 维度不在同一刻度，
-        不参与平均。当没有任何 1-5 维度时返回 ``0.0``（防除零）。
+        不参与平均。当没有任何可用 1-5 维度时返回 ``0.0``（防除零）。
+        ``score is None``（H1/H2）的维度被跳过。
         """
-        llm_dims = [s for s in self.scores if s.scale == "1-5"]
+        llm_dims = [
+            s for s in self.scores if s.scale == "1-5" and s.score is not None
+        ]
         if not llm_dims:
             return 0.0
         return sum(s.score for s in llm_dims) / len(llm_dims)
