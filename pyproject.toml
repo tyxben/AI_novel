@@ -81,4 +81,10 @@ packages = ["src", "src.segmenter", "src.promptgen", "src.imagegen", "src.videog
 markers = [
     "integration: real API integration tests (require API keys)",
     "e2e: end-to-end Playwright browser tests",
+    # Phase 5 新增
+    "llm_judge: requires real LLM call for quality judgment (slow, costs tokens)",
+    "real_run: requires real LLM for chapter generation (slow, costs tokens)",
+    "quality: quality assessment tests (may be slow)",
+    "regression: cross-genre regression tests (slow, real LLM)",
+    "signature: Agent signature compatibility checks (fast, no LLM)",
 ]
