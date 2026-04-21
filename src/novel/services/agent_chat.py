@@ -158,7 +158,7 @@ TOOLS = [
     },
     {
         "name": "plan_chapters",
-        "description": "规划接下来几章的大纲（不生成正文）。生成标题、目标、关键事件、要收/埋的伏笔，供用户审核后再写作。",
+        "description": "[DEPRECATED] Use propose_chapter_brief instead. 规划接下来几章的大纲（不生成正文）。生成标题、目标、关键事件、要收/埋的伏笔，供用户审核后再写作。",
         "parameters": {
             "num_chapters": {"type": "integer", "description": "要规划的章节数量（默认4）", "optional": True},
             "start_chapter": {"type": "integer", "description": "起始章节号（默认从最后一章之后开始）", "optional": True},
@@ -263,6 +263,87 @@ TOOLS = [
         "parameters": {
             "start_chapter": {"type": "integer", "description": "起始章节号（含），不填从第1章", "optional": True},
             "end_chapter": {"type": "integer", "description": "结束章节号（含），不填到最后", "optional": True},
+        },
+    },
+    # ------------------------------------------------------------------
+    # Phase 4 三段式 propose / accept / regenerate 工具
+    # ------------------------------------------------------------------
+    {
+        "name": "propose_project_setup",
+        "description": "为一句灵感生成立项草案（genre/theme/style/target_words 等，不落盘）。返回 proposal JSON 供用户审阅。",
+        "parameters": {
+            "inspiration": {"type": "string", "description": "灵感文本，如 '少年修炼逆天改命'"},
+            "hints": {"type": "object", "description": "可选覆盖字段 {genre/theme/target_words/style_name/narrative_template/target_length_class}", "optional": True},
+        },
+    },
+    {
+        "name": "propose_synopsis",
+        "description": "为当前小说项目生成主线故事骨架草案（3-5 句 + 结构化 main_storyline），不落盘。",
+        "parameters": {},
+    },
+    {
+        "name": "propose_main_outline",
+        "description": "为当前小说项目生成三层大纲草案（outline + style_name + style_bible），不落盘。",
+        "parameters": {
+            "custom_ideas": {"type": "string", "description": "作者额外要求（可选）", "optional": True},
+        },
+    },
+    {
+        "name": "propose_characters",
+        "description": "为当前小说项目生成主角 + 核心配角草案，不落盘。",
+        "parameters": {
+            "synopsis": {"type": "string", "description": "可选上下文 synopsis（默认从 novel.json 读）", "optional": True},
+        },
+    },
+    {
+        "name": "propose_world_setting",
+        "description": "为当前小说项目生成世界观 + 力量体系草案，不落盘。",
+        "parameters": {
+            "synopsis": {"type": "string", "description": "可选上下文 synopsis", "optional": True},
+        },
+    },
+    {
+        "name": "propose_story_arcs",
+        "description": "为当前小说项目生成跨卷大弧线草案，不落盘。",
+        "parameters": {},
+    },
+    {
+        "name": "propose_volume_breakdown",
+        "description": "为当前小说项目生成全书卷骨架草案，不落盘。",
+        "parameters": {
+            "synopsis": {"type": "string", "description": "可选上下文 synopsis", "optional": True},
+        },
+    },
+    {
+        "name": "propose_volume_outline",
+        "description": "为指定卷生成单卷 N 章细纲草案（含 chapter_type 分布 + 伏笔规划），不落盘。",
+        "parameters": {
+            "volume_number": {"type": "integer", "description": "要规划的卷号（从 1 开始）"},
+        },
+    },
+    {
+        "name": "propose_chapter_brief",
+        "description": "为指定章节从 Ledger 实时重建 chapter_brief 草案（不落盘）。替代 [DEPRECATED] plan_chapters。",
+        "parameters": {
+            "chapter_number": {"type": "integer", "description": "章节号"},
+        },
+    },
+    {
+        "name": "accept_proposal",
+        "description": "确认落盘一个 propose_* 返回的草案到 novel.json。幂等：同 proposal_id 重复 accept 返回 already_accepted。",
+        "parameters": {
+            "proposal_id": {"type": "string", "description": "propose_* 返回的 proposal_id"},
+            "proposal_type": {"type": "string", "description": "类型: project_setup/synopsis/main_outline/characters/world_setting/story_arcs/volume_breakdown/volume_outline/chapter_brief"},
+            "data": {"type": "object", "description": "草案数据（可被用户编辑后回传）"},
+        },
+    },
+    {
+        "name": "regenerate_section",
+        "description": "对不满意的骨架段落重新生成草案（同 propose_* 但带作者 hints）。返回新 proposal_id。",
+        "parameters": {
+            "section": {"type": "string", "description": "段落: synopsis/characters/world_setting/story_arcs/volume_breakdown/main_outline/volume_outline"},
+            "hints": {"type": "string", "description": "哪里不满意、想要什么"},
+            "volume_number": {"type": "integer", "description": "卷号（仅 volume_outline 需要）", "optional": True},
         },
     },
 ]
@@ -1727,6 +1808,140 @@ class AgentToolExecutor:
             "details_truncated": details_truncated,
             "report": text[:2000],
         }
+
+    # ------------------------------------------------------------------
+    # Phase 4 三段式 propose / accept / regenerate 工具
+    # ------------------------------------------------------------------
+
+    def _get_tool_facade(self):
+        """Create a ``NovelToolFacade`` bound to this executor's workspace.
+
+        Imported lazily so tests can patch the symbol in this module's
+        namespace before facade module is loaded.
+        """
+        from src.novel.services.tool_facade import NovelToolFacade
+
+        return NovelToolFacade(workspace=self.workspace)
+
+    def _envelope_to_dict(self, envelope: Any) -> dict:
+        """Normalize a ProposalEnvelope-like object to a dict for the LLM."""
+        if isinstance(envelope, dict):
+            return envelope
+        to_dict = getattr(envelope, "to_dict", None)
+        if callable(to_dict):
+            result = to_dict()
+            if isinstance(result, dict):
+                return result
+        # Last-resort fallback — never raise
+        return {"error": "invalid envelope", "raw": str(envelope)[:500]}
+
+    def _tool_propose_project_setup(
+        self, inspiration: str, hints: dict | None = None
+    ) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_project_setup(
+            inspiration=inspiration, hints=hints
+        )
+        return self._envelope_to_dict(envelope)
+
+    def _tool_propose_synopsis(self) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_synopsis(project_path=self._project_path)
+        return self._envelope_to_dict(envelope)
+
+    def _tool_propose_main_outline(
+        self, custom_ideas: str | None = None
+    ) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_main_outline(
+            project_path=self._project_path, custom_ideas=custom_ideas
+        )
+        return self._envelope_to_dict(envelope)
+
+    def _tool_propose_characters(self, synopsis: str | None = None) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_characters(
+            project_path=self._project_path, synopsis=synopsis
+        )
+        return self._envelope_to_dict(envelope)
+
+    def _tool_propose_world_setting(
+        self, synopsis: str | None = None
+    ) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_world_setting(
+            project_path=self._project_path, synopsis=synopsis
+        )
+        return self._envelope_to_dict(envelope)
+
+    def _tool_propose_story_arcs(self) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_story_arcs(project_path=self._project_path)
+        return self._envelope_to_dict(envelope)
+
+    def _tool_propose_volume_breakdown(
+        self, synopsis: str | None = None
+    ) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_volume_breakdown(
+            project_path=self._project_path, synopsis=synopsis
+        )
+        return self._envelope_to_dict(envelope)
+
+    def _tool_propose_volume_outline(self, volume_number: int) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_volume_outline(
+            project_path=self._project_path, volume_number=int(volume_number)
+        )
+        return self._envelope_to_dict(envelope)
+
+    def _tool_propose_chapter_brief(self, chapter_number: int) -> dict:
+        facade = self._get_tool_facade()
+        envelope = facade.propose_chapter_brief(
+            project_path=self._project_path, chapter_number=int(chapter_number)
+        )
+        return self._envelope_to_dict(envelope)
+
+    def _tool_accept_proposal(
+        self,
+        proposal_id: str,
+        proposal_type: str,
+        data: dict,
+    ) -> dict:
+        if not proposal_id or not isinstance(proposal_id, str):
+            return {"error": "proposal_id 必填"}
+        if not proposal_type or not isinstance(proposal_type, str):
+            return {"error": "proposal_type 必填"}
+        if not isinstance(data, dict):
+            return {"error": "data 必须是 dict"}
+
+        facade = self._get_tool_facade()
+        result = facade.accept_proposal(
+            project_path=self._project_path,
+            proposal_id=proposal_id,
+            proposal_type=proposal_type,
+            data=data,
+        )
+        return self._envelope_to_dict(result)
+
+    def _tool_regenerate_section(
+        self,
+        section: str,
+        hints: str = "",
+        volume_number: int | None = None,
+    ) -> dict:
+        if not section or not isinstance(section, str):
+            return {"error": "section 必填"}
+        facade = self._get_tool_facade()
+        envelope = facade.regenerate_section(
+            project_path=self._project_path,
+            section=section,
+            hints=hints or "",
+            volume_number=(
+                int(volume_number) if volume_number is not None else None
+            ),
+        )
+        return self._envelope_to_dict(envelope)
 
 
 # ---------------------------------------------------------------------------

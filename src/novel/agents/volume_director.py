@@ -228,6 +228,7 @@ class VolumeDirector:
         novel: Novel | dict,
         volume_number: int,
         previous_settlement: dict | None = None,
+        hints: str = "",
     ) -> VolumeOutlineProposal:
         """生成本卷章节列表草案 + chapter_type 分布 + 伏笔规划。
 
@@ -239,6 +240,8 @@ class VolumeDirector:
             volume_number: 要规划的卷号（从 1 开始）。
             previous_settlement: 上一卷的 ``VolumeSettlementReport.to_dict()``；
                 为 ``None`` 时表示首卷或无上卷信息。
+            hints: 作者额外要求（例如"要更悲壮的走向"）。非空时在 prompt 末尾
+                追加 "### 作者额外要求" 段。向后兼容：默认空字符串不改变原行为。
 
         Returns:
             ``VolumeOutlineProposal``。
@@ -287,6 +290,7 @@ class VolumeDirector:
             target_volume=target_volume,
             chapter_numbers=chapter_numbers,
             previous_settlement=previous_settlement,
+            hints=hints,
         )
 
         # ---- 调 LLM + 重试 ----
@@ -351,6 +355,7 @@ class VolumeDirector:
         target_volume: dict,
         chapter_numbers: list[int],
         previous_settlement: dict | None,
+        hints: str = "",
     ) -> str:
         genre = novel_data.get("genre", "")
         theme = novel_data.get("theme", "")
@@ -400,6 +405,10 @@ class VolumeDirector:
                     )
             if names:
                 chars_info = f"主要角色：{'、'.join(names)}"
+
+        hints_block = ""
+        if hints and str(hints).strip():
+            hints_block = f"\n\n### 作者额外要求\n\n{str(hints).strip()}\n"
 
         return f"""请为小说的第{target_volume.get('volume_number')}卷生成完整的卷级规划。
 
@@ -470,7 +479,7 @@ class VolumeDirector:
 4. 开头 1-2 章可用 setup，中段主要 buildup，倒数 2-3 章进入 climax，末 1 章 resolution。
 5. to_plant 为本卷新埋伏笔，to_collect_from_previous 用于承接上卷未兑现伏笔。
 6. mood 可选：蓄力、小爽、大爽、过渡、虐心、反转、日常。
-"""
+{hints_block}"""
 
     def _recommend_chapter_type_dist(self, chapter_count: int) -> dict[str, int]:
         """按默认比例把 chapter_count 分配到 5 类 chapter_type。"""

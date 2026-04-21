@@ -278,6 +278,110 @@ class TestProposeVolumeOutline:
         nums = [c["chapter_number"] for c in proposal.chapter_outlines]
         assert nums == [1, 2, 3, 4, 5]
 
+    # ------------------------------------------------------------------
+    # Phase 4-E3: hints 参数向后兼容 + prompt 注入
+    # ------------------------------------------------------------------
+
+    def test_hints_injects_author_requirements_section(self):
+        """When hints is a non-empty string, the prompt gets an appended
+        '### 作者额外要求' block carrying the hint text verbatim."""
+        mock_llm = MagicMock()
+        payload = _make_full_propose_payload(1, 3)
+        mock_llm.chat.return_value = _llm_response(payload)
+
+        director = VolumeDirector(llm=mock_llm)
+        novel = _make_novel_data(start_ch=1, end_ch=3)
+
+        director.propose_volume_outline(
+            novel=novel, volume_number=1, hints="作者要更悲壮"
+        )
+
+        user_prompt = mock_llm.chat.call_args.kwargs["messages"][1]["content"]
+        assert "### 作者额外要求" in user_prompt
+        assert "作者要更悲壮" in user_prompt
+
+    def test_no_hints_backward_compatible(self):
+        """Default call (no hints kwarg) must NOT inject the hints block.
+
+        This guards the Phase 4 backward compatibility contract: existing
+        pipeline/test code paths behave identically before and after the
+        ``hints`` parameter was added.
+        """
+        mock_llm = MagicMock()
+        payload = _make_full_propose_payload(1, 3)
+        mock_llm.chat.return_value = _llm_response(payload)
+
+        director = VolumeDirector(llm=mock_llm)
+        novel = _make_novel_data(start_ch=1, end_ch=3)
+
+        director.propose_volume_outline(novel=novel, volume_number=1)
+
+        user_prompt = mock_llm.chat.call_args.kwargs["messages"][1]["content"]
+        assert "### 作者额外要求" not in user_prompt
+
+    def test_empty_hints_string_does_not_inject(self):
+        """hints='' must behave identically to hints kwarg omitted."""
+        mock_llm = MagicMock()
+        payload = _make_full_propose_payload(1, 3)
+        mock_llm.chat.return_value = _llm_response(payload)
+
+        director = VolumeDirector(llm=mock_llm)
+        novel = _make_novel_data(start_ch=1, end_ch=3)
+
+        director.propose_volume_outline(
+            novel=novel, volume_number=1, hints=""
+        )
+
+        user_prompt = mock_llm.chat.call_args.kwargs["messages"][1]["content"]
+        assert "### 作者额外要求" not in user_prompt
+
+    def test_whitespace_only_hints_does_not_inject(self):
+        """Pure whitespace hints is treated as empty — no block appended."""
+        mock_llm = MagicMock()
+        payload = _make_full_propose_payload(1, 3)
+        mock_llm.chat.return_value = _llm_response(payload)
+
+        director = VolumeDirector(llm=mock_llm)
+        novel = _make_novel_data(start_ch=1, end_ch=3)
+
+        director.propose_volume_outline(
+            novel=novel, volume_number=1, hints="   \n  \t  "
+        )
+
+        user_prompt = mock_llm.chat.call_args.kwargs["messages"][1]["content"]
+        assert "### 作者额外要求" not in user_prompt
+
+    def test_hints_coexists_with_previous_settlement(self):
+        """Both previous_settlement and hints reach the prompt together."""
+        mock_llm = MagicMock()
+        payload = _make_full_propose_payload(6, 10)
+        mock_llm.chat.return_value = _llm_response(payload)
+
+        director = VolumeDirector(llm=mock_llm)
+        novel = _make_novel_data(
+            volume_number=2, start_ch=6, end_ch=10, title="第二卷"
+        )
+        prev = {
+            "unfulfilled_foreshadowings": [{"description": "师父留下的谜团"}],
+            "pending_debts": [],
+            "next_volume_hook": "神秘势力登场",
+        }
+
+        director.propose_volume_outline(
+            novel=novel,
+            volume_number=2,
+            previous_settlement=prev,
+            hints="节奏要更紧凑",
+        )
+
+        user_prompt = mock_llm.chat.call_args.kwargs["messages"][1]["content"]
+        # previous_settlement still injected
+        assert "师父留下的谜团" in user_prompt
+        assert "神秘势力登场" in user_prompt
+        # hints also injected
+        assert "### 作者额外要求" in user_prompt
+        assert "节奏要更紧凑" in user_prompt
+
 
 # ---------------------------------------------------------------------------
 # Proposal.accept

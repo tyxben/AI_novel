@@ -122,10 +122,12 @@ class TestToolDefinitions:
         #                          batch_edit_settings, get_foreshadowing_graph, get_health_dashboard)
         # + 4 self-refine/reflexion (verify_chapter, critique_chapter, refine_chapter, get_reflexion_log)
         # + 1 Reviewer alias (review_chapter) — Phase 2-β
-        # = 31
+        # + 11 Phase 4 三段式 (9 propose_* + accept_proposal + regenerate_section)
+        # = 42
         # NOTE: "rebuild_narrative" 已随 NarrativeRebuildService 移除
-        # (architecture-rework-2026 Phase 0)；Phase 2-β 新增 review_chapter 别名，总数 31。
-        assert len(TOOLS) == 31
+        # (architecture-rework-2026 Phase 0)；Phase 2-β 新增 review_chapter 别名；
+        # Phase 4-E3 新增 11 个三段式工具（architecture-rework-2026 Phase 4），总数 42。
+        assert len(TOOLS) == 42
 
     def test_tools_description_includes_new(self):
         desc = _tools_description()
