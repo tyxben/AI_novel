@@ -445,8 +445,20 @@ class NovelToolFacade:
         meta["last_accepted_at"] = datetime.now(timezone.utc).isoformat()
         meta["last_accepted_type"] = proposal_type
 
-        # 持久化
-        self._fm.save_novel(novel_id, novel_data)
+        # 持久化 — save 失败不得传播异常破坏 AcceptResult 契约。
+        # 内存副本虽已被 _apply_proposal 修改，但 novel_data 是 load 出来的
+        # in-memory 副本，未 save → 下次 accept 会重新 load 干净状态。
+        try:
+            self._fm.save_novel(novel_id, novel_data)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("accept_proposal[%s] save_novel failed: %s",
+                          proposal_type, exc)
+            return AcceptResult(
+                status="failed",
+                proposal_id=proposal_id,
+                proposal_type=proposal_type,
+                error=f"save failed: {exc}",
+            )
 
         return AcceptResult(
             status="accepted",
@@ -571,10 +583,15 @@ class NovelToolFacade:
                 current_spine=current_spine,
                 hints=hints or "",
             )
+            if not hasattr(proposal, "to_dict"):
+                raise TypeError(
+                    "regenerate_section returned non-proposal: "
+                    f"{type(proposal).__name__}"
+                )
             return ProposalEnvelope(
                 proposal_type=section,
                 project_path=project_path,
-                data=proposal.to_dict() if hasattr(proposal, "to_dict") else {},
+                data=proposal.to_dict(),
             )
 
         return self._wrap_propose(project_path, section, _run_pa)
@@ -624,6 +641,11 @@ class NovelToolFacade:
 
         try:
             return runner(novel_data)
+        except TypeError:
+            # TypeError 代表工具层/Agent 契约错误（如 regenerate 返回非
+            # Proposal 对象），属于编程 bug 而非业务失败，必须向上传播让
+            # caller 能在测试/CI 里直接暴露。
+            raise
         except Exception as exc:  # noqa: BLE001
             log.exception("propose_%s failed: %s", proposal_type, exc)
             return ProposalEnvelope(
@@ -703,13 +725,25 @@ class NovelToolFacade:
             if not isinstance(raw_chars, list):
                 raise ValueError("characters.data.characters 必须是 list")
             profiles: list[CharacterProfile] = []
-            for c in raw_chars:
+            invalid: list[str] = []
+            total = len(raw_chars)
+            for idx, c in enumerate(raw_chars):
                 if not isinstance(c, dict):
+                    invalid.append(
+                        f"[{idx}] 非 dict ({type(c).__name__})"
+                    )
                     continue
                 try:
                     profiles.append(CharacterProfile(**c))
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("跳过无效 character dict: %s", exc)
+                    invalid.append(f"[{idx}] {exc}")
+            if invalid:
+                # 严格模式：任一 profile 非法即整批拒绝，避免 accept_into
+                # 覆盖写入时丢失已有角色或落盘残缺集合。
+                raise ValueError(
+                    f"{len(invalid)}/{total} character profiles 非法: "
+                    + "; ".join(invalid)
+                )
             CharactersProposal(characters=profiles).accept_into(novel_data)
             return
 

@@ -628,6 +628,69 @@ class TestAcceptProposal:
         assert len(saved["characters"]) == 1
         assert saved["characters"][0]["name"] == "林辰"
 
+    def test_characters_strict_one_invalid_rejects_batch(self, facade):
+        """H1：任一 profile 非法 → 整批 ValueError，不静默吞 + save。"""
+        novel = _novel_data_stub()
+        # novel 已有 1 个现有角色
+        novel["characters"] = [{"existing": "stays"}]
+        facade._fm.load_novel.return_value = novel
+        good = _make_profile()
+        data = {
+            "characters": [
+                good.model_dump(),
+                {"invalid": "missing required fields"},  # 非法
+            ],
+        }
+        with pytest.raises(ValueError, match="character profiles 非法"):
+            facade.accept_proposal(
+                "workspace/novels/novel_xyz",
+                proposal_id="pid-c",
+                proposal_type="characters",
+                data=data,
+            )
+        # 关键：save 不应被调用——不能因为 1 个非法就把已有角色覆盖写丢
+        facade._fm.save_novel.assert_not_called()
+
+    def test_characters_strict_all_invalid_rejects_batch(self, facade):
+        """H1：全部 profile 非法 → 整批 ValueError，绝不写空 list 抹掉已有角色。"""
+        novel = _novel_data_stub()
+        novel["characters"] = [{"existing": "must_not_be_wiped"}]
+        facade._fm.load_novel.return_value = novel
+        data = {
+            "characters": [
+                {"bad": 1},
+                {"also_bad": 2},
+                "not_even_a_dict",  # 连 dict 都不是
+            ],
+        }
+        with pytest.raises(ValueError, match="3/3 character profiles 非法"):
+            facade.accept_proposal(
+                "workspace/novels/novel_xyz",
+                proposal_id="pid-c",
+                proposal_type="characters",
+                data=data,
+            )
+        facade._fm.save_novel.assert_not_called()
+
+    def test_characters_strict_all_valid_saves_normally(self, facade):
+        """H1 对照：全部合法 → 正常落盘。"""
+        novel = _novel_data_stub()
+        facade._fm.load_novel.return_value = novel
+        profiles = [
+            _make_profile(name="林辰"),
+            _make_profile(name="苏瑶", role="女主"),
+        ]
+        data = {"characters": [p.model_dump() for p in profiles]}
+        result = facade.accept_proposal(
+            "workspace/novels/novel_xyz",
+            proposal_id="pid-c-ok",
+            proposal_type="characters",
+            data=data,
+        )
+        assert result.status == "accepted"
+        _, saved = facade._fm.save_novel.call_args.args
+        assert [c["name"] for c in saved["characters"]] == ["林辰", "苏瑶"]
+
     def test_world_setting_dispatch(self, facade):
         novel = _novel_data_stub()
         facade._fm.load_novel.return_value = novel
@@ -642,7 +705,11 @@ class TestAcceptProposal:
         _, saved = facade._fm.save_novel.call_args.args
         assert saved["world_setting"]["era"] == "修仙时代"
 
-    def test_story_arcs_dispatch_appends(self, facade):
+    def test_story_arcs_dispatch_replaces(self, facade):
+        """Phase 4 §4.3：arcs accept 覆盖而非 extend。
+
+        regenerate 后的二次 accept 必须替换旧 arcs，否则 regenerate 毫无意义。
+        """
         novel = _novel_data_stub()
         novel["story_arcs"] = [{"arc_id": "arc_0"}]
         facade._fm.load_novel.return_value = novel
@@ -654,10 +721,10 @@ class TestAcceptProposal:
         )
         assert result.status == "accepted"
         _, saved = facade._fm.save_novel.call_args.args
-        # ArcsProposal.accept_into 用 extend —— 原有 arc_0 应保留
         arc_ids = [a["arc_id"] for a in saved["story_arcs"]]
-        assert "arc_0" in arc_ids
-        assert "arc_1" in arc_ids
+        # 覆盖语义：arc_0 应被替换为新 arcs
+        assert arc_ids == ["arc_1", "arc_2"]
+        assert "arc_0" not in arc_ids
 
     def test_volume_breakdown_dispatch(self, facade):
         novel = _novel_data_stub(with_outline=True)
@@ -814,6 +881,23 @@ class TestAcceptProposal:
                 proposal_type="world_setting",
                 data={"world_setting": {"era": ""}},  # min_length=1 — will fail
             )
+
+    def test_save_novel_failure_returns_failed_status(self, facade):
+        """M1：save_novel 抛异常不得传播，返回 AcceptResult(status="failed")。"""
+        novel = _novel_data_stub()
+        facade._fm.load_novel.return_value = novel
+        facade._fm.save_novel.side_effect = OSError("disk full")
+        result = facade.accept_proposal(
+            "workspace/novels/novel_xyz",
+            proposal_id="pid-disk",
+            proposal_type="synopsis",
+            data={"synopsis": "x", "main_storyline": {}},
+        )
+        assert result.status == "failed"
+        assert result.proposal_id == "pid-disk"
+        assert result.proposal_type == "synopsis"
+        assert result.error and "disk full" in result.error
+        assert result.error.startswith("save failed:")
 
 
 # ---------------------------------------------------------------------------
@@ -986,6 +1070,24 @@ class TestRegenerateSection:
                 section="bogus",
                 hints="",
             )
+
+    def test_regenerate_non_proposal_return_raises_type_error(self, facade):
+        """M2：ProjectArchitect.regenerate_section 返回非 Proposal（如 dict）
+        必须抛 TypeError 暴露契约错误，不能鸭子类型兜底写空 data。"""
+        facade._fm.load_novel.return_value = _novel_data_stub()
+        with patch(
+            "src.novel.services.tool_facade.ProjectArchitect"
+        ) as pa_cls:
+            # 返回纯 dict —— 无 .to_dict() 方法
+            pa_cls.return_value.regenerate_section.return_value = {
+                "fake": "not a proposal"
+            }
+            with pytest.raises(TypeError, match="non-proposal"):
+                facade.regenerate_section(
+                    "workspace/novels/novel_xyz",
+                    section="synopsis",
+                    hints="",
+                )
 
     def test_project_missing_returns_envelope_with_errors(self, facade):
         facade._fm.load_novel.return_value = None

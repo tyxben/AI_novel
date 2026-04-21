@@ -751,11 +751,31 @@ def _load_proposal_file(path: str) -> dict:
     Accepts either an envelope dict (``{proposal_id, data, ...}``) or a
     raw ``data`` dict (in which case the caller supplied ``--proposal-id``
     and ``--type`` separately).
+
+    Raises ``click.UsageError`` if the file is not valid JSON or is not
+    a JSON object (dict). Envelope-schema validation (``proposal_id`` /
+    ``proposal_type`` present) is performed by the caller — raw ``data``
+    files are allowed and have no such fields.
     """
     import json as _json
 
-    with open(path, encoding="utf-8") as f:
-        return _json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = _json.load(f)
+    except _json.JSONDecodeError as exc:
+        raise click.UsageError(
+            f"proposal file 不是合法 JSON: {path} ({exc})"
+        ) from exc
+    except OSError as exc:
+        raise click.UsageError(
+            f"proposal file 读取失败: {path} ({exc})"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise click.UsageError(
+            f"proposal file 必须是 JSON object (dict)，实际为 "
+            f"{type(payload).__name__}: {path}"
+        )
+    return payload
 
 
 @novel.group("propose")
@@ -1111,9 +1131,20 @@ def novel_accept_cmd(
 
         if proposal_file:
             envelope = _load_proposal_file(proposal_file)
-            pid = envelope.get("proposal_id") or proposal_id or ""
-            ptype = envelope.get("proposal_type") or proposal_type or ""
+            # envelope 必须携带 proposal_id + proposal_type（即使命令行也
+            # 传了 --proposal-id/--type，envelope 是 source-of-truth；缺
+            # 字段视为 schema 破损，直接拒绝而非静默回退）
+            if "proposal_id" not in envelope or "proposal_type" not in envelope:
+                raise click.UsageError(
+                    "proposal file 缺少 proposal_id 或 proposal_type 字段"
+                )
+            pid = str(envelope.get("proposal_id") or "")
+            ptype = str(envelope.get("proposal_type") or "")
             payload_data = envelope.get("data") or {}
+            if not isinstance(payload_data, dict):
+                raise click.UsageError(
+                    "proposal file 的 data 字段必须是 JSON object"
+                )
         elif proposal_id and proposal_type and data_file:
             pid = proposal_id
             ptype = proposal_type
@@ -1126,14 +1157,14 @@ def novel_accept_cmd(
             raise click.Abort()
 
         if not pid or not ptype:
-            console.print("[red]缺少 proposal_id 或 proposal_type[/]")
-            raise click.Abort()
+            raise click.UsageError("缺少 proposal_id 或 proposal_type")
 
         workspace = _novel_workspace_from_project(project_path)
         facade = _make_facade(workspace)
         result = facade.accept_proposal(project_path, pid, ptype, payload_data)
         render_accept_result(result, output=output, console=console)
-    except click.Abort:
+    except (click.Abort, click.UsageError):
+        # UsageError 负责自渲染（show()）；Abort 上层自处理。都不要吞。
         raise
     except Exception as e:
         log.error("accept 失败: %s", e)

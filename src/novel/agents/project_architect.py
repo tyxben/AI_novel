@@ -209,13 +209,14 @@ class ArcsProposal:
         return {"arcs": list(self.arcs)}
 
     def accept_into(self, novel: Any) -> Any:
+        # Phase 4 §4.3：arcs 直接覆盖（与 synopsis / outline 同等语义），
+        # 不再 extend——regenerate 后二次 accept 必须替换旧 arcs。
         arcs_list = list(self.arcs)
         if isinstance(novel, dict):
-            novel.setdefault("story_arcs", []).extend(arcs_list)
+            novel["story_arcs"] = arcs_list
         else:
-            existing = getattr(novel, "story_arcs", None) or []
             try:
-                setattr(novel, "story_arcs", list(existing) + arcs_list)
+                setattr(novel, "story_arcs", arcs_list)
             except Exception:  # pragma: no cover
                 pass
         return novel

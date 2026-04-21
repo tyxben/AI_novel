@@ -528,6 +528,109 @@ class TestAcceptCmd:
         assert result.exit_code != 0
         facade_mock.accept_proposal.assert_not_called()
 
+    def test_accept_proposal_file_not_json_aborts(
+        self, runner, facade_mock, tmp_path
+    ):
+        """L2：proposal 文件不是合法 JSON → UsageError 非零退出。"""
+        project = _make_project(tmp_path)
+        bad = tmp_path / "bad.json"
+        bad.write_text("not a json blob {", encoding="utf-8")
+        result = runner.invoke(
+            cli,
+            [
+                "novel", "accept", str(project),
+                "--proposal-file", str(bad),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "不是合法 JSON" in result.output
+        facade_mock.accept_proposal.assert_not_called()
+
+    def test_accept_proposal_file_is_list_aborts(
+        self, runner, facade_mock, tmp_path
+    ):
+        """L2：proposal 文件 JSON 但不是 object（是 list）→ UsageError。"""
+        project = _make_project(tmp_path)
+        bad = tmp_path / "list.json"
+        bad.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        result = runner.invoke(
+            cli,
+            [
+                "novel", "accept", str(project),
+                "--proposal-file", str(bad),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "JSON object" in result.output or "dict" in result.output
+        facade_mock.accept_proposal.assert_not_called()
+
+    def test_accept_proposal_file_missing_proposal_id_aborts(
+        self, runner, facade_mock, tmp_path
+    ):
+        """L2：proposal file 缺 proposal_id 字段 → UsageError。"""
+        project = _make_project(tmp_path)
+        bad = tmp_path / "no_pid.json"
+        bad.write_text(
+            json.dumps({"proposal_type": "synopsis", "data": {}}),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "novel", "accept", str(project),
+                "--proposal-file", str(bad),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "proposal_id" in result.output
+        facade_mock.accept_proposal.assert_not_called()
+
+    def test_accept_proposal_file_missing_proposal_type_aborts(
+        self, runner, facade_mock, tmp_path
+    ):
+        """L2：proposal file 缺 proposal_type 字段 → UsageError。"""
+        project = _make_project(tmp_path)
+        bad = tmp_path / "no_ptype.json"
+        bad.write_text(
+            json.dumps({"proposal_id": "abc", "data": {}}),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "novel", "accept", str(project),
+                "--proposal-file", str(bad),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "proposal_type" in result.output
+        facade_mock.accept_proposal.assert_not_called()
+
+    def test_accept_proposal_file_data_not_dict_aborts(
+        self, runner, facade_mock, tmp_path
+    ):
+        """L2：proposal file 的 data 字段不是 dict → UsageError。"""
+        project = _make_project(tmp_path)
+        bad = tmp_path / "bad_data.json"
+        bad.write_text(
+            json.dumps({
+                "proposal_id": "abc",
+                "proposal_type": "synopsis",
+                "data": [1, 2, 3],
+            }),
+            encoding="utf-8",
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "novel", "accept", str(project),
+                "--proposal-file", str(bad),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "JSON object" in result.output or "data" in result.output
+        facade_mock.accept_proposal.assert_not_called()
+
     def test_accept_output_json(self, runner, facade_mock, tmp_path):
         project = _make_project(tmp_path)
         envelope = {

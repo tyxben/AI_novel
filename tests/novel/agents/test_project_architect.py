@@ -369,11 +369,28 @@ class TestProposeStoryArcs:
             result = arch.propose_story_arcs(meta, synopsis="")
         assert result.arcs == []
 
-    def test_accept_into_dict(self):
+    def test_accept_into_dict_replaces(self):
+        """Phase 4 §4.3：arcs accept_into 覆盖而非 extend。"""
         proposal = ArcsProposal(arcs=[{"arc_id": "a1"}])
         novel: dict = {"story_arcs": [{"arc_id": "a0"}]}
         proposal.accept_into(novel)
-        assert [a["arc_id"] for a in novel["story_arcs"]] == ["a0", "a1"]
+        assert [a["arc_id"] for a in novel["story_arcs"]] == ["a1"]
+
+    def test_accept_into_dict_replaces_empty_with_new(self):
+        """首次 accept（空 story_arcs）正常写入 —— 行为与 extend 路径一致。"""
+        proposal = ArcsProposal(arcs=[{"arc_id": "a1"}, {"arc_id": "a2"}])
+        novel: dict = {}
+        proposal.accept_into(novel)
+        assert [a["arc_id"] for a in novel["story_arcs"]] == ["a1", "a2"]
+
+    def test_accept_into_obj_replaces(self):
+        """对象 novel：setattr 覆盖，不保留旧 story_arcs。"""
+        class _N:
+            story_arcs = [{"arc_id": "old"}]
+
+        n = _N()
+        ArcsProposal(arcs=[{"arc_id": "new"}]).accept_into(n)
+        assert [a["arc_id"] for a in n.story_arcs] == ["new"]
 
 
 # ---------------------------------------------------------------------------
