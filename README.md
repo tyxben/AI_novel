@@ -4,7 +4,8 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.3.0-orange)](https://github.com/tyxben/AI_novel/releases/tag/v1.3.0)
+[![Version](https://img.shields.io/badge/version-v2.0-orange)](https://github.com/tyxben/AI_novel/releases)
+[![Arch](https://img.shields.io/badge/arch-2026--04%20Phase%200--5-blue)](specs/architecture-rework-2026/)
 
 ---
 
@@ -19,44 +20,46 @@
 - **Agent 智能模式** — LangGraph 5 Agent 编排（导演/内容分析/美术总监/配音导演/剪辑师），自动质量评估与重试
 - **省钱模式** — 规则替代 LLM，跳过质量检查，成本降低约 40%
 
-### AI 长篇小说（核心模块）
+### AI 长篇小说（核心模块，2026-04 Phase 0-5 完工）
 
-> 目前已实测生成 **50 万字级**长篇（200 章 × 6 卷），实际产出 14 万字 / 32 章持续推进中。
+> 架构重构 2026 完成：Agent 数量从 15 -> 5、propose/accept/regenerate 三段式工具层、7 维质量评估 + A/B 双向 de-bias。
+> 规划文档见 `specs/architecture-rework-2026/`（README / AUDIT / DESIGN / PHASE4 / PHASE5）。
 
-**v1.3 叙事弧线控制系统** `NEW`
-- **里程碑自动生成** `NEW v1.3` — 进入新卷时 LLM 自动生成 3-5 个叙事里程碑，无需手动配置
-- **里程碑强制控制** `NEW v1.3` — 逾期里程碑自动注入 PlotPlanner + Writer 约束，不可忽略，确保主线推进
-- **陈旧大纲检测** `NEW v1.3` — 自动识别引用过时章节号 / 前章偏离的大纲，触发 LLM 重新规划
-- **风格圣经 (StyleBible)** `NEW v1.3` — 项目专属风格锚定：量化指标 + 范例段落 + 反模式，新旧项目均自动生成
-- **StyleKeeper 风格门禁** `NEW v1.3` — 每章零 LLM 成本量化检查（句长/对话比/感官密度），偏离时触发重写
-- **卷进度预算** `NEW v1.3` — MilestoneTracker 追踪卷内完成度，VolumeSettlement 卷末收束 + 逾期里程碑自动继承
+**5 Agent 新架构（替代旧 9 Agent）**
+- **ProjectArchitect** — 项目骨架 propose/accept/regenerate（synopsis / main_outline / characters / world / arcs / volume_breakdown）
+- **VolumeDirector** — 单卷细纲 + 卷结算
+- **ChapterPlanner** — 单章 brief（实时消费 LedgerStore）
+- **Writer** — 正文生成（2000-3000 字，one-shot + ReAct 双模式）
+- **Reviewer** — 单入口联合审稿（quality + consistency + style 三维度，不打分只标问题，作者拍板）
 
-**v1.2 全书状态监控**
-- **GlobalDirector** — 持续监控卷进度/阶段/活跃弧线，自动预警场景重复并强制切换
-- **CharacterArcTracker** — 自动识别角色成长阶段，约束行为与成长一致，长期未出场自动预警
-- **HookGenerator** — 评分弱结尾并 LLM 重写为强悬念（问句/突发/打断/省略）
-- **死亡角色检测** — 自动识别已死亡角色，禁止作为活人出现
+**Phase 4 三段式工具层** — propose / accept / regenerate 三操作覆盖 9 类实体，三层共享 `NovelToolFacade` 业务入口：
+- **MCP**：`novel_propose_*` / `novel_accept_proposal` / `novel_regenerate_section`（AI 助手直接调用）
+- **CLI**：`novel propose <sub>` / `novel accept` / `novel regenerate`
+- **agent_chat**：工具注册同步暴露
+- Web UI 保留传统 `pipeline.create_novel` 入口（主动设计决策，不强套审批语义）
+
+**Phase 5 质量评估模块** — 7 维度仪表盘，每章约 3 次 LLM judge call：
+- 伏笔兑现率（**唯一硬门禁 >= 60%**，纯规则） / AI 味指数（纯规则）
+- 叙事流畅 / 角色一致 / 情节推进 / 对话自然 / 章节勾连（LLM-as-judge + 规则混合）
+- A/B 双向强制 de-bias（gpt-4o-mini position bias 实测 76.5%）
+- pytest 基线：4564 passed / 21 skipped
+
+**叙事控制（v1.3 沿用）**
+- **MilestoneTracker** + **VolumeSettlement** — 卷级里程碑 + 卷末收束 + 逾期里程碑跨卷继承
+- **StyleBible** — 项目专属风格锚定（量化指标 + 范例段落 + 反模式）
+- **陈旧大纲检测** — 自动识别引用过时章节号的大纲，触发重新规划
 - **章节衔接硬约束** — 首场景强制注入衔接规则，禁止跳时间/空间/事件
-- **内容过滤器** — 自动过滤系统 UI 泄漏（【检测到】/忠诚度+8）
+- **死亡角色检测** — 自动识别已死亡角色，禁止作为活人出现
+- **内容过滤器** — 自动过滤系统 UI 泄漏（【检测到】/ 忠诚度+8）
 
-**9 Agent 协作创作**
-- **NovelDirector** 总导演 — 三层大纲（幕/卷/章） + 超长篇分卷按需生成
-- **WorldBuilder** 世界观 + **CharacterDesigner** 角色设计 — 自动生成力量体系/社会结构/角色档案/关系网
-- **PlotPlanner** 情节规划 — 场景分解 + 节奏设计 + 里程碑/债务/弧线约束注入
-- **Writer** 写手 — 2000-3000 字/章，支持 one-shot 和 ReAct 双模式，反 AI 味指令
-- **ConsistencyChecker** — Chroma 向量语义检查（每章）+ LLM 深度检查（每9章）
-- **StyleKeeper** + **QualityReviewer** — 风格门禁 + 质量评审，自动重写不合格章节
-- **FeedbackAnalyzer** — 读者反馈影响范围分析 + 逐章重写
-
-**叙事引擎**
-- **ContinuityService** — 每章写前聚合上下文（角色状态/叙事债务/弧线/伏笔/禁止断裂项）
-- **ObligationTracker** — 未解决线索追踪 + 紧急度自动升级 + 卷末强制收束
-- **向量语义一致性** — Chroma 向量检索，自动检测角色复活/失踪/事件矛盾
+**叙事状态引擎**
+- **LedgerStore** — 统一账本（伏笔 / 叙事债务 / 角色状态），ChapterPlanner 实时消费
+- **ContinuityService** — 每章写前聚合上下文（角色状态 / 叙事债务 / 活跃弧线 / 上章钩子 / 禁止断裂项）
+- **向量语义一致性** — Chroma 检索，自动检测角色复活 / 失踪 / 事件矛盾；BM25 作为 fallback
 - **Agent Chat 会话记忆** — 自动恢复对话历史 + 工作记忆注入
 - **ReAct 推理 + Prompt Registry** — Writer 工具链推理 + DB 管理提示词版本
-- **两段式编排** — dynamic_outline 写前修订 + state_writeback 写后回写
-- **LLM 分阶段配置** — 大纲用 GPT-4、写作用 DeepSeek，按阶段选配最优模型
-- **读者反馈系统** — 分析反馈 → 影响范围 → 自动重写受影响章节
+- **LLM 分阶段配置** — 大纲用 GPT-4、写作用 DeepSeek，按阶段选最优模型
+- **读者反馈** — `pipeline.apply_feedback` 一键分析 + 逐章重写
 - **风格预设** — 玄幻爽文 / 都市 / 武侠 / 仙侠 / 文学 / 轻小说 6 大类
 
 ### 平台能力
@@ -164,77 +167,72 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
 | 问题 | 解决方案 | 模块 |
 |------|---------|------|
 | 主线散漫，写到后面忘了核心冲突 | 卷级里程碑 + 逾期强制推进 | MilestoneTracker + 强制约束注入 |
-| 角色前后矛盾（死人复活、性格突变） | 向量语义一致性检查 + 角色状态快照 | ConsistencyChecker + StructuredDB |
-| 风格忽高忽低，越写越像 AI | 量化风格门禁 + 项目专属风格圣经 | StyleKeeper + StyleBible |
-| 伏笔埋了不收，承诺了不兑现 | 叙事债务追踪 + 紧急度自动升级 | ObligationTracker |
-| 大纲越写越旧，引用过时章节 | 陈旧大纲检测 + 自动重新规划 | _is_stale_outline |
-| 卷末收不住，线索悬空 | 卷末收束模式 + 里程碑继承 | VolumeSettlement |
+| 角色前后矛盾（死人复活、性格突变） | 向量语义一致性检查 + 角色状态快照 | Reviewer (consistency) + LedgerStore |
+| 风格忽高忽低，越写越像 AI | 量化风格对标 + 项目专属风格圣经 | Reviewer (style) + StyleBible |
+| 伏笔埋了不收，承诺了不兑现 | 叙事债务追踪 + 伏笔兑现率硬门禁 | LedgerStore + Phase 5 foreshadow_payoff |
+| 大纲越写越旧，引用过时章节 | 陈旧大纲检测 + VolumeDirector 重新规划 | _is_stale_outline |
+| 卷末收不住，线索悬空 | 卷末收束模式 + 里程碑继承 | VolumeDirector.settle_volume |
 | 章与章之间断裂跳跃 | 连续性摘要 + 首场景衔接硬约束 | ContinuityService |
 
-### 9 个专职 Agent
+### 5 个专职 Agent（2026-04 重构完工）
 
 | Agent | 职责 | 关键能力 |
 |-------|------|---------|
-| **NovelDirector** 总导演 | 三层大纲 + 里程碑生成 | 题材→模板映射，超长篇分卷按需生成，卷级里程碑自动创建 |
-| **WorldBuilder** 世界观构建 | 时代/地域/力量体系设定 | 自动生成专有名词和世界规则 |
-| **CharacterDesigner** 角色设计 | 角色档案 + 关系网 | 性格标签、说话风格、成长弧线 |
-| **PlotPlanner** 情节规划 | 场景分解 + 节奏设计 | 张力曲线 + 里程碑/债务/弧线约束注入 |
-| **Writer** 写手 | 逐场景生成正文 | 2000-3000 字/章，one-shot / ReAct 双模式，反 AI 味指令 |
-| **ConsistencyChecker** 一致性检查 | 矛盾检测 | Chroma 向量检查（每章） + LLM 深度检查（每9章） |
-| **StyleKeeper** 风格守护 | 风格门禁 | 零 LLM 成本量化检查 + StyleBible 风格圣经对标 |
-| **QualityReviewer** 质量评审 | 综合质量判断 | 规则硬指标 + LLM 打分，不合格自动重写 |
-| **FeedbackAnalyzer** 反馈分析 | 读者反馈处理 | 影响范围分析 + 逐章重写指令 |
+| **ProjectArchitect** 项目架构师 | 骨架 propose/accept/regenerate | synopsis / main_outline / characters / world / arcs / volume_breakdown 全部支持三段式；覆盖原 NovelDirector + WorldBuilder + CharacterDesigner |
+| **VolumeDirector** 分卷导演 | 单卷细纲 + 卷结算 | 单卷 N 章细纲 propose/accept；卷末 VolumeSettlement 收束 + 逾期里程碑跨卷继承 |
+| **ChapterPlanner** 章节规划 | 单章 brief 实时生成 | 实时消费 LedgerStore（伏笔 / 叙事债务 / 角色状态），生成本章主冲突、兑现、伏笔 |
+| **Writer** 写手 | 正文生成 | 2000-3000 字/章，one-shot / ReAct 双模式，反 AI 味指令，continuity_brief 注入 |
+| **Reviewer** 单入口审稿 | quality + consistency + style 联合审稿 | 三维度一次报告，不打分只标问题 — 作者拍板是否 refine（替代原 ConsistencyChecker + StyleKeeper + QualityReviewer） |
+
+> 旧架构的 NovelDirector / WorldBuilder / CharacterDesigner / PlotPlanner / ConsistencyChecker / StyleKeeper / QualityReviewer / FeedbackAnalyzer 全部合并或下放。
+> FeedbackAnalyzer 逻辑下放到 `pipeline.apply_feedback` 直接 LLM 调用；NovelDirector 仅保留 `plan_next_chapter` / `generate_volume_outline` / `generate_volume_milestones` 三个卷级工具方法。
 
 ### 创作流程
 
 ```
 输入(题材/主题/字数)
   ↓
-┌─────────── 初始化阶段 ───────────────────┐
-│ NovelDirector → 三层大纲(幕/卷/章)       │
-│ WorldBuilder  → 世界观设定               │
-│ CharacterDesigner → 角色档案 + 关系网    │
-│ StyleBibleGenerator → 风格圣经           │
-└──────────────────────────────────────────┘
+┌─────────── 立项阶段（ProjectArchitect）──────────────┐
+│ propose synopsis     → 作者审阅 → accept            │
+│ propose main_outline → 作者审阅 → accept            │
+│ propose characters   → 作者审阅 → accept            │
+│ propose world        → 作者审阅 → accept            │
+│ propose arcs         → 作者审阅 → accept            │
+│ propose volume_breakdown → 作者审阅 → accept        │
+│ StyleBibleGenerator → 风格圣经                      │
+└──────────────────────────────────────────────────────┘
   ↓
-┌─────────── 逐章生成循环 ─────────────────┐
-│                                          │
-│  ┌─ 写前准备 ──────────────────────────┐ │
-│  │ 陈旧大纲检测 → 重新规划(如需)       │ │
-│  │ ContinuityService → 连续性摘要      │ │
-│  │ MilestoneTracker → 卷进度预算       │ │
-│  │ ObligationTracker → 叙事债务摘要    │ │
-│  │ GlobalDirector → 全书节奏指导       │ │
-│  │ 里程碑强制约束(如逾期) → 注入       │ │
-│  └─────────────────────────────────────┘ │
-│              ↓                            │
-│  PlotPlanner → 场景分解(含约束)          │
-│              ↓                            │
-│  Writer → 正文生成(2000-3000字)          │
-│              ↓                            │
-│  ┌─ 质量检查(并行) ───────────────────┐  │
-│  │ ConsistencyChecker (向量一致性)     │  │
-│  │ StyleKeeper (风格门禁)             │  │
-│  └────────────────────────────────────┘  │
-│              ↓                            │
-│  QualityReviewer → 综合评审              │
-│      ↓ 不合格 → Writer 重写(最多3次)     │
-│      ↓ 合格                              │
-│  ┌─ 写后回写 ──────────────────────────┐ │
-│  │ 角色状态快照 → StructuredDB         │ │
-│  │ 章节摘要 → Chroma 向量库            │ │
-│  │ 里程碑完成检查 → 标记完成/逾期      │ │
-│  │ 叙事债务提取 → ObligationTracker    │ │
-│  └─────────────────────────────────────┘ │
-│                                          │
-│  [卷末] VolumeSettlement → 收束 + 继承   │
-│  [新卷] 自动生成新卷大纲 + 里程碑        │
-└──────────────────────────────────────────┘
+┌─────────── 逐章生成循环 ─────────────────────────────┐
+│                                                      │
+│  ┌─ 写前准备 ───────────────────────────────────┐    │
+│  │ 陈旧大纲检测 → VolumeDirector 重新规划(如需) │    │
+│  │ ContinuityService → 连续性摘要              │    │
+│  │ MilestoneTracker → 卷进度预算               │    │
+│  │ LedgerStore → 伏笔 / 叙事债务 / 角色状态    │    │
+│  │ 里程碑强制约束(如逾期) → 注入                │    │
+│  └──────────────────────────────────────────────┘    │
+│              ↓                                        │
+│  ChapterPlanner → propose_chapter_brief              │
+│              ↓                                        │
+│  Writer → 正文生成(2000-3000字，one-shot / ReAct)    │
+│              ↓                                        │
+│  Reviewer → quality + consistency + style 联合报告   │
+│      ↓ 作者拍板（不强制重写）                         │
+│  ┌─ 写后回写 ───────────────────────────────────┐    │
+│  │ 角色状态快照 → LedgerStore                  │    │
+│  │ 章节摘要 → Chroma 向量库                    │    │
+│  │ 里程碑完成检查 → 标记完成/逾期               │    │
+│  │ 叙事债务提取 → LedgerStore                  │    │
+│  └──────────────────────────────────────────────┘    │
+│                                                      │
+│  [卷末] VolumeDirector.settle_volume → 收束 + 继承   │
+│  [新卷] VolumeDirector.propose_volume_outline        │
+└──────────────────────────────────────────────────────┘
   ↓
 完整小说(10-100万字)
 ```
 
-### 叙事控制系统 (v1.3)
+### 叙事控制系统（v1.3 沿用）
 
 **卷进度预算** — 确保每卷的核心事件按时完成：
 
@@ -245,7 +243,7 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
     ↓
 进度健康度: on_track / behind_schedule / critical
     ↓ critical
-强制约束注入 PlotPlanner + Writer → 必须推进逾期里程碑
+强制约束注入 ChapterPlanner + Writer → 必须推进逾期里程碑
     ↓
 卷末收束 → 未完成的 critical 里程碑自动继承到下一卷
 ```
@@ -260,7 +258,7 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
 | anti_patterns | 禁用的 AI 味表达列表 |
 | volume_overrides | 可选的分卷风格微调 |
 
-新项目由 LLM 生成，旧项目从已有章节纯文本分析自动迁移。
+新项目由 LLM 生成，旧项目从已有章节纯文本分析自动迁移。Reviewer 把 StyleBible 作为风格维度的对比锚点。
 
 ### 叙事状态管理
 
@@ -269,13 +267,12 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
 | 数据源 | 注入内容 |
 |--------|---------|
 | 上章钩子 | 必须承接的悬念、约定、行动 |
-| 叙事债务 (ObligationTracker) | 未了结线索 + 紧急度 |
-| 角色状态 (StructuredDB) | 各角色当前位置、状态、目标 |
+| 叙事债务 (LedgerStore) | 未了结线索 + 紧急度 |
+| 角色状态 (LedgerStore) | 各角色当前位置、状态、目标 |
 | 故事弧线 (StoryUnit) | 当前弧线阶段和剩余章数 |
 | 卷进度预算 (MilestoneTracker) | 里程碑完成度 + 健康状态 |
 | 风格圣经 (StyleBible) | 量化风格目标 + 分卷覆盖 |
 | 章节任务书 (chapter_brief) | 本章主冲突、兑现、伏笔 |
-| 全书导演指导 (GlobalDirector) | 节奏预警 + 场景切换要求 |
 
 每章生成后，自动提取角色快照、索引章节摘要到向量库、检查里程碑完成度，形成闭环。
 
@@ -285,13 +282,12 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
 
 | 策略 | 节省方式 |
 |------|---------|
-| 向量一致性检查（每章） | Chroma 语义检索 + 规则矛盾检测，零 LLM |
-| LLM 深度一致性（每9章） | 事实提取 + 三层矛盾检测 + LLM 裁决 |
-| StyleKeeper 风格门禁 | 纯文本量化分析，零 LLM |
-| LLM 打分（每5章 + 末章） | budget_mode 下跳过中间章节 |
+| 向量一致性检查（每章） | Chroma 语义检索 + 规则矛盾检测，零 LLM；BM25 作为 fallback |
+| Reviewer 单入口 | quality + consistency + style 合并为一次审稿调用 |
 | 章节摘要压缩 | ChapterDigest 规则压缩 ~500 字后再送 LLM |
 | 里程碑验证 | 优先关键词匹配（免费），仅 fallback 到 LLM |
 | 超长篇分卷大纲 | 只生成当前卷详细大纲，后续卷按需扩展 |
+| refine_loop 单轮 | 作者审阅后决定是否 refine，不再无限重写 |
 
 ### 使用方式
 
@@ -307,7 +303,7 @@ python -m src.api.app         # FastAPI 后端 (port 8000)
 # 4. 可应用读者反馈、导出 TXT、一键发布到七猫
 ```
 
-**CLI 方式：**
+**CLI 方式（传统一键模式）：**
 
 ```bash
 # 创建小说项目 + 生成前10章
@@ -321,6 +317,32 @@ python main.py novel status workspace/novels/novel_xxx
 
 # 导出为 TXT
 python main.py novel export workspace/novels/novel_xxx
+```
+
+**CLI 方式（Phase 4 三段式，propose / accept / regenerate）：**
+
+```bash
+# 1. 立项 propose（产出草案不落盘）
+python main.py novel propose project-setup "穿越者统一修仙界"
+
+# 2. 骨架逐段 propose + accept
+python main.py novel propose synopsis workspace/novels/novel_xxx
+python main.py novel propose main-outline workspace/novels/novel_xxx
+python main.py novel propose characters workspace/novels/novel_xxx
+python main.py novel propose world-setting workspace/novels/novel_xxx
+python main.py novel propose story-arcs workspace/novels/novel_xxx
+python main.py novel propose volume-breakdown workspace/novels/novel_xxx
+
+# 3. 不满意时 regenerate（带 hints）
+python main.py novel regenerate workspace/novels/novel_xxx \
+  --section synopsis --hints "主角换成女性，弱化修仙比重"
+
+# 4. 单卷细纲 / 章节 brief
+python main.py novel propose volume-outline workspace/novels/novel_xxx --volume 1
+python main.py novel propose chapter-brief workspace/novels/novel_xxx --chapter 5
+
+# 5. 跳过审阅直接落盘（自动化场景）
+python main.py novel propose synopsis workspace/novels/novel_xxx --auto-accept
 ```
 
 **Python API：**
@@ -363,9 +385,18 @@ pipe.get_status(f"workspace/novels/{result['novel_id']}")
 # 启动 MCP Server
 python mcp_server.py
 
-# Claude Code / AI IDE 可直接调用:
-# novel_create, novel_generate_chapters, novel_get_status,
-# novel_read_chapter, novel_apply_feedback, novel_export
+# Claude Code / AI IDE 可直接调用：
+# ---- Phase 4 三段式 ----
+#   novel_propose_project_setup / novel_propose_synopsis / novel_propose_main_outline
+#   novel_propose_characters / novel_propose_world_setting / novel_propose_story_arcs
+#   novel_propose_volume_breakdown / novel_propose_volume_outline / novel_propose_chapter_brief
+#   novel_accept_proposal / novel_regenerate_section
+# ---- 传统工具（保留） ----
+#   novel_create（deprecated，建议用三段式组合替代）
+#   novel_generate_chapters / novel_get_status / novel_list_projects
+#   novel_read_chapter / novel_apply_feedback / novel_export
+# ---- smart-editor ----
+#   novel_edit_setting / novel_analyze_change_impact / novel_get_change_history
 ```
 
 ### 风格预设
@@ -380,6 +411,40 @@ python mcp_server.py
 | 现代仙侠 | `wuxia.modern` | 仙侠 |
 | 现实主义 | `literary.realism` | 群像、悬疑、科幻 |
 | 校园轻小说 | `light_novel.campus` | 轻小说 |
+
+### Phase 5 质量评估
+
+7 维度仪表盘，替代旧的"LLM 打个总分"模式。每章约 3 次 judge LLM call（D1 / D5 单独 + D2 + D6 + D7 合并），全量 5 体裁 x 3 章单次成本 ~$0.03。
+
+| # | 维度 | 方法 | 尺度 | CI 门禁 |
+|---|------|------|------|---------|
+| D1 | 叙事流畅度 | LLM-as-judge | 1-5 | 软观测 |
+| D2 | 角色一致性 | 规则 + LLM | 1-5 + conflict_count | 软观测 |
+| D3 | **伏笔兑现率** | 纯规则（LedgerStore） | 百分比 | **硬门禁 >= 60%** |
+| D4 | **AI 味指数** | 纯规则（StyleProfile + 正则） | 0-100 | 软观测 |
+| D5 | 情节推进度 | LLM-as-judge | 1-5 | 软观测 |
+| D6 | 对话自然度 | 规则 + LLM | 1-5 | 软观测 |
+| D7 | 章节勾连 | 规则 + LLM | 1-5 | 软观测 |
+
+**关键脚本：**
+
+```bash
+# 7 维度全量回归（5 体裁 x 3 章，Gemini free tier 覆盖）
+python scripts/quality_regression.py --chapters 3
+
+# 指定体裁 / judge 模型
+python scripts/quality_regression.py --genres xuanhuan,suspense --judge-model deepseek
+
+# Phase N vs N+1 成对比较（必须双向跑）
+python scripts/quality_ab_phase3_vs_phase4.py
+
+# 双向一致性 de-bias — gpt-4o-mini position bias 实测 76.5%，单向结果不可信
+python scripts/quality_ab_debias.py
+```
+
+**A/B 双向强制：** 2026-04-21 Phase 3 vs Phase 4 首次 A/B 对比实测 gpt-4o-mini 有强 position bias（正向 run 60% P3 / 反向 run 93% P4）。所有 Phase N vs N+1 对比**必须跑双向** + 只报告双向一致的决策。
+
+基线报告路径：`workspace/quality_baselines/phaseN/` + `workspace/quality_reports/`。
 
 ### 项目文件结构
 
@@ -623,11 +688,13 @@ AI_novel/
 │   └── novel/               # AI 长篇小说创作模块
 │       ├── pipeline.py      #   小说创作流水线
 │       ├── config.py        #   小说模块配置
-│       ├── agents/          #   9 个 Agent（导演/世界观/角色/情节/写手/一致性/风格/质量/反馈）
+│       ├── agents/          #   5 个 Agent（ProjectArchitect / VolumeDirector / ChapterPlanner / Writer / Reviewer）
+│       ├── services/tool_facade.py  # Phase 4 三段式唯一业务入口 (NovelToolFacade)
+│       ├── quality/          #   Phase 5 7 维质量评估（dimensions / judge / ab_compare / report）
 │       ├── models/          #   Pydantic 数据模型
 │       ├── storage/         #   存储层（SQLite + NetworkX + Chroma）
 │       ├── tools/           #   BM25 检索(fallback) / 章节摘要 / 质量检查
-│       ├── services/        #   ContinuityService / AgentChat / ObligationTracker / 一致性
+│       ├── services/        #   ContinuityService / AgentChat / LedgerStore / tool_facade / refine_loop
 │       └── templates/       #   风格预设 / 节奏模板 / AI味黑名单
 ├── scripts/                 # 实用脚本（批量生成、七猫发布等）
 ├── input/                   # 输入小说文本
@@ -681,7 +748,7 @@ AI_novel/
 | LLM | OpenAI / DeepSeek / Google Gemini / Ollama |
 | 图片生成 | SiliconFlow / 阿里云万相 / Together.ai / Diffusers (本地 SD) |
 | 视频生成 | 可灵 Kling / 即梦 Seedance / MiniMax 海螺 / OpenAI Sora |
-| 智能编排 | LangGraph — 视频 5 Agent + 小说 9 Agent + ContinuityService 叙事状态驱动 |
+| 智能编排 | LangGraph — 视频 5 Agent + 小说 5 Agent（2026-04 重构）+ NovelToolFacade 三段式工具层 |
 | 视频合成 | FFmpeg（H.265 编码、Ken Burns 特效、字幕烧录） |
 | 日志 | Rich |
 | 配置 | PyYAML |
@@ -763,13 +830,12 @@ elif backend == "xxx":
 ## 更新计划
 
 **已完成：**
-- [x] AI 长篇小说自动创作 — 9 Agent 协作，支持 10-100 万字级别小说生成 + 读者反馈重写
+- [x] 架构重构 2026 Phase 0-5（2026-04 完工） — 15 Agent -> 5 Agent / propose·accept·regenerate 三段式工具层 / 7 维质量评估 + A/B 双向 de-bias
+- [x] Phase 4 三段式工具层 — `NovelToolFacade` 三层共享，MCP + CLI + agent_chat 统一入口
+- [x] Phase 5 质量评估 — 7 维仪表盘（伏笔兑现率硬门禁 + 6 项软观测）+ 跨体裁回归脚本
 - [x] 叙事弧线控制 v1.3 — 里程碑自动生成 + 强制控制 + 陈旧大纲检测 + 风格圣经
-- [x] 全书状态监控 v1.2 — GlobalDirector + CharacterArcTracker + HookGenerator + 死亡检测
-- [x] 叙事状态驱动架构 — ContinuityService + 向量一致性 + Agent Chat 会话记忆
-- [x] 叙事控制层 — ObligationTracker 债务追踪 + VolumeSettlement 卷末收束 + 弧线推进
+- [x] 叙事状态驱动架构 — ContinuityService + LedgerStore 统一账本 + 向量一致性 + Agent Chat 会话记忆
 - [x] ReAct Agent 框架 — Writer ReAct 推理模式 + Prompt Registry 提示词版本管理
-- [x] 两段式章节编排 — dynamic_outline 写前修订 + state_writeback 写后回写
 - [x] 动态视频拼接 — AI 视频片段（可灵/即梦/MiniMax/Sora）替代静态贴图
 - [x] AI 导演模式 — 灵感一键出片，AI 自动编剧 + 制片
 - [x] Web UI 全面升级 — Next.js + FastAPI 创作平台（短视频 + AI 小说 + 设置）
@@ -779,7 +845,7 @@ elif backend == "xxx":
 **计划中：**
 - [ ] 伏笔图谱 — NetworkX 伏笔关系图，自动追踪埋设/回收/遗忘
 - [ ] 多角色语音 — 不同角色使用不同音色
-- [ ] Agent 条件路由 — 根据内容自动选择最优生成策略
+- [ ] Web UI 三段式适配 — 目前 Web UI 走传统 `pipeline.create_novel`，三段式仅 MCP + CLI + agent_chat 可用
 - [ ] 更多 LLM/图片后端 — 持续接入新的 AI 服务
 
 ---
