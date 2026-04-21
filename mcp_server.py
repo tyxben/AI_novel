@@ -110,7 +110,20 @@ def novel_create(
     author_name: str = "",
     target_audience: str = "",
 ) -> dict[str, Any]:
-    """Create a new novel project with outline, world-building, and characters.
+    """[DEPRECATED] Create a novel project in one step (outline + world + characters).
+
+    This tool is retained for backward compatibility and will be removed in a
+    future version. For new integrations, prefer the three-stage interface:
+
+    * ``novel_propose_project_setup`` — propose genre/theme/target_words draft
+    * ``novel_accept_proposal`` — persist the accepted project setup
+    * ``novel_propose_synopsis`` / ``novel_propose_main_outline`` /
+      ``novel_propose_characters`` / ``novel_propose_world_setting`` — compose
+      the rest of the skeleton chunk-by-chunk with review
+
+    The three-stage flow lets the human (or AI assistant) review each draft
+    before it lands in ``novel.json``, whereas ``novel_create`` writes the
+    entire project in one shot.
 
     Args:
         genre: Novel genre (e.g. "玄幻", "都市", "科幻").
@@ -452,6 +465,352 @@ def novel_analyze_change_impact(
         return asdict(result)
     except Exception as e:
         return {"status": "failed", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Three-stage facade (propose / accept / regenerate)
+# ---------------------------------------------------------------------------
+
+_facade_instance = None
+
+
+def _get_facade():
+    """Return a lazily-initialised ``NovelToolFacade`` singleton.
+
+    The facade encapsulates the propose / accept / regenerate business
+    logic shared across MCP, CLI and agent_chat surfaces (Phase 4).
+    """
+    global _facade_instance
+    if _facade_instance is None:
+        # Lazy import: facade pulls in several agents + storage helpers.
+        from src.novel.services.tool_facade import NovelToolFacade
+
+        _facade_instance = NovelToolFacade(workspace=_DEFAULT_WORKSPACE)
+    return _facade_instance
+
+
+@mcp.tool()
+def novel_propose_project_setup(
+    inspiration: str,
+    hints: dict | None = None,
+) -> dict[str, Any]:
+    """Propose a new project setup draft (genre / theme / target_words / style).
+
+    Part of the three-stage interface. The returned proposal is NOT persisted;
+    call ``novel_accept_proposal`` afterwards to write ``novel.json``, or
+    re-call with different ``hints`` if the draft is unsatisfactory.
+
+    Args:
+        inspiration: A one-liner inspiration or premise, e.g.
+            "少年修士逆天改命,重塑仙门秩序".
+        hints: Optional dict overriding inferred fields. Recognised keys:
+            ``genre``, ``target_length_class``, ``target_words``, ``theme``,
+            ``style_name``, ``narrative_template``.
+
+    Returns:
+        ProposalEnvelope dict with ``proposal_id``, ``proposal_type="project_setup"``,
+        ``data`` (the draft), ``decisions`` / ``errors`` / ``warnings``, and
+        ``created_at``. On failure returns ``{"error": str}``.
+    """
+    try:
+        facade = _get_facade()
+        envelope = facade.propose_project_setup(inspiration=inspiration, hints=hints)
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_propose_synopsis(project_path: str) -> dict[str, Any]:
+    """Propose a synopsis draft (story spine + structured main_storyline).
+
+    Part of the three-stage interface. Reads the project's meta from
+    ``novel.json`` and asks ProjectArchitect for a synopsis proposal.
+    Call ``novel_accept_proposal`` to persist, or
+    ``novel_regenerate_section`` with hints to try again.
+
+    Args:
+        project_path: Path to the novel project directory within the
+            configured workspace (e.g. ``workspace/novels/novel_abc``).
+
+    Returns:
+        ProposalEnvelope dict. On failure returns ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.propose_synopsis(str(validated))
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_propose_main_outline(
+    project_path: str,
+    custom_ideas: str | None = None,
+) -> dict[str, Any]:
+    """Propose the three-layer main outline (premise / spine / beat sheet).
+
+    Part of the three-stage interface. Uses ProjectArchitect to build an
+    outline proposal. The proposal includes ``decisions`` from the agent's
+    planning loop, surfaced for observability.
+
+    Args:
+        project_path: Path to the novel project directory.
+        custom_ideas: Optional free-form author notes or constraints to
+            steer the outline (e.g. "想要多一些情感线").
+
+    Returns:
+        ProposalEnvelope dict. On failure returns ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.propose_main_outline(
+            str(validated), custom_ideas=custom_ideas
+        )
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_propose_characters(
+    project_path: str,
+    synopsis: str | None = None,
+) -> dict[str, Any]:
+    """Propose a main cast draft (protagonist + core supporting roles).
+
+    Part of the three-stage interface.
+
+    Args:
+        project_path: Path to the novel project directory.
+        synopsis: Optional synopsis context (if omitted, the facade falls
+            back to ``novel.json.synopsis``).
+
+    Returns:
+        ProposalEnvelope dict. On failure returns ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.propose_characters(str(validated), synopsis=synopsis)
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_propose_world_setting(
+    project_path: str,
+    synopsis: str | None = None,
+) -> dict[str, Any]:
+    """Propose a world-building draft (era / locale / rules / power system).
+
+    Part of the three-stage interface.
+
+    Args:
+        project_path: Path to the novel project directory.
+        synopsis: Optional synopsis context.
+
+    Returns:
+        ProposalEnvelope dict. On failure returns ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.propose_world_setting(str(validated), synopsis=synopsis)
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_propose_story_arcs(project_path: str) -> dict[str, Any]:
+    """Propose cross-volume story arcs (long arcs spanning multiple volumes).
+
+    Part of the three-stage interface. Requires ``novel.json`` to already
+    have an outline; arcs are derived from the main storyline.
+
+    Args:
+        project_path: Path to the novel project directory.
+
+    Returns:
+        ProposalEnvelope dict. On failure returns ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.propose_story_arcs(str(validated))
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_propose_volume_breakdown(
+    project_path: str,
+    synopsis: str | None = None,
+) -> dict[str, Any]:
+    """Propose the full-book volume skeleton (how the book is split into volumes).
+
+    Part of the three-stage interface. The volume breakdown determines how
+    ``volume_outline`` / chapter generation later operate.
+
+    Args:
+        project_path: Path to the novel project directory.
+        synopsis: Optional synopsis context.
+
+    Returns:
+        ProposalEnvelope dict. On failure returns ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.propose_volume_breakdown(str(validated), synopsis=synopsis)
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_propose_volume_outline(
+    project_path: str,
+    volume_number: int,
+) -> dict[str, Any]:
+    """Propose a per-volume detailed outline (N-chapter beat-by-beat plan).
+
+    Part of the three-stage interface. Uses VolumeDirector to expand the
+    target volume into a concrete chapter-level outline. ``novel.json``
+    must already contain a volume breakdown covering ``volume_number``.
+
+    Args:
+        project_path: Path to the novel project directory.
+        volume_number: 1-based volume index to expand.
+
+    Returns:
+        ProposalEnvelope dict. On failure returns ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.propose_volume_outline(str(validated), volume_number)
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_propose_chapter_brief(
+    project_path: str,
+    chapter_number: int,
+) -> dict[str, Any]:
+    """Propose the brief for a single chapter (goal, hooks, beats, must-haves).
+
+    Part of the three-stage interface. ChapterPlanner rebuilds the brief
+    from the current Ledger every call, so there is no ``regenerate``
+    counterpart — call ``novel_propose_chapter_brief`` again to refresh.
+
+    Args:
+        project_path: Path to the novel project directory.
+        chapter_number: 1-based chapter index whose brief to propose.
+
+    Returns:
+        ProposalEnvelope dict with ``data`` containing the brief structure
+        and any ``warnings`` surfaced by the planner. On failure returns
+        ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.propose_chapter_brief(str(validated), chapter_number)
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_accept_proposal(
+    project_path: str,
+    proposal_id: str,
+    proposal_type: str,
+    data: dict,
+) -> dict[str, Any]:
+    """Accept a proposal and persist it to ``novel.json``.
+
+    Part of the three-stage interface. Accepts any proposal type previously
+    returned by a ``novel_propose_*`` call. Idempotent: re-accepting the
+    same ``proposal_id`` returns ``status="already_accepted"`` without any
+    further write.
+
+    Args:
+        project_path: Path to the novel project directory.
+        proposal_id: The ``proposal_id`` from a previous ``novel_propose_*``
+            response.
+        proposal_type: One of ``project_setup``, ``synopsis``,
+            ``main_outline``, ``characters``, ``world_setting``,
+            ``story_arcs``, ``volume_breakdown``, ``volume_outline``,
+            ``chapter_brief``.
+        data: The ``data`` dict from the proposal envelope. Callers may
+            edit fields before re-submitting — accept respects user edits.
+
+    Returns:
+        AcceptResult dict with ``status`` (``accepted`` | ``already_accepted``
+        | ``failed``), ``proposal_id``, ``proposal_type``, and optionally
+        ``changelog_id`` / ``error``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        result = facade.accept_proposal(
+            str(validated), proposal_id, proposal_type, data
+        )
+        return result.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def novel_regenerate_section(
+    project_path: str,
+    section: str,
+    hints: str = "",
+    volume_number: int | None = None,
+) -> dict[str, Any]:
+    """Regenerate a proposal for a specific section with author hints.
+
+    Part of the three-stage interface. Use when a previous ``novel_propose_*``
+    result is unsatisfactory: describe what to change in ``hints`` and the
+    facade will dispatch to the correct agent, returning a fresh proposal
+    (with a new ``proposal_id``).
+
+    Args:
+        project_path: Path to the novel project directory.
+        section: One of ``synopsis``, ``characters``, ``world_setting``,
+            ``story_arcs``, ``volume_breakdown``, ``main_outline``,
+            ``volume_outline``.
+        hints: Natural-language description of what is wrong / desired
+            (e.g. "把主角换成女性并压缩前 5 章节奏").
+        volume_number: Required when ``section == "volume_outline"``,
+            ignored otherwise.
+
+    Returns:
+        ProposalEnvelope dict (same schema as ``novel_propose_*``). On
+        failure returns ``{"error": str}``.
+    """
+    try:
+        validated = _validate_project_path(project_path)
+        facade = _get_facade()
+        envelope = facade.regenerate_section(
+            str(validated),
+            section=section,
+            hints=hints,
+            volume_number=volume_number,
+        )
+        return envelope.to_dict()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ===========================================================================

@@ -704,6 +704,477 @@ def novel_rollback(project_path: str, change_id: str, force: bool):
 
 
 # ---------------------------------------------------------------------------
+# novel propose / accept / regenerate 三段式命令组 (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+_OUTPUT_CHOICES = click.Choice(["json", "yaml", "table"])
+
+
+def _novel_workspace_from_project(project_path: str) -> str:
+    """Infer the workspace root from ``project_path``.
+
+    Used by the propose/accept/regenerate subcommands so the facade points
+    at the same workspace the user's project lives in. Mirrors the
+    convention used by the existing ``novel edit`` / ``novel history``
+    subcommands (``Path(project_path).parent.parent``).
+    """
+    return str(Path(project_path).parent.parent)
+
+
+def _make_facade(workspace: str):
+    """Import-and-instantiate helper.
+
+    Kept as a thin wrapper so tests can ``patch`` the facade constructor
+    at one well-known symbol.
+    """
+    from src.novel.services.tool_facade import NovelToolFacade
+
+    return NovelToolFacade(workspace=workspace)
+
+
+def _envelope_is_failed(payload: dict) -> bool:
+    """Return True if the envelope dict looks like an error envelope.
+
+    We treat either a populated ``errors`` list or a top-level ``error``
+    key (for exception fallbacks) as a failure signal for --auto-accept.
+    """
+    if payload.get("error"):
+        return True
+    errs = payload.get("errors") or []
+    return bool(errs)
+
+
+def _load_proposal_file(path: str) -> dict:
+    """Load a proposal JSON file previously captured via ``--output json``.
+
+    Accepts either an envelope dict (``{proposal_id, data, ...}``) or a
+    raw ``data`` dict (in which case the caller supplied ``--proposal-id``
+    and ``--type`` separately).
+    """
+    import json as _json
+
+    with open(path, encoding="utf-8") as f:
+        return _json.load(f)
+
+
+@novel.group("propose")
+def novel_propose_grp():
+    """生成草案（三段式 propose）。不落盘；之后需 ``novel accept`` 确认。"""
+    pass
+
+
+def _run_propose(
+    facade_method,
+    facade_args: tuple,
+    facade_kwargs: dict,
+    *,
+    project_path: str | None,
+    proposal_type_for_accept: str,
+    output: str,
+    auto_accept: bool,
+) -> None:
+    """Shared implementation for every ``novel propose <sub>`` subcommand."""
+    from src.novel.cli.render import render_accept_result, render_envelope
+
+    envelope = facade_method(*facade_args, **facade_kwargs)
+    payload = render_envelope(envelope, output=output, console=console)
+
+    if not auto_accept:
+        return
+
+    if _envelope_is_failed(payload):
+        if output == "table":
+            console.print(
+                "[yellow]检测到 errors/error，--auto-accept 已跳过 accept 步骤[/]"
+            )
+        return
+
+    if project_path is None:
+        # project_setup 立项 propose 暂不支持 --auto-accept（accept 需要
+        # project_path，但立项时项目尚不存在）。
+        if output == "table":
+            console.print(
+                "[yellow]project-setup 的 --auto-accept 需要项目路径，暂不支持[/]"
+            )
+        return
+
+    workspace = _novel_workspace_from_project(project_path)
+    facade = _make_facade(workspace)
+    result = facade.accept_proposal(
+        project_path,
+        payload.get("proposal_id", ""),
+        proposal_type_for_accept,
+        payload.get("data") or {},
+    )
+    render_accept_result(result, output=output, console=console)
+
+
+@novel_propose_grp.command("project-setup")
+@click.argument("inspiration")
+@click.option("--genre", default=None, help="题材提示（覆盖推断值）")
+@click.option("--theme", default=None, help="主题提示")
+@click.option("--target-words", type=int, default=None, help="目标字数提示")
+@click.option("--style-name", default=None, help="风格预设 key，如 webnovel.shuangwen")
+@click.option("--narrative-template", default=None, help="叙事模板名")
+@click.option("--workspace", "-w", default="workspace", help="工作目录")
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+def propose_project_setup_cmd(
+    inspiration: str,
+    genre: str | None,
+    theme: str | None,
+    target_words: int | None,
+    style_name: str | None,
+    narrative_template: str | None,
+    workspace: str,
+    output: str,
+):
+    """从灵感起草项目立项参数（不落盘）。"""
+    try:
+        hints = {
+            k: v
+            for k, v in {
+                "genre": genre,
+                "theme": theme,
+                "target_words": target_words,
+                "style_name": style_name,
+                "narrative_template": narrative_template,
+            }.items()
+            if v is not None
+        }
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_project_setup,
+            (),
+            {"inspiration": inspiration, "hints": hints or None},
+            project_path=None,
+            proposal_type_for_accept="project_setup",
+            output=output,
+            auto_accept=False,
+        )
+    except Exception as e:
+        log.error("propose project-setup 失败: %s", e)
+        raise click.Abort()
+
+
+@novel_propose_grp.command("synopsis")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+@click.option("--auto-accept", is_flag=True, default=False, help="propose 后直接 accept")
+def propose_synopsis_cmd(project_path: str, output: str, auto_accept: bool):
+    """为项目起草故事梗概（不落盘）。"""
+    try:
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_synopsis,
+            (project_path,),
+            {},
+            project_path=project_path,
+            proposal_type_for_accept="synopsis",
+            output=output,
+            auto_accept=auto_accept,
+        )
+    except Exception as e:
+        log.error("propose synopsis 失败: %s", e)
+        raise click.Abort()
+
+
+@novel_propose_grp.command("main-outline")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--custom-ideas", default=None, help="作者额外要求")
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+@click.option("--auto-accept", is_flag=True, default=False)
+def propose_main_outline_cmd(
+    project_path: str,
+    custom_ideas: str | None,
+    output: str,
+    auto_accept: bool,
+):
+    """起草三层主大纲（不落盘）。"""
+    try:
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_main_outline,
+            (project_path,),
+            {"custom_ideas": custom_ideas},
+            project_path=project_path,
+            proposal_type_for_accept="main_outline",
+            output=output,
+            auto_accept=auto_accept,
+        )
+    except Exception as e:
+        log.error("propose main-outline 失败: %s", e)
+        raise click.Abort()
+
+
+@novel_propose_grp.command("characters")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--synopsis-file", type=click.Path(exists=True), default=None,
+              help="从文件读取 synopsis 作为上下文")
+@click.option("--synopsis", default=None, help="直接传 synopsis 字符串")
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+@click.option("--auto-accept", is_flag=True, default=False)
+def propose_characters_cmd(
+    project_path: str,
+    synopsis_file: str | None,
+    synopsis: str | None,
+    output: str,
+    auto_accept: bool,
+):
+    """起草主要角色列表（不落盘）。"""
+    try:
+        if synopsis_file and not synopsis:
+            synopsis = Path(synopsis_file).read_text(encoding="utf-8")
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_characters,
+            (project_path,),
+            {"synopsis": synopsis},
+            project_path=project_path,
+            proposal_type_for_accept="characters",
+            output=output,
+            auto_accept=auto_accept,
+        )
+    except Exception as e:
+        log.error("propose characters 失败: %s", e)
+        raise click.Abort()
+
+
+@novel_propose_grp.command("world-setting")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--synopsis-file", type=click.Path(exists=True), default=None)
+@click.option("--synopsis", default=None)
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+@click.option("--auto-accept", is_flag=True, default=False)
+def propose_world_setting_cmd(
+    project_path: str,
+    synopsis_file: str | None,
+    synopsis: str | None,
+    output: str,
+    auto_accept: bool,
+):
+    """起草世界观（不落盘）。"""
+    try:
+        if synopsis_file and not synopsis:
+            synopsis = Path(synopsis_file).read_text(encoding="utf-8")
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_world_setting,
+            (project_path,),
+            {"synopsis": synopsis},
+            project_path=project_path,
+            proposal_type_for_accept="world_setting",
+            output=output,
+            auto_accept=auto_accept,
+        )
+    except Exception as e:
+        log.error("propose world-setting 失败: %s", e)
+        raise click.Abort()
+
+
+@novel_propose_grp.command("story-arcs")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+@click.option("--auto-accept", is_flag=True, default=False)
+def propose_story_arcs_cmd(project_path: str, output: str, auto_accept: bool):
+    """起草跨卷故事弧线（不落盘）。"""
+    try:
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_story_arcs,
+            (project_path,),
+            {},
+            project_path=project_path,
+            proposal_type_for_accept="story_arcs",
+            output=output,
+            auto_accept=auto_accept,
+        )
+    except Exception as e:
+        log.error("propose story-arcs 失败: %s", e)
+        raise click.Abort()
+
+
+@novel_propose_grp.command("volume-breakdown")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--synopsis", default=None)
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+@click.option("--auto-accept", is_flag=True, default=False)
+def propose_volume_breakdown_cmd(
+    project_path: str,
+    synopsis: str | None,
+    output: str,
+    auto_accept: bool,
+):
+    """起草全书卷骨架（不落盘）。"""
+    try:
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_volume_breakdown,
+            (project_path,),
+            {"synopsis": synopsis},
+            project_path=project_path,
+            proposal_type_for_accept="volume_breakdown",
+            output=output,
+            auto_accept=auto_accept,
+        )
+    except Exception as e:
+        log.error("propose volume-breakdown 失败: %s", e)
+        raise click.Abort()
+
+
+@novel_propose_grp.command("volume-outline")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--volume", "volume_number", type=int, required=True, help="卷号（1 开始）")
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+@click.option("--auto-accept", is_flag=True, default=False)
+def propose_volume_outline_cmd(
+    project_path: str,
+    volume_number: int,
+    output: str,
+    auto_accept: bool,
+):
+    """起草单卷细纲（不落盘）。"""
+    try:
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_volume_outline,
+            (project_path, volume_number),
+            {},
+            project_path=project_path,
+            proposal_type_for_accept="volume_outline",
+            output=output,
+            auto_accept=auto_accept,
+        )
+    except Exception as e:
+        log.error("propose volume-outline 失败: %s", e)
+        raise click.Abort()
+
+
+@novel_propose_grp.command("chapter-brief")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--chapter", "chapter_number", type=int, required=True,
+              help="章节号（1 开始）")
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+@click.option("--auto-accept", is_flag=True, default=False)
+def propose_chapter_brief_cmd(
+    project_path: str,
+    chapter_number: int,
+    output: str,
+    auto_accept: bool,
+):
+    """起草单章 brief（不落盘）。"""
+    try:
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        _run_propose(
+            facade.propose_chapter_brief,
+            (project_path, chapter_number),
+            {},
+            project_path=project_path,
+            proposal_type_for_accept="chapter_brief",
+            output=output,
+            auto_accept=auto_accept,
+        )
+    except Exception as e:
+        log.error("propose chapter-brief 失败: %s", e)
+        raise click.Abort()
+
+
+@novel.command("accept")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--proposal-file", type=click.Path(exists=True), default=None,
+              help="propose 输出（--output json）存下来的 envelope JSON 文件")
+@click.option("--proposal-id", default=None, help="proposal_id（与 --proposal-file 二选一）")
+@click.option("--type", "proposal_type", default=None,
+              help="proposal_type（与 --proposal-id 成对使用）")
+@click.option("--data-file", type=click.Path(exists=True), default=None,
+              help="proposal 的 data 字段 JSON 文件")
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+def novel_accept_cmd(
+    project_path: str,
+    proposal_file: str | None,
+    proposal_id: str | None,
+    proposal_type: str | None,
+    data_file: str | None,
+    output: str,
+):
+    """确认接受一个 propose 草案并写入 novel.json。"""
+    try:
+        from src.novel.cli.render import render_accept_result
+
+        if proposal_file:
+            envelope = _load_proposal_file(proposal_file)
+            pid = envelope.get("proposal_id") or proposal_id or ""
+            ptype = envelope.get("proposal_type") or proposal_type or ""
+            payload_data = envelope.get("data") or {}
+        elif proposal_id and proposal_type and data_file:
+            pid = proposal_id
+            ptype = proposal_type
+            payload_data = _load_proposal_file(data_file)
+        else:
+            console.print(
+                "[red]需要 --proposal-file 或 "
+                "(--proposal-id + --type + --data-file)[/]"
+            )
+            raise click.Abort()
+
+        if not pid or not ptype:
+            console.print("[red]缺少 proposal_id 或 proposal_type[/]")
+            raise click.Abort()
+
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        result = facade.accept_proposal(project_path, pid, ptype, payload_data)
+        render_accept_result(result, output=output, console=console)
+    except click.Abort:
+        raise
+    except Exception as e:
+        log.error("accept 失败: %s", e)
+        raise click.Abort()
+
+
+@novel.command("regenerate")
+@click.argument("project_path", type=click.Path(exists=True))
+@click.option("--section", required=True,
+              help="synopsis/characters/world_setting/story_arcs/"
+                   "volume_breakdown/main_outline/volume_outline")
+@click.option("--hints", default="", help="作者提示——想改什么")
+@click.option("--volume", "volume_number", type=int, default=None,
+              help="卷号（仅 volume_outline 需要）")
+@click.option("--output", type=_OUTPUT_CHOICES, default="table")
+def novel_regenerate_cmd(
+    project_path: str,
+    section: str,
+    hints: str,
+    volume_number: int | None,
+    output: str,
+):
+    """对已有草案重新生成（新 proposal_id，不落盘）。"""
+    try:
+        from src.novel.cli.render import render_envelope
+
+        workspace = _novel_workspace_from_project(project_path)
+        facade = _make_facade(workspace)
+        envelope = facade.regenerate_section(
+            project_path,
+            section=section,
+            hints=hints,
+            volume_number=volume_number,
+        )
+        render_envelope(envelope, output=output, console=console)
+    except Exception as e:
+        log.error("regenerate 失败: %s", e)
+        raise click.Abort()
+
+
+# ---------------------------------------------------------------------------
 # ppt 命令组 - AI PPT 生成
 # ---------------------------------------------------------------------------
 
