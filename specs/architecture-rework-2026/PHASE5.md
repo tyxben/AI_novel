@@ -794,13 +794,27 @@ LLM 生成不完全确定性，但可控制：
 
 ### 9.1 LLM-as-judge 的系统性 bias
 
-**风险**：同模型评判同模型生成的文本，可能偏好类似的风格。
+**风险**：同模型评判同模型生成的文本，可能偏好类似的风格。**Position bias**（LLM
+对成对比较中 a 位置的系统性偏袒）比同源 bias 更严重。
 
 **缓解**：
 1. 异源原则（见 3.1）——judge 与 writer 不同 provider
-2. A/B 对比时两个版本由同一 judge 评判，bias 对称抵消
-3. 如果怀疑 bias，可用 `--judge-model` 换模型复跑对比
-4. 纯规则维度（D3/D4）不受 LLM bias 影响，作为 anchor
+2. **A/B 必须双向跑**：单向结果无法独立解读（见下方实证）
+3. 纯规则维度（D3/D4）不受 LLM bias 影响，作为 anchor
+
+**2026-04-21 首次 Phase 3 vs Phase 4 对比实证**：
+
+| 方向 | Phase 3 | Phase 4 | 判读 |
+|------|:-:|:-:|---|
+| Run 1: a=P3, b=P4 | 9 (60%) | 6 (40%) | 表面 P3 大胜 |
+| Run 2: a=P4, b=P3 | 1 (7%) | 14 (93%) | 反过来 P4 大胜 |
+| Position a 胜率 | 60% | 93% | **平均 76.5%** |
+
+双向一致性 de-bias：7 章 judge 两次选同一 winner（P4 胜 6 / P3 胜 1），8 章两次选 a
+（= position bias 主导）。**去除位置偏见后 Phase 4 轻微胜出**。
+
+**强制规范**：所有 Phase N vs N+1 对比**必须跑双向** + 只报告双向一致的决策。单向
+结果仅用于快速 sanity check，不作量化结论。工具：`scripts/quality_ab_debias.py`。
 
 **如果 bias 严重到不可用**：退守到"纯规则维度 + 人工 spot check"模式。
 LLM judge 分数降级为参考指标，不参与任何自动化决策。
