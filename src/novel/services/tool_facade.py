@@ -97,13 +97,18 @@ class ProposalEnvelope:
 
 @dataclass
 class AcceptResult:
-    """``accept_proposal`` 的统一返回。"""
+    """``accept_proposal`` 的统一返回。
+
+    ``project_path`` 只在 ``project_setup`` accept 时回填（告诉调用方刚
+    创建好的项目路径），其它实体场景为空——project_path 已在调用入参里。
+    """
 
     status: str = "accepted"  # "accepted" | "already_accepted" | "failed"
     proposal_id: str = ""
     proposal_type: str = ""
     changelog_id: str | None = None
     error: str | None = None
+    project_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -115,6 +120,8 @@ class AcceptResult:
             result["changelog_id"] = self.changelog_id
         if self.error:
             result["error"] = self.error
+        if self.project_path:
+            result["project_path"] = self.project_path
         return result
 
 
@@ -146,6 +153,10 @@ class NovelToolFacade:
     def __init__(self, workspace: str = "workspace") -> None:
         self.workspace = workspace
         self._fm = FileManager(workspace)
+        # 进程内幂等表：proposal_id → 已创建的 project_path。
+        # 仅 ``project_setup`` accept 使用（其它实体的幂等走 novel.json 的
+        # ``_meta.last_accepted_proposal_id``）。进程重启后丢失，容忍重建。
+        self._accepted_project_setups: dict[str, str] = {}
 
     # ==================================================================
     # propose 系列
@@ -380,17 +391,7 @@ class NovelToolFacade:
             ValueError: 未知 ``proposal_type`` / ``project_setup`` 走特殊分支。
         """
         if proposal_type == "project_setup":
-            # project_setup 暂不支持 accept（需要立项建目录，语义比其它 type 重），
-            # 留待 E2/E3 决策后接入；此处直接返回 failed，避免误写。
-            return AcceptResult(
-                status="failed",
-                proposal_id=proposal_id,
-                proposal_type=proposal_type,
-                error=(
-                    "accept_project_setup 尚未实现 —— 立项阶段请直接走"
-                    " pipeline.create_novel 或等待 Phase 4 后续任务接入"
-                ),
-            )
+            return self._accept_project_setup(project_path, proposal_id, data)
 
         try:
             novel_id = self._extract_novel_id(project_path)
@@ -464,6 +465,166 @@ class NovelToolFacade:
             status="accepted",
             proposal_id=proposal_id,
             proposal_type=proposal_type,
+        )
+
+    # ------------------------------------------------------------------
+    # project_setup accept — 立项骨架入库
+    # ------------------------------------------------------------------
+
+    def _accept_project_setup(
+        self,
+        project_path: str,
+        proposal_id: str,
+        data: dict,
+    ) -> AcceptResult:
+        """``project_setup`` accept 的特殊分派。
+
+        语义：**创建**新项目（不是更新已有）。只做立项骨架入库，不触发
+        任何 LLM 调用——后续 ``synopsis`` / ``main_outline`` / ``characters`` /
+        ``world_setting`` 等 propose + accept 走正常 8 实体流程。
+
+        契约：
+        * ``project_path``: 输入，用户指定的完整项目路径，如
+          ``workspace/novels/novel_myproj``。facade 从中抽 ``novel_id``
+          （最后一段），在对应位置建 ``novel.json``。
+        * 如果该 ``novel_id`` 的 ``novel.json`` 已存在 → 拒绝（failed）；
+          立项是创建操作，不支持覆盖。
+        * 幂等：进程内维护 ``proposal_id`` → ``project_path`` 映射；
+          同一 ``proposal_id`` 重复 accept → ``already_accepted``，
+          ``project_path`` 回带第一次创建的路径。进程重启后映射清空。
+        """
+        # 0) 幂等检查（进程内）
+        if proposal_id in self._accepted_project_setups:
+            return AcceptResult(
+                status="already_accepted",
+                proposal_id=proposal_id,
+                proposal_type="project_setup",
+                project_path=self._accepted_project_setups[proposal_id],
+            )
+
+        # 1) 数据校验
+        if not isinstance(data, dict):
+            return AcceptResult(
+                status="failed",
+                proposal_id=proposal_id,
+                proposal_type="project_setup",
+                error=(
+                    "project_setup.data 必须是 dict，实际为 "
+                    f"{type(data).__name__}"
+                ),
+            )
+        inspiration = str(data.get("inspiration", "") or "").strip()
+        if not inspiration:
+            return AcceptResult(
+                status="failed",
+                proposal_id=proposal_id,
+                proposal_type="project_setup",
+                error="project_setup.data.inspiration 不能为空",
+            )
+
+        # 2) 路径解析
+        try:
+            novel_id = self._extract_novel_id(project_path)
+        except ValueError as exc:
+            return AcceptResult(
+                status="failed",
+                proposal_id=proposal_id,
+                proposal_type="project_setup",
+                error=str(exc),
+            )
+
+        # 3) 禁止覆盖已有项目
+        if self._fm.load_novel(novel_id) is not None:
+            return AcceptResult(
+                status="failed",
+                proposal_id=proposal_id,
+                proposal_type="project_setup",
+                error=(
+                    f"项目 {novel_id!r} 已存在；project_setup accept 用于创建"
+                    " 新项目，不支持覆盖"
+                ),
+            )
+
+        # 4) 字段映射：把 ProjectSetupProposal 落成最小 novel dict（不含
+        #    outline / world_setting / characters —— 留给后续 propose）
+        try:
+            proposal = ProjectSetupProposal(
+                genre=str(data.get("genre", "") or ""),
+                theme=str(data.get("theme", "") or ""),
+                style_name=str(data.get("style_name", "") or ""),
+                target_length_class=str(
+                    data.get("target_length_class", "") or ""
+                ),
+                target_words=int(data.get("target_words") or 0),
+                narrative_template=str(data.get("narrative_template", "") or ""),
+                inspiration=inspiration,
+            )
+        except (TypeError, ValueError) as exc:
+            return AcceptResult(
+                status="failed",
+                proposal_id=proposal_id,
+                proposal_type="project_setup",
+                error=f"project_setup.data 字段非法: {exc}",
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        title = (
+            f"{proposal.genre} - {proposal.theme}"
+            if proposal.genre and proposal.theme
+            else (proposal.theme or proposal.genre or novel_id)
+        )
+        novel_data: dict[str, Any] = {
+            "novel_id": novel_id,
+            "title": title,
+            "genre": proposal.genre,
+            "theme": proposal.theme,
+            "target_words": proposal.target_words,
+            "style_name": proposal.style_name,
+            "target_length_class": proposal.target_length_class,
+            "template": proposal.narrative_template,
+            "inspiration": proposal.inspiration,
+            "status": "initialized",
+            "current_chapter": 0,
+            "created_at": now,
+            "updated_at": now,
+            # 后续 propose_* + accept_proposal 会按需填充下列字段
+            "outline": None,
+            "world_setting": None,
+            "characters": [],
+            "_meta": {
+                "last_accepted_proposal_id": proposal_id,
+                "last_accepted_type": "project_setup",
+                "last_accepted_at": now,
+            },
+        }
+
+        # 5) 落盘 —— 只走 FileManager.save_novel，不触发任何 LLM
+        try:
+            saved = self._fm.save_novel(novel_id, novel_data)
+        except Exception as exc:  # noqa: BLE001
+            log.exception(
+                "accept_project_setup save_novel failed: %s", exc
+            )
+            return AcceptResult(
+                status="failed",
+                proposal_id=proposal_id,
+                proposal_type="project_setup",
+                error=f"项目创建失败: {exc}",
+            )
+
+        # 6) 幂等表记账。saved 通常是 .../novel.json 路径，项目路径取
+        #    父目录；若 FileManager 改签名则退回用户传入 project_path。
+        try:
+            created_path = str(Path(saved).parent)
+        except Exception:  # pragma: no cover - defensive
+            created_path = project_path
+        self._accepted_project_setups[proposal_id] = created_path
+
+        return AcceptResult(
+            status="accepted",
+            proposal_id=proposal_id,
+            proposal_type="project_setup",
+            project_path=created_path,
         )
 
     # ==================================================================

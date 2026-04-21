@@ -587,18 +587,200 @@ class TestAcceptProposal:
         assert "不存在" in (result.error or "")
         facade._fm.save_novel.assert_not_called()
 
-    def test_project_setup_returns_not_implemented(self, facade):
-        # 立项 accept 暂不支持 — 预期 failed + 明确的 error 提示
+    # ---- project_setup accept — 立项真正接入 FileManager.save_novel ----
+
+    @staticmethod
+    def _project_setup_data(
+        *,
+        inspiration: str = "少年修仙故事",
+        genre: str = "玄幻",
+        theme: str = "少年修炼",
+        style_name: str = "webnovel.xuanhuan",
+        target_length_class: str = "webnovel",
+        target_words: int = 500_000,
+        narrative_template: str = "cyclic_upgrade",
+    ) -> dict[str, Any]:
+        return {
+            "inspiration": inspiration,
+            "genre": genre,
+            "theme": theme,
+            "style_name": style_name,
+            "target_length_class": target_length_class,
+            "target_words": target_words,
+            "narrative_template": narrative_template,
+        }
+
+    def test_project_setup_happy_path_creates_project(self, facade, tmp_path):
+        # 项目尚不存在：load_novel 返回 None
+        facade._fm.load_novel.return_value = None
+        fake_saved = tmp_path / "novels" / "novel_newproj" / "novel.json"
+        facade._fm.save_novel.return_value = fake_saved
+
+        data = self._project_setup_data()
         result = facade.accept_proposal(
-            "workspace/novels/novel_anything",
-            proposal_id="pid",
+            "workspace/novels/novel_newproj",
+            proposal_id="pid-setup-1",
             proposal_type="project_setup",
-            data={"genre": "玄幻"},
+            data=data,
+        )
+
+        assert result.status == "accepted"
+        assert result.proposal_id == "pid-setup-1"
+        assert result.proposal_type == "project_setup"
+        assert result.project_path == str(fake_saved.parent)
+        # save_novel 调一次，novel_id = 路径末段
+        facade._fm.save_novel.assert_called_once()
+        saved_id, saved_data = facade._fm.save_novel.call_args.args
+        assert saved_id == "novel_newproj"
+        # 核心字段落盘
+        assert saved_data["novel_id"] == "novel_newproj"
+        assert saved_data["genre"] == "玄幻"
+        assert saved_data["theme"] == "少年修炼"
+        assert saved_data["target_words"] == 500_000
+        assert saved_data["style_name"] == "webnovel.xuanhuan"
+        assert saved_data["template"] == "cyclic_upgrade"
+        assert saved_data["inspiration"] == "少年修仙故事"
+        assert saved_data["status"] == "initialized"
+        assert saved_data["current_chapter"] == 0
+        # 立项阶段不写 outline / world / characters
+        assert saved_data["outline"] is None
+        assert saved_data["world_setting"] is None
+        assert saved_data["characters"] == []
+        # 幂等标记落 _meta
+        assert saved_data["_meta"]["last_accepted_proposal_id"] == "pid-setup-1"
+        assert saved_data["_meta"]["last_accepted_type"] == "project_setup"
+
+    def test_project_setup_does_not_call_pipeline_create_novel(self, facade, tmp_path):
+        """回归：project_setup accept 必须**不**触发任何 LLM 调用。
+
+        我们不 patch NovelPipeline 因为根本不应该 import 它；通过
+        ``_create_llm_from_cfg`` 的 MagicMock 断言"未被调用"来间接证明
+        没有生成 LLM（create_novel 会用它）。
+        """
+        facade._fm.load_novel.return_value = None
+        facade._fm.save_novel.return_value = (
+            tmp_path / "novels" / "novel_x" / "novel.json"
+        )
+        facade._create_llm_from_cfg.reset_mock()
+
+        facade.accept_proposal(
+            "workspace/novels/novel_x",
+            proposal_id="pid-llm",
+            proposal_type="project_setup",
+            data=self._project_setup_data(),
+        )
+        # project_setup accept 只做落盘，不创建任何 LLM client
+        facade._create_llm_from_cfg.assert_not_called()
+
+    def test_project_setup_rejects_existing_project(self, facade):
+        # load_novel 返回非 None 表示该 novel_id 已有 novel.json
+        facade._fm.load_novel.return_value = _novel_data_stub()
+        result = facade.accept_proposal(
+            "workspace/novels/novel_existing",
+            proposal_id="pid-dup",
+            proposal_type="project_setup",
+            data=self._project_setup_data(),
         )
         assert result.status == "failed"
-        assert "create_novel" in (result.error or "") or "尚未实现" in (
-            result.error or ""
+        assert "已存在" in (result.error or "")
+        facade._fm.save_novel.assert_not_called()
+
+    def test_project_setup_idempotent_on_same_proposal_id(self, facade, tmp_path):
+        facade._fm.load_novel.return_value = None
+        first_saved = tmp_path / "novels" / "novel_idemp" / "novel.json"
+        facade._fm.save_novel.return_value = first_saved
+
+        data = self._project_setup_data()
+        r1 = facade.accept_proposal(
+            "workspace/novels/novel_idemp",
+            proposal_id="pid-idemp",
+            proposal_type="project_setup",
+            data=data,
         )
+        assert r1.status == "accepted"
+        assert r1.project_path == str(first_saved.parent)
+        assert facade._fm.save_novel.call_count == 1
+
+        # 第二次 accept 同 proposal_id — 幂等，不再落盘
+        r2 = facade.accept_proposal(
+            "workspace/novels/novel_idemp_whatever",  # 路径不同也应返回首次的
+            proposal_id="pid-idemp",
+            proposal_type="project_setup",
+            data=data,
+        )
+        assert r2.status == "already_accepted"
+        assert r2.proposal_id == "pid-idemp"
+        assert r2.proposal_type == "project_setup"
+        assert r2.project_path == r1.project_path
+        # save_novel 依然只调了一次（第二次直接短路）
+        assert facade._fm.save_novel.call_count == 1
+
+    def test_project_setup_save_failure_returns_failed(self, facade):
+        facade._fm.load_novel.return_value = None
+        facade._fm.save_novel.side_effect = OSError("disk full")
+        result = facade.accept_proposal(
+            "workspace/novels/novel_badfs",
+            proposal_id="pid-badfs",
+            proposal_type="project_setup",
+            data=self._project_setup_data(),
+        )
+        assert result.status == "failed"
+        assert "项目创建失败" in (result.error or "")
+        assert "disk full" in (result.error or "")
+        # 失败后不应进入幂等表（否则下次相同 proposal_id 的重试会被短路）
+        assert "pid-badfs" not in facade._accepted_project_setups
+
+    def test_project_setup_missing_inspiration(self, facade):
+        facade._fm.load_novel.return_value = None
+        data = self._project_setup_data()
+        data["inspiration"] = ""
+        result = facade.accept_proposal(
+            "workspace/novels/novel_noins",
+            proposal_id="pid-noins",
+            proposal_type="project_setup",
+            data=data,
+        )
+        assert result.status == "failed"
+        assert "inspiration" in (result.error or "")
+        facade._fm.save_novel.assert_not_called()
+
+    def test_project_setup_data_not_dict(self, facade):
+        result = facade.accept_proposal(
+            "workspace/novels/novel_baddata",
+            proposal_id="pid-baddata",
+            proposal_type="project_setup",
+            data="not a dict",  # type: ignore[arg-type]
+        )
+        assert result.status == "failed"
+        assert "dict" in (result.error or "")
+        facade._fm.save_novel.assert_not_called()
+
+    def test_project_setup_illegal_path(self, facade):
+        facade._fm.load_novel.return_value = None
+        result = facade.accept_proposal(
+            "",
+            proposal_id="pid-emptypath",
+            proposal_type="project_setup",
+            data=self._project_setup_data(),
+        )
+        assert result.status == "failed"
+        assert result.proposal_type == "project_setup"
+        # 未调 save_novel / load_novel（路径非法直接拒绝）
+        facade._fm.save_novel.assert_not_called()
+
+    def test_project_setup_malformed_target_words(self, facade, tmp_path):
+        """target_words 非数字 → failed。"""
+        facade._fm.load_novel.return_value = None
+        data = self._project_setup_data()
+        data["target_words"] = "lots"  # type: ignore[assignment]
+        result = facade.accept_proposal(
+            "workspace/novels/novel_bw",
+            proposal_id="pid-bw",
+            proposal_type="project_setup",
+            data=data,
+        )
+        assert result.status == "failed"
+        assert "字段非法" in (result.error or "")
         facade._fm.save_novel.assert_not_called()
 
     def test_unknown_proposal_type_raises(self, facade):

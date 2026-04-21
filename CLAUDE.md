@@ -210,6 +210,7 @@ accept 幂等、三层同底、facade 不持有 LLM。
 ### 幂等保障
 - 每个 proposal 带 UUID `proposal_id`，仅在 caller 会话内有效（proposal 不落盘）
 - accept 记录 `_meta.last_accepted_proposal_id`；同 ID 重复 accept 返回 `status: "already_accepted"` 不写盘
+- `project_setup` accept 走特殊分派：**创建**新项目而不是更新，幂等表存进程内存；不触发任何 LLM（只落最小骨架 novel.json，后续 synopsis/outline/characters 等再 propose→accept 逐步填充）。已有同 `novel_id` 项目时拒绝覆盖。返回的 `AcceptResult.project_path` 回带实际创建路径
 - regenerate 不保留历史版本（原则 7 "删而不藏"）。characters / world_setting 走 `setting_version.py` 的 `effective_from_chapter` / `deprecated_at_chapter` 版本链
 
 ## Phase 5 质量评估
