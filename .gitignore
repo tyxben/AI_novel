@@ -8,6 +8,7 @@ venv/
 workspace/
 workspace_verify/
 workspace_verify_*/
+workspace_quality_*/
 output/
 .DS_Store
 Thumbs.db
