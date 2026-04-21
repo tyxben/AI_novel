@@ -224,6 +224,16 @@ def auto_select_judge_from_env(override_model: str = "") -> "Any":
     config: JudgeConfig = auto_select_judge(writer_provider)
     if override_model:
         config.model = override_model
+    if config.same_source:
+        log.warning(
+            "=" * 68
+            + "\n  [JUDGE 同源警告] judge 与 writer 使用同一 provider (%s)。\n"
+            "  缺少异源 API key（如 GEMINI_API_KEY），质量分数会有同模型 bias，\n"
+            "  LLM 维度分数仅供参考，切勿作为 A/B 对比依据。\n"
+            "  建议：设置其他 provider 的 API key 或通过 --judge-model 指定。\n"
+            + "=" * 68,
+            config.provider,
+        )
     return config
 
 
@@ -825,7 +835,7 @@ def _try_load_ledger(project_dir: Path) -> Any | None:
         novel_id = project_dir.name
         # novels 目录是 project_dir.parent，workspace 是 parent.parent
         workspace_dir = str(project_dir.parent.parent)
-        fm = FileManager(workspace=workspace_dir)
+        fm = FileManager(workspace_dir)
         novel_data = fm.load_novel(novel_id) if hasattr(fm, "load_novel") else None
         try:
             memory = NovelMemory(novel_id, workspace_dir)
@@ -857,7 +867,7 @@ def _try_load_style_profile(project_dir: Path) -> Any | None:
             return None
         novel_id = project_dir.name
         workspace_dir = str(project_dir.parent.parent)
-        fm = FileManager(workspace=workspace_dir)
+        fm = FileManager(workspace_dir)
         data = fm.load_style_profile(novel_id)
         if not data:
             return None

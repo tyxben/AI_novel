@@ -43,12 +43,14 @@ class JudgeConfig:
         temperature: judge 用低温度以减少打分波动（默认 0.1）。
         provider: LLM provider（``"gemini"`` / ``"deepseek"`` / ``"openai"`` / ``"ollama"``）。
         max_tokens: judge 输出的最大 token 数，给 reasoning 留空间。
+        same_source: 若为 True，说明 judge 与 writer 同 provider，分数应视为不可信。
     """
 
     model: str = "gemini-2.5-flash"
     temperature: float = 0.1
     provider: str = "gemini"
     max_tokens: int = 2048
+    same_source: bool = False
 
 
 # Writer provider → Judge provider 的异源映射
@@ -59,23 +61,95 @@ _WRITER_TO_JUDGE_PROVIDER: dict[str, tuple[str, str]] = {
     "ollama": ("gemini", "gemini-2.5-flash"),
 }
 
+# Provider → 环境变量名，用于检查 API key 是否可用
+_PROVIDER_ENV_KEY: dict[str, str] = {
+    "gemini": "GEMINI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "ollama": "OLLAMA_HOST",  # ollama 本地服务，不严格要求 env
+}
+
+_PROVIDER_DEFAULT_MODEL: dict[str, str] = {
+    "gemini": "gemini-2.5-flash",
+    "deepseek": "deepseek-chat",
+    "openai": "gpt-4o-mini",
+    "ollama": "qwen2:7b",
+}
+
+
+def _provider_key_available(provider: str) -> bool:
+    """检查 provider 对应的 API key / 环境变量是否已设置。"""
+    import os
+
+    env_name = _PROVIDER_ENV_KEY.get(provider)
+    if not env_name:
+        return False
+    if provider == "ollama":
+        # Ollama 允许无 OLLAMA_HOST（有默认 http://localhost:11434），视为可用
+        return True
+    return bool(os.environ.get(env_name, "").strip())
+
 
 def auto_select_judge(writer_provider: str) -> JudgeConfig:
-    """按"异源原则"自动选 judge provider。
+    """按"异源原则"自动选 judge provider，检查 API key 可用性。
 
-    writer 用啥，judge 就用另一家；未知 provider 默认走 Gemini。
+    - 首选：writer 的异源 provider（DeepSeek→Gemini 等）
+    - 如首选 key 不可用，回退到其他异源候选
+    - 如所有异源候选都不可用但 writer 本身 key 可用，退化为同源并标记 ``same_source=True``
+    - 如所有选项都不可用，返回默认 Gemini 配置（让下游 LLM factory 报明确错误）
 
     Args:
         writer_provider: 写作 LLM 的 provider 名（``"deepseek"`` / ``"gemini"`` / ...）。
 
     Returns:
-        :class:`JudgeConfig` 实例。
+        :class:`JudgeConfig` 实例。``same_source=True`` 时应在报告中标记分数不可信。
     """
     key = (writer_provider or "").strip().lower()
-    provider, model = _WRITER_TO_JUDGE_PROVIDER.get(
+    preferred_provider, preferred_model = _WRITER_TO_JUDGE_PROVIDER.get(
         key, ("gemini", "gemini-2.5-flash")
     )
-    return JudgeConfig(model=model, temperature=0.1, provider=provider, max_tokens=2048)
+
+    # 优先：preferred 异源 provider 的 key 是否可用
+    if _provider_key_available(preferred_provider):
+        return JudgeConfig(
+            model=preferred_model,
+            temperature=0.1,
+            provider=preferred_provider,
+            max_tokens=2048,
+            same_source=False,
+        )
+
+    # 回退：按 gemini → deepseek → openai → ollama 顺序找一个异源且 key 可用的
+    for candidate in ("gemini", "deepseek", "openai", "ollama"):
+        if candidate == key:
+            continue
+        if _provider_key_available(candidate):
+            return JudgeConfig(
+                model=_PROVIDER_DEFAULT_MODEL[candidate],
+                temperature=0.1,
+                provider=candidate,
+                max_tokens=2048,
+                same_source=False,
+            )
+
+    # 最后兜底：所有异源都不可用。若 writer 本身可用，退化为同源并标记
+    if key and _provider_key_available(key):
+        return JudgeConfig(
+            model=_PROVIDER_DEFAULT_MODEL.get(key, "unknown"),
+            temperature=0.1,
+            provider=key,
+            max_tokens=2048,
+            same_source=True,
+        )
+
+    # 都不可用：返回 preferred（让下游 LLM factory 抛错）
+    return JudgeConfig(
+        model=preferred_model,
+        temperature=0.1,
+        provider=preferred_provider,
+        max_tokens=2048,
+        same_source=False,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -62,20 +62,33 @@ class TestJudgeConfig:
 
 
 class TestAutoSelectJudge:
+    """auto_select_judge 现在会检查 API key 可用性 (Phase 5 fix)。
+    这些测试通过 monkeypatch 注入全 key 环境验证核心映射逻辑。"""
+
+    @pytest.fixture(autouse=True)
+    def _all_keys_present(self, monkeypatch):
+        """所有 provider 的 key 都设置，测试纯映射逻辑。"""
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.setenv("OPENAI_API_KEY", "fake-openai")
+
     def test_deepseek_maps_to_gemini(self) -> None:
         cfg = auto_select_judge("deepseek")
         assert cfg.provider == "gemini"
         assert cfg.model == "gemini-2.5-flash"
+        assert cfg.same_source is False
 
     def test_gemini_maps_to_deepseek(self) -> None:
         cfg = auto_select_judge("gemini")
         assert cfg.provider == "deepseek"
         assert cfg.model == "deepseek-chat"
+        assert cfg.same_source is False
 
     def test_openai_maps_to_gemini(self) -> None:
         cfg = auto_select_judge("openai")
         assert cfg.provider == "gemini"
         assert cfg.model == "gemini-2.5-flash"
+        assert cfg.same_source is False
 
     def test_unknown_defaults_to_gemini(self) -> None:
         cfg = auto_select_judge("mystery-provider")
@@ -93,6 +106,49 @@ class TestAutoSelectJudge:
     def test_case_insensitive(self) -> None:
         cfg = auto_select_judge("DeepSeek")
         assert cfg.provider == "gemini"
+
+
+class TestAutoSelectJudgeKeyMissing:
+    """验证 API key 缺失时的降级逻辑 (Phase 5 fix for smoke test same-source bug)。"""
+
+    def test_preferred_gemini_missing_falls_back_to_openai(self, monkeypatch):
+        """Writer=deepseek，Gemini key 缺失，但 OpenAI key 可用 → 用 OpenAI。"""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "fake-openai")
+        cfg = auto_select_judge("deepseek")
+        assert cfg.provider == "openai"
+        assert cfg.same_source is False
+
+    def test_all_cross_source_missing_falls_back_to_same_source(self, monkeypatch):
+        """只有 DeepSeek key → writer=deepseek 时退化为同源并标记 warning。"""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        # ollama 在 _provider_key_available 里视为可用（本地服务），排除之
+        import src.novel.quality.judge as judge_mod
+        monkeypatch.setattr(
+            judge_mod,
+            "_provider_key_available",
+            lambda p: p == "deepseek",
+        )
+        cfg = auto_select_judge("deepseek")
+        assert cfg.provider == "deepseek"
+        assert cfg.same_source is True
+
+    def test_no_keys_at_all_returns_preferred_without_same_source(self, monkeypatch):
+        """无任何 key → 返回 preferred（让下游抛错）+ same_source=False。"""
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        import src.novel.quality.judge as judge_mod
+        monkeypatch.setattr(
+            judge_mod, "_provider_key_available", lambda p: False
+        )
+        cfg = auto_select_judge("deepseek")
+        # preferred 仍是 gemini（写给下游抛错，不静默掩盖）
+        assert cfg.provider == "gemini"
+        assert cfg.same_source is False
 
 
 # ---------------------------------------------------------------------------
