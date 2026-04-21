@@ -52,6 +52,18 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# Manually load .env (不依赖 python-dotenv，与 verify_novel_fixes.py 一致)
+_env_path = _ROOT / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            _k = _k.strip()
+            _v = _v.strip().strip("'\"")
+            if _k and _k not in os.environ:
+                os.environ[_k] = _v
+
 log = logging.getLogger("quality_regression")
 
 
