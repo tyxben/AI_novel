@@ -437,7 +437,7 @@ class Writer:
         char_desc = self._build_character_description(characters)
         world_desc = self._build_world_description(world_setting)
         style = self._get_style_prompt(style_name)
-        max_ctx = 6000 if scene_plan.get('scene_number', 1) == 1 else _MAX_CONTEXT_CHARS
+        max_ctx = _MAX_CONTEXT_CHARS
         trimmed_context = truncate_text(context, max_ctx) if context else ""
         target_words = scene_plan.get("target_words", 800)
 
@@ -638,9 +638,12 @@ class Writer:
 
         if trimmed_context:
             if is_first_scene and chapter_outline.chapter_number > 1:
-                user_prompt += f"【上章结尾 — 必须从这里接续】\n{trimmed_context}\n\n"
+                user_prompt += (
+                    f"【上章衔接要点 — 必须在本场景开头自然承接，严禁照抄以下文字】\n"
+                    f"{trimmed_context}\n\n"
+                )
             else:
-                user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
+                user_prompt += f"【本章前文回顾】\n{trimmed_context}\n\n"
 
         if character_lock_prompt:
             user_prompt += f"{character_lock_prompt}\n"
@@ -744,7 +747,7 @@ class Writer:
             self.set_chapter_brief(brief)
 
         scenes: list[Scene] = []
-        running_context = context or ""
+        running_context = ""   # 本章内滑动窗口，不混入跨章 context
 
         for plan_idx, plan in enumerate(scene_plans):
             is_last_scene = (plan_idx == len(scene_plans) - 1)
@@ -788,12 +791,13 @@ class Writer:
             # 叙事债务仅注入第一个场景
             scene_debt_summary = debt_summary if plan_idx == 0 else ""
 
+            scene_context = context if plan_idx == 0 else running_context
             scene = self.generate_scene(
                 scene_plan=plan,
                 chapter_outline=chapter_outline,
                 characters=characters,
                 world_setting=world_setting,
-                context=running_context,
+                context=scene_context,
                 style_name=style_name,
                 scenes_written_summary=scenes_written_summary,
                 debt_summary=scene_debt_summary,
@@ -978,7 +982,10 @@ class Writer:
                 f"【读者反馈/修改指令】\n{rewrite_instruction}\n\n"
             )
             if trimmed_context:
-                user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
+                user_prompt += (
+                    f"【前文回顾 — 仅供衔接参考，严禁照抄以下文字】\n"
+                    f"{trimmed_context}\n\n"
+                )
             user_prompt += (
                 f"请根据修改指令重写此章节。直接输出重写后的完整正文，不要标题或元信息。\n\n"
                 f"【最终字数检查 — 最高优先级，输出前必读】\n"
@@ -1086,7 +1093,10 @@ class Writer:
         user_prompt += f"【编辑审稿意见 — 必须逐条修复】\n{critique}\n\n"
 
         if trimmed_context:
-            user_prompt += f"【前文回顾】\n{trimmed_context}\n\n"
+            user_prompt += (
+                f"【前文回顾 — 仅供衔接参考，严禁照抄以下文字】\n"
+                f"{trimmed_context}\n\n"
+            )
 
         user_prompt += (
             f"请输出精修后的完整章节正文。不要输出标题或元信息。\n\n"
@@ -1555,47 +1565,25 @@ def writer_node(state: dict) -> dict:
     if world_setting is None:
         world_setting = WorldSetting(era="未知", location="未知")
 
-    # 前文上下文：取前一章（按章节号，非列表末尾）的结尾，确保悬念和转折传递给下一章
+    # 前文衔接：用 chapter_brief 的结构化摘要，不再读上章原文（防 verbatim 复读）
+    # chapter_planner_node 写入两个位置：current_chapter_brief (Pydantic dump) +
+    # current_chapter_outline.chapter_brief (legacy dict)。优先取前者，fallback 后者。
     context = ""
-    prev_ch_num = current_chapter - 1
-    chapters_done = state.get("chapters") or []
-    last_ch = None
-    for _ch in chapters_done:
-        if _ch.get("chapter_number") == prev_ch_num:
-            last_ch = _ch
-            break
-    # Fallback: if not found by number, also check chapters_text
-    if last_ch is None and prev_ch_num > 0:
-        prev_text = state.get("chapters_text", {}).get(prev_ch_num, "")
-        if prev_text:
-            last_ch = {"chapter_number": prev_ch_num, "full_text": prev_text}
-    if last_ch:
-        last_text = last_ch.get("full_text", "")
-        # If no full_text in state (resumed from checkpoint), load from .txt file
-        if not last_text:
-            try:
-                from src.novel.storage.file_manager import FileManager
-                workspace = state.get("workspace", "workspace")
-                novel_id = state.get("novel_id", "")
-                if novel_id:
-                    fm = FileManager(workspace)
-                    last_text = fm.load_chapter_text(
-                        novel_id, last_ch.get("chapter_number", 0)
-                    ) or ""
-            except Exception:
-                pass
-        if last_text:
-            # 第一个场景用更大窗口（6000字符），确保章节衔接有足够上下文
-            _first_scene_ctx = 6000
-            if len(last_text) > _first_scene_ctx:
-                tail = last_text[-_first_scene_ctx:]
-                # 找到第一个段落边界，避免从半个段落开始
-                first_break = tail.find("\n\n")
-                if first_break > 0 and first_break < len(tail) // 3:
-                    tail = tail[first_break + 2:]
-                context = tail
-            else:
-                context = last_text
+    if current_chapter > 1:
+        brief = (
+            state.get("current_chapter_brief")
+            or (state.get("current_chapter_outline") or {}).get("chapter_brief")
+            or state.get("chapter_brief")
+            or {}
+        )
+        tail_summary = str(brief.get("previous_chapter_tail_summary", "") or "").strip()
+        end_hook = str(brief.get("previous_chapter_end_hook", "") or "").strip()
+        parts = []
+        if tail_summary:
+            parts.append(f"上章结尾状态：{tail_summary}")
+        if end_hook:
+            parts.append(f"上章钩子：{end_hook}")
+        context = "\n".join(parts)
 
     # 如果没有 scene_plans，生成默认 4 场景
     if not scene_plans:

@@ -88,6 +88,31 @@ _MOOD_TO_CHAPTER_TYPE: dict[str, str] = {
 
 _DEFAULT_SCENE_COUNT = 3
 
+# Prompts for compressing previous chapter tail into a structured summary
+# that the Writer can consume without seeing the raw text.
+_PREV_TAIL_SUMMARY_SYSTEM = (
+    "你是小说大纲助手。只输出摘要，不含任何解释、前缀、Markdown 代码块或元信息。"
+)
+
+_PREV_TAIL_SUMMARY_USER = """\
+请用不超过 150 字概括以下章节结尾段落的"叙事状态"，供下一章作者承接使用。
+
+必须包含以下要素（缺失的可省略）：
+- 时间/地点（当前场景在哪）
+- 在场角色及其即时处境（情绪/行动/关系）
+- 悬而未决的冲突或行动（尚未完成的事）
+- 留下的钩子（暗示或悬念）
+
+【禁止】
+- 禁止复制原文任何完整句子或短语
+- 禁止续写或推测下一步
+- 必须是结构化的状态描述，不是故事讲述
+
+【原文】
+{previous_tail}
+
+【输出】一段结构化摘要，150 字以内。"""
+
 # Strong hook indicators carried over from the old HookGenerator
 _STRONG_HOOK_PATTERNS = [
     re.compile(r"[？?！!]\s*$"),
@@ -221,6 +246,11 @@ class ChapterPlanner:
         # Pull Ledger context
         ledger_ctx = self._ledger_context(novel, volume_number, chapter_number)
 
+        # Compress previous chapter tail into a structured summary (non-verbatim).
+        # Must happen before _call_llm so the resulting brief is self-contained.
+        tail_summary = self._summarize_previous_tail(previous_tail or "")
+        prev_end_hook = self._lookup_previous_end_hook(novel, chapter_number)
+
         # Call LLM
         scenes_raw, revised_goal, tone_notes, end_hook, end_hook_type = (
             self._call_llm(
@@ -268,6 +298,8 @@ class ChapterPlanner:
             tone_notes=tone_notes or "",
             end_hook=end_hook or "",
             end_hook_type=end_hook_type or "",
+            previous_chapter_tail_summary=tail_summary,
+            previous_chapter_end_hook=prev_end_hook,
         )
 
         return ChapterBriefProposal(
@@ -616,6 +648,164 @@ class ChapterPlanner:
         )
 
     # ------------------------------------------------------------------
+    # Previous chapter continuity helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _has_long_verbatim_overlap(
+        summary: str, source: str, min_len: int = 15
+    ) -> bool:
+        """Return True iff ``summary`` contains any ``source`` substring
+        of length ``>= min_len``.
+
+        Used to sanity-check LLM-produced "tail summaries": the prompt
+        forbids copying, but models sometimes cheat.  A single 15-char
+        Chinese run carried over from the prior chapter is enough to
+        seed cross-chapter verbatim repetition, which is exactly the
+        failure mode this Phase 0 P0 fix targets.
+        """
+        if not summary or not source:
+            return False
+        if len(summary) < min_len or len(source) < min_len:
+            return False
+        for i in range(len(summary) - min_len + 1):
+            if summary[i : i + min_len] in source:
+                return True
+        return False
+
+    def _summarize_previous_tail(self, previous_tail: str) -> str:
+        """Compress the previous chapter tail into a structured summary.
+
+        The summary replaces the raw text in the Writer prompt so the
+        Writer cannot verbatim-copy prior chapter content.  Output is
+        hard-capped at 200 chars regardless of what the LLM returns.
+        If the LLM-produced summary leaks a ``>=15``-char contiguous
+        substring from the source, the summary is discarded (return
+        ``""``) — safer to give the Writer no context than a laundered
+        copy of the prior text.
+
+        Args:
+            previous_tail: the raw tail string, typically the last ~500
+                characters of the prior chapter.
+
+        Returns:
+            A non-verbatim summary (≤200 chars), or ``""`` when the
+            input is empty, the LLM fails, or verbatim overlap is
+            detected.
+        """
+        if not previous_tail:
+            return ""
+        stripped = previous_tail.strip()
+        if not stripped:
+            return ""
+        if len(stripped) < 80:
+            return stripped[:200]
+
+        messages = [
+            {"role": "system", "content": _PREV_TAIL_SUMMARY_SYSTEM},
+            {
+                "role": "user",
+                "content": _PREV_TAIL_SUMMARY_USER.format(previous_tail=stripped),
+            },
+        ]
+        try:
+            response: LLMResponse = self.llm.chat(
+                messages, temperature=0.3, json_mode=False, max_tokens=300
+            )
+        except Exception as exc:
+            log.warning("previous_tail 摘要 LLM 调用失败: %s", exc)
+            return ""
+
+        if not response or not response.content:
+            return ""
+        result = response.content.strip()[:200]
+        if not result:
+            return ""
+        if self._has_long_verbatim_overlap(result, stripped, min_len=15):
+            log.warning(
+                "_summarize_previous_tail: detected >=15-char verbatim "
+                "overlap with source, discarding summary"
+            )
+            return ""
+        return result
+
+    @staticmethod
+    def _lookup_previous_end_hook(novel: Any, chapter_number: int) -> str:
+        """Return the previous chapter's ``chapter_brief.end_hook``.
+
+        Robust to the two canonical shapes the pipeline hands in:
+
+        * a ``Novel`` Pydantic object with ``outline.chapters`` list
+        * a raw dict with ``outline.chapters`` or legacy
+          ``volumes[*].chapters`` entries
+
+        Any failure to locate the prior chapter returns ``""``.
+        """
+        if novel is None or chapter_number is None or chapter_number < 2:
+            return ""
+        target = chapter_number - 1
+
+        def _brief_from(obj: Any) -> dict[str, Any]:
+            if obj is None:
+                return {}
+            if isinstance(obj, dict):
+                return obj.get("chapter_brief") or {}
+            return getattr(obj, "chapter_brief", {}) or {}
+
+        def _match_in_list(chapters: Any) -> str:
+            if not isinstance(chapters, list):
+                return ""
+            for ch in chapters:
+                ch_num: Any = None
+                if isinstance(ch, dict):
+                    ch_num = ch.get("chapter_number")
+                else:
+                    ch_num = getattr(ch, "chapter_number", None)
+                if ch_num == target:
+                    brief = _brief_from(ch)
+                    if isinstance(brief, dict):
+                        hook = brief.get("end_hook", "")
+                        return str(hook) if hook else ""
+            return ""
+
+        try:
+            outline = None
+            if isinstance(novel, dict):
+                outline = novel.get("outline")
+            else:
+                outline = getattr(novel, "outline", None)
+
+            chapters: Any = None
+            if outline is not None:
+                if isinstance(outline, dict):
+                    chapters = outline.get("chapters")
+                else:
+                    chapters = getattr(outline, "chapters", None)
+            hook = _match_in_list(chapters)
+            if hook:
+                return hook
+
+            volumes: Any = None
+            if isinstance(novel, dict):
+                volumes = novel.get("volumes")
+            else:
+                volumes = getattr(novel, "volumes", None)
+            if isinstance(volumes, list):
+                for vol in volumes:
+                    vol_chapters: Any = None
+                    if isinstance(vol, dict):
+                        vol_chapters = vol.get("chapters")
+                    else:
+                        vol_chapters = getattr(vol, "chapters", None)
+                    hook = _match_in_list(vol_chapters)
+                    if hook:
+                        return hook
+        except (AttributeError, KeyError, TypeError, IndexError) as exc:
+            log.debug("previous_end_hook 查询失败: %s", exc)
+            return ""
+        return ""
+
+    # ------------------------------------------------------------------
     # End-hook evaluation (absorbed from HookGenerator)
     # ------------------------------------------------------------------
 
@@ -746,12 +936,38 @@ def chapter_planner_node(state: dict) -> dict:
     if not novel_data:
         novel_data = {"characters": state.get("characters") or []}
 
+    # Extract previous chapter tail (≤500 chars) so ChapterPlanner can
+    # compress it into a non-verbatim summary.  Without this, the
+    # ``tail_summary`` chain ends up empty in production and the Writer
+    # gets an empty context from ch2+.  Main source: state["chapters_text"];
+    # fallback: state["chapters"][*].full_text.  Defensive against dict /
+    # string key mismatches.
+    prev_tail = ""
+    if chapter_number > 1:
+        prev_num = chapter_number - 1
+        chapters_text = state.get("chapters_text") or {}
+        if isinstance(chapters_text, dict):
+            raw = chapters_text.get(prev_num)
+            if raw is None:
+                raw = chapters_text.get(str(prev_num))
+            if isinstance(raw, str):
+                prev_tail = raw
+        if not prev_tail:
+            for ch in (state.get("chapters") or []):
+                if isinstance(ch, dict) and ch.get("chapter_number") == prev_num:
+                    candidate = ch.get("full_text", "")
+                    if isinstance(candidate, str):
+                        prev_tail = candidate
+                    break
+        prev_tail = prev_tail[-500:] if prev_tail else ""
+
     try:
         proposal = planner.propose_chapter_brief(
             novel=novel_data,
             volume_number=volume_number,
             chapter_number=chapter_number,
             chapter_outline=chapter_outline,
+            previous_tail=prev_tail,
             previous_summaries=previous_summaries,
             continuity_brief=continuity_brief,
             upcoming_outlines=upcoming_outlines,

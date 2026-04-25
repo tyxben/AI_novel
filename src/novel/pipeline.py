@@ -2398,10 +2398,11 @@ class NovelPipeline:
                     storyline_progress=storyline_progress,
                 )
 
-            # 前文上下文
+            # 前文上下文（P0 硬化：2000 → 500 字，降低跨章 verbatim 复读诱导。
+            # Writer prompt 侧同步追加“严禁照抄”提示。brief-based 架构重构留 P1。）
             context = ""
             if ch_num > 1 and (ch_num - 1) in chapter_texts:
-                context = chapter_texts[ch_num - 1][-2000:]  # 取上一章结尾
+                context = chapter_texts[ch_num - 1][-500:]
 
             log.info("=== 精修第 %d/%d 章 ===", ch_num, total_chapters)
 
@@ -2746,10 +2747,11 @@ class NovelPipeline:
                 log.warning("第%d章大纲解析失败，跳过", ch_num)
                 continue
 
-            # Context from previous chapter
+            # Context from previous chapter (P0 硬化：2000 → 500 字，
+            # 降低跨章 verbatim 复读诱导；Writer 提示同步加“严禁照抄”)
             context = ""
             if ch_num > 1 and (ch_num - 1) in chapter_texts:
-                context = truncate_text(chapter_texts[ch_num - 1], 2000)
+                context = truncate_text(chapter_texts[ch_num - 1], 500)
 
             # Get instruction
             instruction = rewrite_instructions.get(

@@ -356,11 +356,27 @@ class NovelToolFacade:
                 ):
                     volume_number = int(vol.get("volume_number", 1) or 1)
                     break
+            # Load previous chapter tail (≤500 chars) from workspace so
+            # the planner can compress it into a non-verbatim summary.
+            # Missing / unreadable text fails soft to "".
+            prev_tail = ""
+            if chapter_number > 1:
+                try:
+                    novel_id = self._extract_novel_id(project_path)
+                    prev_text = (
+                        self._fm.load_chapter_text(novel_id, chapter_number - 1)
+                        or ""
+                    )
+                    if prev_text:
+                        prev_tail = prev_text[-500:]
+                except Exception:
+                    prev_tail = ""
             proposal = planner.propose_chapter_brief(
                 novel=novel_data,
                 volume_number=volume_number,
                 chapter_number=chapter_number,
                 chapter_outline=target_outline,
+                previous_tail=prev_tail,
             )
             return ProposalEnvelope(
                 proposal_type="chapter_brief",
