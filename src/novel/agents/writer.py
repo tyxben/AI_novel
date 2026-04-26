@@ -956,7 +956,10 @@ class Writer:
                 f"【需要调整的原因】\n{rewrite_instruction}\n\n"
             )
             if trimmed_context:
-                user_prompt += f"【修改后的前文】\n{trimmed_context}\n\n"
+                user_prompt += (
+                    f"【修改后的前章状态摘要 — 仅供衔接参考，严禁照抄】\n"
+                    f"{trimmed_context}\n\n"
+                )
             user_prompt += (
                 f"请在原文基础上做最小必要修改，保持连贯。直接输出修改后的完整章节正文。\n\n"
                 f"【最终字数检查 — 最高优先级，输出前必读】\n"
@@ -983,7 +986,7 @@ class Writer:
             )
             if trimmed_context:
                 user_prompt += (
-                    f"【前文回顾 — 仅供衔接参考，严禁照抄以下文字】\n"
+                    f"【前章状态摘要 — 仅供衔接参考，严禁照抄】\n"
                     f"{trimmed_context}\n\n"
                 )
             user_prompt += (
@@ -1094,7 +1097,7 @@ class Writer:
 
         if trimmed_context:
             user_prompt += (
-                f"【前文回顾 — 仅供衔接参考，严禁照抄以下文字】\n"
+                f"【前章状态摘要 — 仅供衔接参考，严禁照抄】\n"
                 f"{trimmed_context}\n\n"
             )
 

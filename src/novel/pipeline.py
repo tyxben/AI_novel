@@ -18,6 +18,7 @@ from typing import Any, Callable
 from src.novel.agents.graph import build_chapter_graph, _merge_state
 from src.novel.config import NovelConfig, load_novel_config
 from src.novel.llm_utils import get_stage_llm_config
+from src.novel.services.prev_tail_summarizer import summarize_previous_tail
 from src.novel.storage.file_manager import FileManager
 from src.novel.utils import count_words
 
@@ -2398,11 +2399,20 @@ class NovelPipeline:
                     storyline_progress=storyline_progress,
                 )
 
-            # 前文上下文（P0 硬化：2000 → 500 字，降低跨章 verbatim 复读诱导。
-            # Writer prompt 侧同步追加“严禁照抄”提示。brief-based 架构重构留 P1。）
+            # 前章上下文：信息边界分流（C3 真修 + code review H1，2026-04-26）。
+            # - Writer (生成侧, context 入 polish_chapter)：拿摘要，避免诱导
+            #   跨章 verbatim 复读（P0 同源 bug）。摘要为空时 context 也为空，
+            #   绝不 fallback 塞生原文。
+            # - Reviewer (评估侧, previous_tail 入 review)：拿原文末 500 字，
+            #   评估"上章末有 typo / 衔接错位 / 跨章伏笔"这类需要原始字面量
+            #   的判断。摘要会丢失关键字面信息，不能喂给评估侧。
+            # summarizer 用调用栈里现成的 llm（这里是 scene_writing 阶段，
+            # 与 Writer 同一 client）；每章 +1 LLM call ~300 token。
+            raw_tail = ""
             context = ""
             if ch_num > 1 and (ch_num - 1) in chapter_texts:
-                context = chapter_texts[ch_num - 1][-500:]
+                raw_tail = chapter_texts[ch_num - 1][-500:]
+                context = summarize_previous_tail(llm, raw_tail)
 
             log.info("=== 精修第 %d/%d 章 ===", ch_num, total_chapters)
 
@@ -2411,14 +2421,14 @@ class NovelPipeline:
                 # 一起砍，这里只剩 style 指标）
                 before_style = style_tool.analyze(chapter_text)
 
-                # Step 1: 审稿（Reviewer）
+                # Step 1: 审稿（Reviewer）— 评估侧拿原文，见上方注释
                 log.info("第%d章：审稿中...", ch_num)
                 critique = reviewer.review(
                     chapter_text=chapter_text,
                     chapter_number=ch_outline.chapter_number,
                     chapter_title=ch_outline.title,
                     chapter_goal=ch_outline.goal,
-                    previous_tail=context[-500:],
+                    previous_tail=raw_tail,
                 )
 
                 log.info(
@@ -2747,11 +2757,17 @@ class NovelPipeline:
                 log.warning("第%d章大纲解析失败，跳过", ch_num)
                 continue
 
-            # Context from previous chapter (P0 硬化：2000 → 500 字，
-            # 降低跨章 verbatim 复读诱导；Writer 提示同步加“严禁照抄”)
+            # 前章上下文：摘要而非生原文（C3 真修，2026-04-26）。
+            # 同 polish_chapters：直接喂上章 500 字会诱导 Writer 跨章 verbatim
+            # 复读，走 summarize_previous_tail() 拿 LLM 摘要 + 15-char verbatim
+            # 校验。三处都用 [-500:] 取末尾（truncate_text 是从开头切，会喂错
+            # 输入到 summarizer——code review M4 抓出）。summarizer 用调用栈里
+            # 现成的 llm（apply_feedback 是 quality_review；polish/rewrite_affected
+            # 是 scene_writing）；analysis 任务每章 +1 LLM call ~300 token。
             context = ""
             if ch_num > 1 and (ch_num - 1) in chapter_texts:
-                context = truncate_text(chapter_texts[ch_num - 1], 500)
+                raw_tail = chapter_texts[ch_num - 1][-500:]
+                context = summarize_previous_tail(llm, raw_tail)
 
             # Get instruction
             instruction = rewrite_instructions.get(
@@ -3222,12 +3238,18 @@ class NovelPipeline:
                     errors.append(f"第{ch_num}章: 大纲解析失败")
                     continue
 
-                # 获取上下文
+                # 前章上下文：摘要而非生原文（C3 真修，2026-04-26）。
+                # 同 polish_chapters / apply_feedback：直接喂上章原文会诱导
+                # 跨章 verbatim 复读。这里旧路径塞 2000 字最危险（其它两处
+                # 已经先降到 500 字硬扛），统一走 summarize_previous_tail()。
+                # 这是 setting-change 传播路径，没有独立的 Reviewer 步骤，
+                # 故只需要喂 Writer 的摘要 context（无评估侧分支）。
+                # summarizer 用此函数 scene_writing 阶段 llm（与 Writer 同 client）。
                 context = ""
                 if ch_num > 1:
                     prev_text = fm.load_chapter_text(novel_id, ch_num - 1)
                     if prev_text:
-                        context = prev_text[-2000:]
+                        context = summarize_previous_tail(llm, prev_text[-500:])
 
                 new_text = writer.rewrite_chapter(
                     original_text=old_text,

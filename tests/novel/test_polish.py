@@ -279,7 +279,11 @@ class TestPolishChapter:
         assert "保留" in system_msg  # 保留原文好的部分
 
     def test_polish_with_context(self) -> None:
-        """提供前文上下文时，user prompt 应包含前文回顾。"""
+        """提供前章上下文时，user prompt 应包含 "前章状态摘要" 标签。
+
+        历史标签是【前文回顾 — 严禁照抄以下文字】，但 C3 真修后 pipeline
+        实际传入的是摘要而非生原文，文案改为【前章状态摘要 — 严禁照抄】。
+        """
         llm = _make_llm("精修后")
         writer = Writer(llm)
         outline = _make_chapter_outline()
@@ -300,8 +304,11 @@ class TestPolishChapter:
         else:
             messages = call_args[0][0]
         user_msg = messages[1]["content"]
-        assert "前文回顾" in user_msg
+        assert "前章状态摘要" in user_msg
         assert "激烈的战斗" in user_msg
+        # 旧文案不再回流（C3 修复后所有 polish/rewrite context 都是摘要，
+        # 不能再用"前文回顾"这种暗示原文的标签）
+        assert "前文回顾" not in user_msg
 
     def test_polish_without_context_omits_section(self) -> None:
         """无前文上下文时，user prompt 不应包含前文回顾。"""

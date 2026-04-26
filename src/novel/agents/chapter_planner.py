@@ -50,6 +50,10 @@ from src.novel.models.chapter_brief import (
 )
 from src.novel.models.character import CharacterProfile
 from src.novel.models.novel import ChapterOutline
+from src.novel.services.prev_tail_summarizer import (
+    has_long_verbatim_overlap,
+    summarize_previous_tail,
+)
 from src.novel.utils import extract_json_from_llm
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -87,31 +91,6 @@ _MOOD_TO_CHAPTER_TYPE: dict[str, str] = {
 }
 
 _DEFAULT_SCENE_COUNT = 3
-
-# Prompts for compressing previous chapter tail into a structured summary
-# that the Writer can consume without seeing the raw text.
-_PREV_TAIL_SUMMARY_SYSTEM = (
-    "你是小说大纲助手。只输出摘要，不含任何解释、前缀、Markdown 代码块或元信息。"
-)
-
-_PREV_TAIL_SUMMARY_USER = """\
-请用不超过 150 字概括以下章节结尾段落的"叙事状态"，供下一章作者承接使用。
-
-必须包含以下要素（缺失的可省略）：
-- 时间/地点（当前场景在哪）
-- 在场角色及其即时处境（情绪/行动/关系）
-- 悬而未决的冲突或行动（尚未完成的事）
-- 留下的钩子（暗示或悬念）
-
-【禁止】
-- 禁止复制原文任何完整句子或短语
-- 禁止续写或推测下一步
-- 必须是结构化的状态描述，不是故事讲述
-
-【原文】
-{previous_tail}
-
-【输出】一段结构化摘要，150 字以内。"""
 
 # Strong hook indicators carried over from the old HookGenerator
 _STRONG_HOOK_PATTERNS = [
@@ -655,79 +634,16 @@ class ChapterPlanner:
     def _has_long_verbatim_overlap(
         summary: str, source: str, min_len: int = 15
     ) -> bool:
-        """Return True iff ``summary`` contains any ``source`` substring
-        of length ``>= min_len``.
-
-        Used to sanity-check LLM-produced "tail summaries": the prompt
-        forbids copying, but models sometimes cheat.  A single 15-char
-        Chinese run carried over from the prior chapter is enough to
-        seed cross-chapter verbatim repetition, which is exactly the
-        failure mode this Phase 0 P0 fix targets.
+        """Backwards-compatible thin wrapper — see
+        :func:`src.novel.services.prev_tail_summarizer.has_long_verbatim_overlap`.
         """
-        if not summary or not source:
-            return False
-        if len(summary) < min_len or len(source) < min_len:
-            return False
-        for i in range(len(summary) - min_len + 1):
-            if summary[i : i + min_len] in source:
-                return True
-        return False
+        return has_long_verbatim_overlap(summary, source, min_len=min_len)
 
     def _summarize_previous_tail(self, previous_tail: str) -> str:
-        """Compress the previous chapter tail into a structured summary.
-
-        The summary replaces the raw text in the Writer prompt so the
-        Writer cannot verbatim-copy prior chapter content.  Output is
-        hard-capped at 200 chars regardless of what the LLM returns.
-        If the LLM-produced summary leaks a ``>=15``-char contiguous
-        substring from the source, the summary is discarded (return
-        ``""``) — safer to give the Writer no context than a laundered
-        copy of the prior text.
-
-        Args:
-            previous_tail: the raw tail string, typically the last ~500
-                characters of the prior chapter.
-
-        Returns:
-            A non-verbatim summary (≤200 chars), or ``""`` when the
-            input is empty, the LLM fails, or verbatim overlap is
-            detected.
+        """Backwards-compatible thin wrapper — see
+        :func:`src.novel.services.prev_tail_summarizer.summarize_previous_tail`.
         """
-        if not previous_tail:
-            return ""
-        stripped = previous_tail.strip()
-        if not stripped:
-            return ""
-        if len(stripped) < 80:
-            return stripped[:200]
-
-        messages = [
-            {"role": "system", "content": _PREV_TAIL_SUMMARY_SYSTEM},
-            {
-                "role": "user",
-                "content": _PREV_TAIL_SUMMARY_USER.format(previous_tail=stripped),
-            },
-        ]
-        try:
-            response: LLMResponse = self.llm.chat(
-                messages, temperature=0.3, json_mode=False, max_tokens=300
-            )
-        except Exception as exc:
-            log.warning("previous_tail 摘要 LLM 调用失败: %s", exc)
-            return ""
-
-        if not response or not response.content:
-            return ""
-        result = response.content.strip()[:200]
-        if not result:
-            return ""
-        if self._has_long_verbatim_overlap(result, stripped, min_len=15):
-            log.warning(
-                "_summarize_previous_tail: detected >=15-char verbatim "
-                "overlap with source, discarding summary"
-            )
-            return ""
-        return result
+        return summarize_previous_tail(self.llm, previous_tail)
 
     @staticmethod
     def _lookup_previous_end_hook(novel: Any, chapter_number: int) -> str:
