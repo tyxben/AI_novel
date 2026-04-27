@@ -1,12 +1,18 @@
 """LangGraph 图构建 - 小说创作流水线
 
-Chapter graph (Phase 2-δ 合并后)::
+Chapter graph (B 阶段 Writer 瘦身后)::
 
-    chapter_planner -> writer -> reviewer -> state_writeback -> END
+    chapter_planner -> writer -> post_writer -> reviewer -> state_writeback -> END
 
 ``chapter_planner`` 节点是 Phase 2-δ 产物：取代了
 ``dynamic_outline + plot_planner`` 两个节点，同时吸收了旧 ``hook_generator``
 的钩子规划职责。章节规划师从 LedgerStore 实时取 snapshot 拼 ChapterBrief。
+
+``post_writer`` 节点是 B 阶段瘦身产物（2026-04-27）：跑 chapter-level
+``sanitize_chapter_text`` 兜底过滤，把后处理职责从 Writer 内部抽离出来。
+Writer 内 generate_scene 仍保留 per-scene sanitize/dedup（写循环步骤），
+chapter-level 兜底交给本节点；pipeline 直调路径
+（``rewrite_chapter`` / ``polish_chapter``）由 user 侧 API 自己负责。
 
 ``reviewer`` 节点是 Phase 2-β 三合一产物：取代了
 ``consistency_checker + style_keeper + quality_reviewer``，零打分零自动重写。
@@ -62,9 +68,10 @@ def _get_node_functions() -> dict[str, Callable]:
     取代，pipeline 直接调 ProjectArchitect 不经本字典。
     """
     from src.novel.agents.chapter_planner import chapter_planner_node
-    from src.novel.agents.writer import writer_node
+    from src.novel.agents.post_writer import post_writer_node
     from src.novel.agents.reviewer import reviewer_node
     from src.novel.agents.state_writeback import state_writeback_node
+    from src.novel.agents.writer import writer_node
 
     def _removed_node_stub(_name: str):
         def _fn(state: dict) -> dict:
@@ -88,6 +95,7 @@ def _get_node_functions() -> dict[str, Callable]:
         "character_designer": _removed_node_stub("character_designer"),
         "chapter_planner": chapter_planner_node,
         "writer": writer_node,
+        "post_writer": post_writer_node,
         "reviewer": reviewer_node,
         "state_writeback": state_writeback_node,
     }
@@ -103,11 +111,14 @@ def build_chapter_graph() -> Any:
 
     Flow::
 
-        chapter_planner -> writer -> reviewer -> state_writeback -> END
+        chapter_planner -> writer -> post_writer -> reviewer -> state_writeback -> END
 
     ChapterPlanner 是合并后的单节点（取代 dynamic_outline + plot_planner +
     hook_generator 三处职责）。通过 LedgerStore 实时取 snapshot 生成
     ChapterBrief。
+
+    post_writer 是 B 阶段瘦身产物：chapter-level sanitize 兜底（pure transform，
+    无 LLM）。把 Writer 内部的章节级清洗职责抽到 graph 层。
 
     Reviewer 是 Phase 2-β 合并后的单节点（取代 consistency_checker +
     style_keeper + quality_reviewer）。只产报告（``CritiqueResult``），
@@ -119,12 +130,14 @@ def build_chapter_graph() -> Any:
         graph = StateGraph(NovelState)
         graph.add_node("chapter_planner", nodes["chapter_planner"])
         graph.add_node("writer", nodes["writer"])
+        graph.add_node("post_writer", nodes["post_writer"])
         graph.add_node("reviewer", nodes["reviewer"])
         graph.add_node("state_writeback", nodes["state_writeback"])
 
         graph.set_entry_point("chapter_planner")
         graph.add_edge("chapter_planner", "writer")
-        graph.add_edge("writer", "reviewer")
+        graph.add_edge("writer", "post_writer")
+        graph.add_edge("post_writer", "reviewer")
         graph.add_edge("reviewer", "state_writeback")
         graph.add_edge("state_writeback", END)
 
@@ -136,6 +149,10 @@ def build_chapter_graph() -> Any:
         "writer": nodes["writer"],
         "reviewer": nodes["reviewer"],
     }
+    # post_writer / state_writeback 都做可选——存在则跑（保持向后兼容旧测试
+    # mock 字典只填 chapter_planner / writer / reviewer 的写法）。
+    if "post_writer" in nodes:
+        fallback_nodes["post_writer"] = nodes["post_writer"]
     if "state_writeback" in nodes:
         fallback_nodes["state_writeback"] = nodes["state_writeback"]
 
@@ -190,7 +207,7 @@ class _SequentialRunner:
 class _ChapterRunner:
     """Fallback for chapter graph — single linear pass, 无重写循环。
 
-    Phase 2-δ: chapter_planner → writer → reviewer → state_writeback.
+    B 阶段: chapter_planner → writer → post_writer → reviewer → state_writeback.
     """
 
     def __init__(self, nodes: dict[str, Callable]) -> None:
@@ -201,6 +218,12 @@ class _ChapterRunner:
 
         current_state = self._run_node("chapter_planner", current_state)
         current_state = self._run_node("writer", current_state)
+
+        # post_writer 是 chapter-level sanitize 兜底（B 阶段瘦身）。即使
+        # Writer 没产文本也跑——节点内部对 None/空文本是 no-op，比加额外
+        # 判断更直白。
+        if "post_writer" in self.nodes:
+            current_state = self._run_node("post_writer", current_state)
 
         if current_state.get("current_chapter_text"):
             current_state = self._run_node("reviewer", current_state)

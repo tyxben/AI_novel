@@ -18,6 +18,16 @@ from src.novel.models.character import CharacterProfile
 from src.novel.models.novel import ChapterOutline
 from src.novel.models.world import WorldSetting
 from src.novel.templates.style_presets import get_style
+from src.novel.tools.writer_postprocess import (
+    DEDUP_HARD_DELETE as _DEDUP_HARD_DELETE,
+    DEDUP_STRIP_OVERLAP as _DEDUP_STRIP_OVERLAP,
+    SYSTEM_UI_ALLOWLIST as _SYSTEM_UI_ALLOWLIST_NEW,
+    SYSTEM_UI_PATTERNS as _SYSTEM_UI_PATTERNS_NEW,
+    check_character_names as _module_check_character_names,
+    dedup_paragraphs as _module_dedup_paragraphs,
+    sanitize_chapter_text as _module_sanitize_chapter_text,
+    trim_to_hard_cap as _module_trim_to_hard_cap,
+)
 from src.novel.utils import count_words, truncate_text
 
 log = logging.getLogger("novel")
@@ -27,49 +37,9 @@ log = logging.getLogger("novel")
 # ---------------------------------------------------------------------------
 
 # Patterns for system UI elements that should not appear in narrative text
-_SYSTEM_UI_PATTERNS = [
-    # Bracketed system messages: 【...】
-    _re.compile(r"【[^】]{1,80}】"),
-    # Loyalty/stat changes: 忠诚度：71→79, 兵煞值+8
-    _re.compile(r"[\u4e00-\u9fa5]{2,8}[:：]\s*\d+\s*[→\-+]\s*\d+"),
-    _re.compile(r"[\u4e00-\u9fa5]{2,8}\s*[+\-]\s*\d+\s*$", _re.MULTILINE),
-]
-
-# Allowlist of system messages that ARE part of the story (system-cultivation novel)
-# These get kept; everything else gets stripped
-_SYSTEM_UI_ALLOWLIST = {
-    "【叮！】",  # iconic system notification
-}
-
-
-def _sanitize_chapter_text(text: str) -> str:
-    """Strip game-UI elements from generated chapter text.
-
-    The Writer sometimes leaks system messages, stat displays, and other
-    game-UI elements into the narrative. This filter removes them while
-    preserving allowlisted iconic markers like 【叮！】.
-    """
-    if not text:
-        return text
-
-    cleaned_lines = []
-    for line in text.split("\n"):
-        original = line
-        # Remove bracketed system messages (except allowlisted)
-        def _strip_brackets(m):
-            return m.group() if m.group() in _SYSTEM_UI_ALLOWLIST else ""
-        line = _SYSTEM_UI_PATTERNS[0].sub(_strip_brackets, line)
-        # Remove stat changes
-        line = _SYSTEM_UI_PATTERNS[1].sub("", line)
-        line = _SYSTEM_UI_PATTERNS[2].sub("", line)
-        # Skip lines that became empty or only whitespace
-        if line.strip() or not original.strip():
-            cleaned_lines.append(line)
-
-    result = "\n".join(cleaned_lines)
-    # Collapse 3+ consecutive newlines into 2
-    result = _re.sub(r"\n{3,}", "\n\n", result)
-    return result.strip()
+_SYSTEM_UI_PATTERNS = _SYSTEM_UI_PATTERNS_NEW
+_SYSTEM_UI_ALLOWLIST = _SYSTEM_UI_ALLOWLIST_NEW
+_sanitize_chapter_text = _module_sanitize_chapter_text
 
 # 续写相关常量
 _MAX_CONTINUATIONS = 3  # 最多续写次数，防止无限循环
@@ -159,13 +129,10 @@ _CRAFT_QUALITY = (
 _MAX_CONTEXT_CHARS = 4000
 
 # ---------------------------------------------------------------------------
-# 场景去重：Jaccard 相似度阈值
+# 场景去重阈值 — 实际值已在 src/novel/tools/writer_postprocess.py 模块定义，
+# 这里通过文件顶部 import 重新导出 _DEDUP_HARD_DELETE / _DEDUP_STRIP_OVERLAP
+# 给 _deduplicate_paragraphs wrapper + 上游测试使用。
 # ---------------------------------------------------------------------------
-
-# 去重分级阈值
-_DEDUP_HARD_DELETE = 0.6   # ≥60% 句子完全相同 → 删除整段（确定是照搬）
-_DEDUP_STRIP_OVERLAP = 0.4  # ≥40% → 只删重复句，保留独有句（可能是承接+新内容混合）
-# < 40% → 不处理（正常的呼应和承接）
 
 
 # ---------------------------------------------------------------------------
@@ -305,56 +272,10 @@ class Writer:
 
     @staticmethod
     def _trim_to_hard_cap(text: str, hard_cap: int, target: int) -> str:
-        """超过 hard_cap 时，回退到 hard_cap 内最近的句末标点处截断。
-
-        DeepSeek 实测对 prompt 字数约束完全无视（见 memory
-        novel-length-control-floor），soft_max_chars 只能阻止续写扩张，
-        但首轮就超长时无能为力。本函数是最后一道执行层。
-
-        策略：从 hard_cap 位置向前扫，找到最后一个句末标点（。！？!?）。
-        命中后顺带把紧随其后的闭合引号/括号 ("'」』）】) 一起带出，
-        最多带 4 个（避免极端连续闭合标点导致 cut 越过 hard_cap 太多）。
-        若窗口内没有句末标点（极少），硬切到 hard_cap。
-        下界 floor = hard_cap // 2，保证至少保留半数硬上限的内容。
-
-        Note: 中文 "……"（省略号）刻意排除在 sentence_end 之外，因为它常用作
-        句中悬念（"至于林炎……"），切在那里会留下明显残句。
-
-        防御性：hard_cap <= 0 或空输入直接原样返回（避免数值误配传播）。
+        """Backwards-compatible thin wrapper — see
+        :func:`src.novel.tools.writer_postprocess.trim_to_hard_cap`.
         """
-        if hard_cap <= 0 or not text:
-            return text
-
-        if len(text) <= hard_cap:
-            return text
-
-        # 句末标点：只用真正的句号/问号/感叹号（中文/英文标点都列出以兼容混排文本）
-        sentence_end = "。！？!?"
-        closing = "\"'」』）】"
-        # floor 必须 < hard_cap，否则搜索窗口为空。
-        # 取 hard_cap//2 保证至少保留半数硬上限的内容，不会切到极短。
-        floor = hard_cap // 2
-        cut = -1
-        i = hard_cap
-        while i > floor:
-            if text[i - 1] in sentence_end:
-                j = i
-                # 闭合标点最多带 4 个，防止极端连续闭合越过 hard_cap 太多
-                while j < len(text) and j - i < 4 and text[j] in closing:
-                    j += 1
-                cut = j
-                break
-            i -= 1
-
-        if cut == -1:
-            cut = hard_cap
-
-        trimmed = text[:cut].rstrip()
-        log.info(
-            "[trim] 文本超长裁剪：%d 字 → %d 字 (target=%d, hard_cap=%d)",
-            len(text), len(trimmed), target, hard_cap,
-        )
-        return trimmed
+        return _module_trim_to_hard_cap(text, hard_cap, target)
 
     # ------------------------------------------------------------------
     # 主线上下文设置
@@ -836,8 +757,11 @@ class Writer:
             )
 
         full_text = "\n\n".join(s.text for s in scenes)
-        # 章节级清洗：兜底过滤系统 UI 元素
-        full_text = _sanitize_chapter_text(full_text)
+        # 章节级 sanitize 由 post_writer 节点统一兜底（B 阶段瘦身）。
+        # 各 scene 在 generate_scene 内部已 sanitize，joined 文本理论上
+        # 不会有新的 UI 泄漏；post_writer 在 graph 里跑 sanitize_chapter_text
+        # 兜底，pipeline 直调路径（rewrite_chapter / polish_chapter）由 user
+        # 侧 API 自己负责清洁。
         total_words = count_words(full_text)
 
         return Chapter(
@@ -1020,6 +944,10 @@ class Writer:
 
         # 后处理硬截：见 _trim_to_hard_cap docstring
         rewritten = self._trim_to_hard_cap(rewritten, hard_cap, target_words)
+        # Chapter-level sanitize 兜底（B 阶段 review H2 修）：pipeline 直调路径
+        # 不经 post_writer graph 节点，需在 user-API 层补回 sanitize 防线，
+        # 与 generate_scene 内部的 per-scene sanitize 对齐。
+        rewritten = _sanitize_chapter_text(rewritten)
 
         return rewritten
 
@@ -1132,6 +1060,9 @@ class Writer:
 
         # 后处理硬截：见 _trim_to_hard_cap docstring
         polished = self._trim_to_hard_cap(polished, hard_cap, target_words)
+        # Chapter-level sanitize 兜底（B 阶段 review H2 修）：pipeline 直调路径
+        # 不经 post_writer graph 节点，需在 user-API 层补回 sanitize 防线。
+        polished = _sanitize_chapter_text(polished)
 
         return polished
 
@@ -1169,93 +1100,10 @@ class Writer:
     def _deduplicate_paragraphs(
         self, new_text: str, previous_texts: list[str]
     ) -> str:
-        """分级去重：区分"照搬"和"正常承接"。
-
-        三级处理：
-        - ≥60% 句子完全相同 → 删除整段（确定是照搬废段）
-        - ≥40% 句子重复 → 只剥离重复句，保留独有内容（混合段）
-        - <40% → 不处理（正常的叙事呼应和承接）
+        """Backwards-compatible thin wrapper — see
+        :func:`src.novel.tools.writer_postprocess.dedup_paragraphs`.
         """
-        if not previous_texts:
-            return new_text
-
-        # 合并所有前文
-        all_previous = "\n\n".join(previous_texts)
-
-        import re as _re
-        prev_sentences = set()
-        for sent in _re.split(r'[。！？!?\n]', all_previous):
-            s = sent.strip()
-            if len(s) >= 6:
-                prev_sentences.add(s)
-
-        if not prev_sentences:
-            return new_text
-
-        # 按段落分级处理
-        paragraphs = new_text.split("\n\n")
-        kept = []
-        hard_deleted = 0
-        stripped = 0
-
-        for para in paragraphs:
-            # 拆句
-            raw_sentences = _re.split(r'(?<=[。！？!?\n])', para)
-            para_sentences = {
-                s.strip()
-                for s in _re.split(r'[。！？!?\n]', para)
-                if len(s.strip()) >= 6
-            }
-
-            if not para_sentences:
-                kept.append(para)
-                continue
-
-            overlap = para_sentences & prev_sentences
-            ratio = len(overlap) / len(para_sentences)
-
-            if ratio >= _DEDUP_HARD_DELETE:
-                # 级别1: 照搬 → 整段删除
-                hard_deleted += 1
-                log.warning(
-                    "去重[删除]：整段照搬前文（%d/%d句重复，%.0f%%）",
-                    len(overlap), len(para_sentences), ratio * 100,
-                )
-                continue
-
-            elif ratio >= _DEDUP_STRIP_OVERLAP:
-                # 级别2: 混合段 → 只剥离重复句，保留独有内容
-                unique_parts = []
-                for raw_sent in raw_sentences:
-                    clean = raw_sent.strip()
-                    # 检查这个句子片段是否包含重复句
-                    sent_core = _re.sub(r'[。！？!?\n]', '', clean).strip()
-                    if len(sent_core) >= 6 and sent_core in overlap:
-                        continue  # 跳过重复句
-                    if clean:
-                        unique_parts.append(clean)
-                if unique_parts:
-                    stripped += 1
-                    kept.append("".join(unique_parts))
-                    log.info(
-                        "去重[剥离]：保留独有内容，移除%d句重复",
-                        len(overlap),
-                    )
-                else:
-                    hard_deleted += 1
-                continue
-
-            else:
-                # 级别3: 正常呼应 → 保留
-                kept.append(para)
-
-        if hard_deleted > 0 or stripped > 0:
-            log.info(
-                "场景去重完成：删除%d段，剥离%d段",
-                hard_deleted, stripped,
-            )
-
-        return "\n\n".join(kept)
+        return _module_dedup_paragraphs(new_text, previous_texts)
 
     # ------------------------------------------------------------------
     # 角色名称校验 + 占位符替换
@@ -1265,115 +1113,10 @@ class Writer:
     def _check_character_names(
         text: str, characters: list[CharacterProfile]
     ) -> str:
-        """检测并修复场景文本中的角色名称问题。
-
-        三层校验：
-        1. 检测占位符（角色A、女学生B、老人C 等），替换为已知角色名
-        2. 扫描对话引语中的未知人名，记录警告
-        3. 检测中文人名模式，发现白名单外的新名字时警告
+        """Backwards-compatible thin wrapper — see
+        :func:`src.novel.tools.writer_postprocess.check_character_names`.
         """
-        import re as _re
-
-        if not text or not characters:
-            return text
-
-        # 构建合法名称集合（名字 + 别名）
-        known_names: set[str] = set()
-        for c in characters:
-            known_names.add(c.name)
-            if c.alias:
-                known_names.update(c.alias)
-
-        # --- 层1: 占位符检测与替换 ---
-        placeholder_pattern = _re.compile(
-            r'(?:角色|人物|女学生|男学生|学生|老人|男子|女子|男人|女人|少年|少女|青年)'
-            r'[A-Za-z0-9甲乙丙丁]'
-        )
-        placeholders_found = placeholder_pattern.findall(text)
-        if placeholders_found:
-            log.warning(
-                "角色名校验：检测到占位符称呼 %s，应使用具体角色名",
-                placeholders_found,
-            )
-            for ph in set(placeholders_found):
-                type_keyword = _re.sub(r'[A-Za-z0-9甲乙丙丁]$', '', ph)
-                candidates = []
-                for c in characters:
-                    if type_keyword in ("女学生", "学生", "少女") and c.gender == "女":
-                        candidates.append(c.name)
-                    elif type_keyword in ("男学生", "学生", "少年") and c.gender == "男":
-                        candidates.append(c.name)
-                    elif type_keyword in ("老人",) and c.age >= 55:
-                        candidates.append(c.name)
-                    elif type_keyword in ("男子", "男人", "青年") and c.gender == "男":
-                        candidates.append(c.name)
-                    elif type_keyword in ("女子", "女人") and c.gender == "女":
-                        candidates.append(c.name)
-                if len(candidates) == 1:
-                    text = text.replace(ph, candidates[0])
-                    log.info("角色名校验：占位符「%s」→「%s」", ph, candidates[0])
-
-        # --- 层2: 未知人名检测 ---
-        # 扫描"X说"、"X问"、"X喊"等对话引语模式中的人名
-        # 以及"X走"、"X看"等动作主语
-        dialogue_name_pattern = _re.compile(
-            r'(?:^|[。！？!?\n""\s])([^\s。！？!?\n""]{1,4})'
-            r'(?:说|问|喊|叫|答|道|笑|哭|吼|嚷|叹|骂|低声|冷笑|咬牙|转身|走|站|蹲|跑|看|盯|抬头|回头)'
-        )
-        # 排除常见非人名的词
-        _NOT_NAMES = {
-            "他", "她", "它", "我", "你", "谁", "这", "那", "什么",
-            "大家", "所有人", "众人", "两人", "三人", "几个人",
-            "对方", "自己", "彼此", "有人", "没人", "别人",
-            "然后", "突然", "忽然", "于是", "但是", "因为",
-            "一个", "两个", "这个", "那个",
-        }
-
-        matches = dialogue_name_pattern.findall(text)
-        unknown_names: set[str] = set()
-        # 代词前缀集合（单字）：若候选以这些字开头，说明整体是"代词+动词"而非人名
-        # 例：「他低头」「她抬头」「我转身」——剥掉代词前缀后剩下的是动词短语，应整体跳过
-        _PRONOUN_PREFIXES = {"他", "她", "它", "我", "你"}
-        # Unicode 弯引号 + ASCII 直引号 + CJK 括号；用 \uXXXX 转义避免编辑器字体渲染歧义
-        _QUOTE_STRIP = (
-            '"\''  # ASCII straight quotes
-            '\u201c\u201d\u2018\u2019'  # "" '' curly quotes (Unicode)
-            '\u300c\u300d\u300e\u300f\u3010\u3011'  # 「」『』【】
-        )
-        for name_candidate in matches:
-            # 剥离候选前后的引号/括号字符
-            name_candidate = name_candidate.strip(_QUOTE_STRIP)
-            if not name_candidate or len(name_candidate) < 2:
-                continue
-            if name_candidate in _NOT_NAMES:
-                continue
-            # 代词前缀剥离：若候选以单字代词开头，剥掉后再看。
-            # 剥完 < 2 字说明是纯"代词+单字动词"，整体跳过。
-            # 剥完 >= 2 字则是"代词+双字动词"（如「他低头」→「低头」），
-            # 这类同样不是人名 —— 直接跳过整个候选，不当作未知名字报警。
-            if name_candidate[0] in _PRONOUN_PREFIXES:
-                continue
-            # 检查是否在已知名称中（含部分匹配：如"陈工"匹配"陈远"）
-            is_known = False
-            for kn in known_names:
-                if name_candidate == kn or name_candidate in kn or kn in name_candidate:
-                    is_known = True
-                    break
-            if not is_known:
-                # 排除职业称呼（收银员、保安、老板等）
-                if not _re.match(
-                    r'^(?:收银员|保安|老板|司机|医生|护士|警察|服务员|店员|摊主|老头|中年|年轻)',
-                    name_candidate,
-                ):
-                    unknown_names.add(name_candidate)
-
-        if unknown_names:
-            log.warning(
-                "角色名校验：检测到白名单外的角色名 %s（合法名单：%s）",
-                unknown_names, known_names,
-            )
-
-        return text
+        return _module_check_character_names(text, characters)
 
     # ------------------------------------------------------------------
     # 角色档案构建（完整版，含外貌锁定）
