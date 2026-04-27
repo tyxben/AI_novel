@@ -22,7 +22,7 @@
 
 ### AI 长篇小说（核心模块，2026-04 Phase 0-5 完工）
 
-> 架构重构 2026 完成：Agent 数量从 15 -> 5、propose/accept/regenerate 三段式工具层、7 维质量评估 + A/B 双向 de-bias。
+> 架构重构 2026 完成：Agent 数量从 9 -> 5、propose/accept/regenerate 三段式工具层、7 维质量评估 + A/B 双向 de-bias。
 > 规划文档见 `specs/architecture-rework-2026/`（README / AUDIT / DESIGN / PHASE4 / PHASE5）。
 
 **5 Agent 新架构（替代旧 9 Agent）**
@@ -42,7 +42,7 @@
 - 伏笔兑现率（**唯一硬门禁 >= 60%**，纯规则） / AI 味指数（纯规则）
 - 叙事流畅 / 角色一致 / 情节推进 / 对话自然 / 章节勾连（LLM-as-judge + 规则混合）
 - A/B 双向强制 de-bias（gpt-4o-mini position bias 实测 76.5%）
-- pytest 基线：4564 passed / 21 skipped
+- pytest 基线：4630 passed / 21 skipped（Phase 5 完工 4564 → P0 跨章 verbatim 4615 → C3 pipeline 同源 4630）
 
 **叙事控制（v1.3 沿用）**
 - **MilestoneTracker** + **VolumeSettlement** — 卷级里程碑 + 卷末收束 + 逾期里程碑跨卷继承
@@ -54,7 +54,8 @@
 
 **叙事状态引擎**
 - **LedgerStore** — 统一账本（伏笔 / 叙事债务 / 角色状态），ChapterPlanner 实时消费
-- **ContinuityService** — 每章写前聚合上下文（角色状态 / 叙事债务 / 活跃弧线 / 上章钩子 / 禁止断裂项）
+- **BriefAssembler** — 每章写前聚合上下文（角色状态 / 叙事债务 / 活跃弧线 / 上章钩子 / 禁止断裂项），由 `ChapterPlanner.propose_chapter_brief` 实时调用（`ContinuityService` 保留为兼容 shim）
+- **PrevTailSummarizer** — 上章末 500 字 → ≤200 字结构化摘要 + 15-char verbatim 后校验，pipeline 所有 Writer 通道（生成 / polish / apply_feedback / rewrite_affected）共用，物理上切断 Writer 直读上章原文
 - **向量语义一致性** — Chroma 检索，自动检测角色复活 / 失踪 / 事件矛盾；BM25 作为 fallback
 - **Agent Chat 会话记忆** — 自动恢复对话历史 + 工作记忆注入
 - **ReAct 推理 + Prompt Registry** — Writer 工具链推理 + DB 管理提示词版本
@@ -172,7 +173,7 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
 | 伏笔埋了不收，承诺了不兑现 | 叙事债务追踪 + 伏笔兑现率硬门禁 | LedgerStore + Phase 5 foreshadow_payoff |
 | 大纲越写越旧，引用过时章节 | 陈旧大纲检测 + VolumeDirector 重新规划 | _is_stale_outline |
 | 卷末收不住，线索悬空 | 卷末收束模式 + 里程碑继承 | VolumeDirector.settle_volume |
-| 章与章之间断裂跳跃 | 连续性摘要 + 首场景衔接硬约束 | ContinuityService |
+| 章与章之间断裂跳跃 | 连续性摘要 + 首场景衔接硬约束 | BriefAssembler + PrevTailSummarizer |
 
 ### 5 个专职 Agent（2026-04 重构完工）
 
@@ -206,7 +207,8 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
 │                                                      │
 │  ┌─ 写前准备 ───────────────────────────────────┐    │
 │  │ 陈旧大纲检测 → VolumeDirector 重新规划(如需) │    │
-│  │ ContinuityService → 连续性摘要              │    │
+│  │ BriefAssembler → 连续性聚合                 │    │
+│  │ PrevTailSummarizer → 上章末摘要(防 verbatim) │    │
 │  │ MilestoneTracker → 卷进度预算               │    │
 │  │ LedgerStore → 伏笔 / 叙事债务 / 角色状态    │    │
 │  │ 里程碑强制约束(如逾期) → 注入                │    │
@@ -214,7 +216,7 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
 │              ↓                                        │
 │  ChapterPlanner → propose_chapter_brief              │
 │              ↓                                        │
-│  Writer → 正文生成(2000-3000字，one-shot / ReAct)    │
+│  Writer → 正文生成(2000-3000字，one-shot；不直读上章原文) │
 │              ↓                                        │
 │  Reviewer → quality + consistency + style 联合报告   │
 │      ↓ 作者拍板（不强制重写）                         │
@@ -262,7 +264,7 @@ AI 写长篇小说面临的最大挑战不是"写不出来"，而是写到中后
 
 ### 叙事状态管理
 
-每章生成前，**ContinuityService** 自动聚合以下来源生成写前约束：
+每章生成前，**BriefAssembler** 自动聚合以下来源生成写前约束（`ContinuityService` 保留为兼容 shim）：
 
 | 数据源 | 注入内容 |
 |--------|---------|
@@ -694,7 +696,7 @@ AI_novel/
 │       ├── models/          #   Pydantic 数据模型
 │       ├── storage/         #   存储层（SQLite + NetworkX + Chroma）
 │       ├── tools/           #   BM25 检索(fallback) / 章节摘要 / 质量检查
-│       ├── services/        #   ContinuityService / AgentChat / LedgerStore / tool_facade / refine_loop
+│       ├── services/        #   BriefAssembler / PrevTailSummarizer / AgentChat / LedgerStore / tool_facade / refine_loop
 │       └── templates/       #   风格预设 / 节奏模板 / AI味黑名单
 ├── scripts/                 # 实用脚本（批量生成、七猫发布等）
 ├── input/                   # 输入小说文本
@@ -830,7 +832,8 @@ elif backend == "xxx":
 ## 更新计划
 
 **已完成：**
-- [x] 架构重构 2026 Phase 0-5（2026-04 完工） — 15 Agent -> 5 Agent / propose·accept·regenerate 三段式工具层 / 7 维质量评估 + A/B 双向 de-bias
+- [x] **Writer 跨章 verbatim 复读修复 — P0 (`ffffda2`) + C3 (`15095b3`)（2026-04-25 / 04-26）** — 切断 Writer 直读上章原文通道，新增 `PrevTailSummarizer` 服务，pipeline 三处生成通道（polish / apply_feedback / rewrite_affected）全经摘要；信息边界规则：Reviewer 评估侧拿原文，Writer 生成侧拿摘要
+- [x] 架构重构 2026 Phase 0-5（2026-04 完工） — 9 Agent -> 5 Agent / propose·accept·regenerate 三段式工具层 / 7 维质量评估 + A/B 双向 de-bias
 - [x] Phase 4 三段式工具层 — `NovelToolFacade` 三层共享，MCP + CLI + agent_chat 统一入口
 - [x] Phase 5 质量评估 — 7 维仪表盘（伏笔兑现率硬门禁 + 6 项软观测）+ 跨体裁回归脚本
 - [x] 叙事弧线控制 v1.3 — 里程碑自动生成 + 强制控制 + 陈旧大纲检测 + 风格圣经

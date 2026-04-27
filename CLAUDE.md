@@ -127,7 +127,7 @@ PHASE4 / PHASE5）。
 
 - `src/novel/agents/` - 5 个 Agent（见下）
 - `src/novel/tools/` - Tool 层: ConsistencyTool / QualityCheckTool / StyleAnalysisTool / BM25Retriever(fallback) / ChapterDigest
-- `src/novel/services/` - 服务层: BriefAssembler(brief 聚合) / LedgerStore(账本 facade) / ObligationTracker / ForeshadowingService / CharacterArcTracker / MilestoneTracker / EntityService / StyleProfileService / VolumeSettlement / AgentChat / NovelToolFacade(三段式入口)
+- `src/novel/services/` - 服务层: BriefAssembler(brief 聚合) / LedgerStore(账本 facade) / ObligationTracker / ForeshadowingService / CharacterArcTracker / MilestoneTracker / EntityService / StyleProfileService / VolumeSettlement / AgentChat / NovelToolFacade(三段式入口) / **PrevTailSummarizer(前章原文→摘要，Writer 通道防 verbatim 复读)**
 - `src/novel/quality/` - Phase 5 质量评估: dimensions / judge / ab_compare / report
 - `src/novel/models/` - Pydantic 数据模型: Novel / Volume / Chapter / Character / World / Feedback 等
 - `src/novel/storage/` - 存储层: NovelMemory(SQLite+NetworkX+Chroma) / FileManager
@@ -142,7 +142,7 @@ PHASE4 / PHASE5）。
 - **ProjectArchitect** (`project_architect.py`) - 项目骨架：`propose_project_setup` / `propose_synopsis` / `propose_main_outline` / `propose_main_characters` / `propose_world_setting` / `propose_story_arcs` / `propose_volume_breakdown` / `regenerate_section`
 - **VolumeDirector** (`volume_director.py`) - 单卷细纲：`propose_volume_outline(hints=...)` / `settle_volume`
 - **ChapterPlanner** (`chapter_planner.py`) - 单章 brief：`propose_chapter_brief`，消费 `LedgerStore.snapshot_for_chapter()` 实时快照
-- **Writer** (`writer.py`) - 正文生成：one-shot + ReAct 双模式；**不再自 critique**
+- **Writer** (`writer.py`) - 正文生成：one-shot（ReAct 框架仍存于 `src/react/`，但 Writer 已不走 ReAct 路径）；**不再自 critique**；**不直读上章原文** — 通过 `ChapterBrief.previous_chapter_tail_summary` / `previous_chapter_end_hook` 接收 `PrevTailSummarizer` 产出的摘要（P0 修，C3 真修同模板）
 - **Reviewer** (`reviewer.py`) - 审稿单一入口：3 维度（quality / consistency / style）联合报告。**不再拆 QualityReviewer + ConsistencyChecker + StyleKeeper 三 Agent**；消费 `LedgerStore + StyleProfile`，**只标问题不打分**
 
 ### Agent 编排
@@ -152,7 +152,8 @@ PHASE4 / PHASE5）。
   - `reviewer` 是 Phase 2-β 合并产物（取代 ConsistencyChecker + StyleKeeper + QualityReviewer 三 Agent），**零打分、零自动重写**，只写 `state["current_chapter_quality"]`
   - 并行执行已取消，Reviewer 串行产单一 `CritiqueResult`
 - **反馈重写**：作者读 Reviewer 报告后主动调 `apply_feedback` / `rewrite_chapter` 工具。无自动重写循环
-- Writer 的 feedback_prompt 在 one-shot 和 ReAct 两条路径都注入
+- Writer 的 feedback_prompt 在 one-shot 路径注入（Writer 已不走 ReAct）
+- **pipeline 三处 Writer 通道全经 summarizer**（C3 真修，commit `15095b3`）：`polish_chapters` / `apply_feedback` / `rewrite_affected_chapters` 都先调 `summarize_previous_tail()` 拿摘要再喂 Writer，绝不直接喂上章原文。`polish_chapters` 的 Reviewer 评估侧仍拿原文末 500 字（信息边界规则）
 - LangGraph 为可选依赖，未安装时 fallback 为顺序执行（单 pass 无重写循环）
 
 ### 省 Token 策略
@@ -281,7 +282,7 @@ python scripts/quality_ab_debias.py
 - `regression` - 跨体裁回归（慢，需 API key）
 
 本地默认跳过 `llm_judge` / `real_run` / `regression`，通过 `--run-real` 开启。
-pytest 基线（Phase 5 完工）：**4564 passed / 21 skipped**。
+pytest 基线：**4630 passed / 21 skipped**（Phase 5 完工 4564 → P0 跨章 verbatim 4615 → C3 pipeline 同源 4630）。
 
 ### 基线与报告持久化
 

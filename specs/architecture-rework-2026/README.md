@@ -27,9 +27,14 @@
 
 ## 实施路线（11-16 天）
 
-- **Phase 0** 拆迁准备（删 dead code + 砍硬阈值/词表/default genre）
-- **Phase 1** 数据模型升级（Volume 一等公民 + Ledger 统一 + StyleProfile）
-- **Phase 2** Agent 重组（15 → 5）
-- **Phase 3** Flow 编排层（ProjectFlow / VolumeFlow / ChapterFlow / RevisionFlow）
-- **Phase 4** 工具层重组（按工作流分组）
-- **Phase 5** 测试维度修正（加文本质量评估 + LLM-as-judge + 跨体裁回归）
+> **状态**：Phase 0-5 已于 2026-04-21 全部完工。下方是原始规划，配合
+> 各 Phase 实际交付备注阅读（实际交付以 PHASE4.md / PHASE5.md / 仓库
+> `src/novel/` 现状为准）。
+
+- **Phase 0** 拆迁准备（删 dead code + 砍硬阈值/词表/default genre）✅
+- **Phase 1** 数据模型升级（Volume 一等公民 + Ledger 统一 + StyleProfile）✅
+- **Phase 2** Agent 重组（**9 → 5**：实际终态 ProjectArchitect / VolumeDirector / ChapterPlanner / Writer / Reviewer）✅
+- **Phase 3** Flow 编排层（原计划独立 ProjectFlow / VolumeFlow / ChapterFlow / RevisionFlow 类；**实际并入 `pipeline.py` + `agents/graph.py`**，未拆独立 Flow 类，DESIGN.md 仅作设计参考）
+- **Phase 4** 工具层重组 — **实际交付：三段式工具层**（propose / accept / regenerate × 9 实体），见 `PHASE4.md` ✅
+- **Phase 5** 测试维度修正（7 维质量评估 + LLM-as-judge 异源 + A/B 双向 de-bias），见 `PHASE5.md` ✅
+- **后续修复（v2.2）** Writer 上章原文通道修复 — P0 (`ffffda2`) + C3 (`15095b3`)，新增 `services/prev_tail_summarizer.py`，pipeline 三处生成通道全经摘要

@@ -1,6 +1,6 @@
-# 小说生成质量架构演化史（v1.2 → v2.1）
+# 小说生成质量架构演化史（v1.2 → v2.2）
 
-> 本文覆盖 AI 小说模块 "生成质量" 子系统从 v1.2（三层增强）到 v2.1（7 维评估 + A/B 双向）
+> 本文覆盖 AI 小说模块 "生成质量" 子系统从 v1.2（三层增强）到 v2.2（Writer 上章原文通道修复）
 > 的完整演化史。配套规划见 `specs/architecture-rework-2026/`。
 >
 > 老文件名：`docs/novel-quality-pipeline-v1.2.md`（2026-04-21 更名为
@@ -16,10 +16,11 @@
 | **v1.3** | 2026-Q1 | 章节生成图精简；零自动重写；5 Agent 固化；Reviewer 三合一；Ledger facade |
 | **v2.0** | 2026-04-18 ~ 04-21（Phase 0-4） | 三段式工具层：9 实体 × propose / accept / regenerate |
 | **v2.1** | 2026-04-21（Phase 5） | 7 维质量评估 + LLM-as-judge 异源 + A/B 双向强制规范 |
+| **v2.2** | 2026-04-25 ~ 04-26（P0 `ffffda2` + C3 `15095b3`） | Writer 切断上章原文通道；新增 PrevTailSummarizer 服务；pipeline 三处生成通道全经摘要；信息边界规则 |
 
 ---
 
-## 当前架构总览（2026-04-21, v2.1）
+## 当前架构总览（2026-04-26, v2.2）
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -27,12 +28,13 @@
 │                                                                    │
 │   BriefAssembler (继承 ContinuityService)                          │
 │        读 LedgerStore facade (Obligation/KG/StructuredDB 统一入口) │
-│        + 上章 tail / 角色状态 / 伏笔债务 / 死亡禁区                │
+│        + PrevTailSummarizer(上章末→摘要) / 角色状态 / 伏笔 / 死亡禁区│
 │                 ↓                                                  │
 │   ChapterPlanner.propose_chapter_brief                             │
 │        按本章上下文从 Ledger 实时取 must_collect / must_fulfill    │
+│        ChapterBrief.previous_chapter_tail_summary 注入             │
 │                 ↓                                                  │
-│   Writer.draft(brief) → Sanitizer                                  │
+│   Writer.draft(brief) → Sanitizer  [不直读上章原文]                │
 │                 ↓                                                  │
 │   Reviewer.review (单节点，不打分，产报告)                          │
 │        合并了旧 QualityReviewer + ConsistencyChecker + StyleKeeper │
@@ -631,13 +633,83 @@ LLM judge 分数降级为参考指标，不参与自动决策。
 
 ---
 
-## 不变量（跨越 v1.2 → v2.1）
+## v2.2 — Writer 上章原文通道修复（P0 + C3，2026-04-25 ~ 04-26）
+
+### 背景：跨章 verbatim 复读的两次完工
+
+某用户项目 ch32 出现明显的跨章 verbatim 复读（与 ch31 末段 6000 字大段
+雷同）。最初推测是 Writer ReAct prompt 拼接导致，实际定位另一处：
+**Writer 物理上能直读上章原文**，被"严禁照抄"prompt 警告硬扛而已。
+
+### P0 修复（commit `ffffda2`）
+
+* `writer_node` 删 41 行直接读 `chapters_text` / `FileManager.load_chapter_text`
+  的逻辑——Writer 物理上看不到上章原文
+* `ChapterPlanner._summarize_previous_tail` 私有方法：LLM 压缩上章末
+  500 字 → ≤200 字结构化摘要 + 15-char verbatim 后校验
+* `ChapterBrief` 增 `previous_chapter_tail_summary` / `previous_chapter_end_hook`
+  两字段（运行时 state 流转，**派生字段不落盘**）
+* `chapter_planner_node` 把 ChapterBrief 注入 state，Writer 只读 brief
+* pipeline 三处通道（`polish_chapters` / `apply_feedback` / `rewrite_affected_chapters`）
+  上章原文 2000 → 500 字（中间硬扛），Writer prompt 加"严禁照抄"
+
+P0 完工后跨章 5-gram Jaccard 0.00–0.01，首段/末段/共享段/共享 6-gram
+全 0。但 code-review 指出 polish/apply_feedback/rewrite_affected 三处仍
+**架构上同源**——只是用 prompt 警告挡住，未真切断生原文通道。
+
+### C3 真修（commit `15095b3`）
+
+抽 `ChapterPlanner._summarize_previous_tail` 到 `src/novel/services/prev_tail_summarizer.py`
+模块函数 `summarize_previous_tail(llm, previous_tail) -> str`，让 pipeline
+三处和 ChapterPlanner 共用。pipeline 三处先调 summarizer 拿摘要再喂
+Writer，**摘要返空时 context 也置空，绝不 fallback 塞生原文**。
+
+### 信息边界规则（C3 期间被 code-review 抓出）
+
+`polish_chapters` 同时有 Writer (生成侧) 和 Reviewer (评估侧) 两条下游：
+
+* **Writer 拿摘要** — 防 verbatim 复读
+* **Reviewer 拿原文末 500 字** — 评估侧需要原始字面量做 typo / 衔接 /
+  跨章伏笔判断，摘要会丢失关键字面信息
+
+第一版 C3 实现把摘要也喂给了 Reviewer，违反信息边界（H1, HIGH）。修
+法：维护两份变量 `raw_tail` / `context`，分流注入。
+
+### Writer 提示词文案对齐
+
+| 旧（v1.2 ~ v2.1） | 新（v2.2） |
+|---|---|
+| `【前文回顾 — 严禁照抄以下文字】` | `【前章状态摘要 — 仅供衔接参考，严禁照抄】` |
+| `【修改后的前文】`（propagation） | `【修改后的前章状态摘要 — 严禁照抄】` |
+
+旧文案的标签预设是"原文"，迁后传入是摘要，标签必须诚实反映才能避免下次
+有人按 label 推断"context 应该是原文"。
+
+### 沉淀的判读规则（4 条）
+
+P0 / C3 期间被 code-review 抓出的 CRITICAL（C1 死代码 / C2 持久化断链 /
+C3 同类路径漏修 + H1 信息边界违反）后总结的判读规则，沉淀到
+`memory/agent-fix-judgment.md`：
+
+1. **信息边界（生成 / 评估分流）** — Writer 用摘要，Reviewer 用原文
+2. **同类路径全 grep** — 修一处时 grep 整库找同模式（`chapter_texts[ch-1][-N:]` /
+   `prev_text[-N:]`），避免漏改
+3. **生产 key 名集成测试** — 端到端测试不 mock 内部函数，只 mock 外部
+   边界（LLM I/O），避免 import 路径迁移导致 spy 失效
+4. **架构修复优先于 prompt 警告** — 直接喂生原文 + "严禁照抄" prompt
+   是反模式；正确做法是切断生原文通道，让 Writer 物理上看不到原文
+
+---
+
+## 不变量（跨越 v1.2 → v2.2）
 
 1. **工具只做"放大镜 + 账本 + 跑腿"**，不替作者拍板
 2. **LLM judge / Reviewer 不产硬分数**，只产证据（issues / reasoning）
 3. **propose 不入库**，accept 前零副作用
 4. **删而不藏**——被砍掉的 service / agent 直接删，不留 fallback path
 5. **对齐"人的写作流程"**——立项 → 骨架 → 卷 → 章 → 改章 6 步，每步可暂停
+6. **生成侧 / 评估侧信息边界分流**（v2.2 新增）——Writer 拿摘要防 verbatim，
+   Reviewer 拿原文做衔接判断；不能混用
 
 ---
 

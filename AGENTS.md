@@ -49,6 +49,7 @@
 - `src/novel/services/tool_facade.py` - **NovelToolFacade**：MCP / CLI / agent_chat 三层共享的唯一业务入口（Phase 4）
 - `src/novel/services/ledger_store.py` - **LedgerStore** facade：统一包装 ObligationTracker + ForeshadowingService + CharacterArcTracker + MilestoneTracker + EntityService
 - `src/novel/services/brief_assembler.py` - BriefAssembler（继承 ContinuityService shim，逐步替代）
+- `src/novel/services/prev_tail_summarizer.py` - **PrevTailSummarizer**（C3 真修，commit `15095b3`）：上章末 500 字 → ≤200 字结构化摘要 + 15-char verbatim 后校验。pipeline 所有 Writer 通道（generate / polish / apply_feedback / rewrite_affected）共用；ChapterPlanner 内部 wrapper 委托
 - `src/novel/quality/` - **Phase 5** 质量评估（7 维度 + LLM-as-judge + A/B pairwise）
 - `src/novel/tools/` - ChapterDigest（BM25/ConsistencyTool/QualityCheckTool/StyleAnalysisTool 已删）
 - 规划文档 `specs/architecture-rework-2026/`（AUDIT / DESIGN / PHASE4 / PHASE5 / README）

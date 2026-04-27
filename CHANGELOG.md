@@ -1,5 +1,72 @@
 # 更新日志
 
+## [2.0.0] - 2026-04-26
+
+### 重大重构 — 架构重构 2026 Phase 0-5（2026-04-18 ~ 04-21）
+
+- **5 Agent 替换旧 9 Agent** — `ProjectArchitect` / `VolumeDirector` / `ChapterPlanner` / `Writer` / `Reviewer`，规划文档见 `specs/architecture-rework-2026/`（README / AUDIT / DESIGN / MODULE_USAGE / PHASE4 / PHASE5）
+  - 删除 `ConsistencyChecker` / `StyleKeeper` / `QualityReviewer` 三 Agent，合并到单一 `Reviewer` 节点（3 维联合报告：quality / consistency / style）
+  - 删除 `DynamicOutlinePlanner` / `PlotPlanner` / `HookGenerator`，合并到 `ChapterPlanner`（brief + scenes + hook 一站式）
+  - 删除 `WorldBuilder` / `CharacterDesigner` / `NovelDirector` 三 Agent 的初始化职责，合并到 `ProjectArchitect.propose_*`
+  - 章节生成图从多节点并行简化为 4 节点串行：`chapter_planner → writer → reviewer → state_writeback`
+  - **Reviewer 不再打分** — 只产 `CritiqueResult` 报告，零自动重写循环；定量打分迁移到 Phase 5 `src/novel/quality/`
+
+- **Phase 4 三段式工具层** `NEW` — `propose / accept / regenerate` 统一到 MCP / CLI / agent_chat 三层
+  - 9 个实体（project_setup / synopsis / main_outline / characters / world_setting / story_arcs / volume_breakdown / volume_outline / chapter_brief）× propose / accept / regenerate 矩阵
+  - `NovelToolFacade` (`src/novel/services/tool_facade.py`) — 三层共享的唯一业务入口，MCP/CLI/agent_chat 只做参数适配
+  - propose 不入库（仅 caller 会话内有效）；accept 幂等（`_meta.last_accepted_proposal_id`）；regenerate 删而不藏（不保留历史版本，characters/world_setting 走 `setting_version.py` 版本链）
+  - **Deprecated**：`novel_create` MCP 工具 + `plan_chapters` agent_chat 工具，保留一个版本周期
+
+- **Phase 5 质量评估** `NEW` — 7 维仪表盘 + LLM-as-judge 异源原则
+  - 7 维度：叙事流畅 / 角色一致 / 伏笔兑现率（**唯一硬门禁 >= 60%**）/ AI 味指数 / 情节推进 / 对话自然 / 章节勾连
+  - LLM Judge 异源：Writer 用 DeepSeek → Judge 用 Gemini，反之亦然，避免同模型自评 bias
+  - **A/B 双向强制 de-bias** — 实证 gpt-4o-mini position bias 平均 76.5%，单向结果不作量化结论；`scripts/quality_ab_debias.py` 必跑双向
+  - 跨体裁回归脚本 `scripts/quality_regression.py`（5 体裁 × 3 章 + 7 维评估 + Rich Table + markdown 报告）
+  - pytest marker 体系：`signature` / `quality` / `llm_judge` / `real_run` / `regression`，本地默认跳真机 marker
+
+- **LedgerStore 统一账本** `NEW` — `src/novel/services/ledger_store.py`
+  - facade 包装 `ObligationTracker` / `ForeshadowingService` / `CharacterArcTracker` / `MilestoneTracker` / `EntityService`
+  - `snapshot_for_chapter(N)` 返回当章 brief 需要的所有账本数据，`ChapterPlanner.propose_chapter_brief` 实时消费
+
+- **BriefAssembler 替换 ContinuityService** — `src/novel/services/brief_assembler.py`
+  - Ledger-first 的 continuity context 聚合器，`ContinuityService` 保留为兼容 shim
+  - 由 `ChapterPlanner.propose_chapter_brief` 实时调用，新代码一律用 BriefAssembler
+
+### 修复 — Writer 跨章 verbatim 复读 P0 + C3 同源
+
+- **P0 修复（commit `ffffda2`，2026-04-25）** — Writer 切断上章原文通道
+  - `writer_node` 删 41 行直接读 `chapters_text` / `FileManager.load_chapter_text` 逻辑
+  - `ChapterPlanner` 加 `_summarize_previous_tail`（LLM 压缩 ≤200 字 + 15-char verbatim 后校验）+ `_lookup_previous_end_hook`
+  - `ChapterBrief` 加 `previous_chapter_tail_summary` / `previous_chapter_end_hook` 字段（派生字段不落盘，运行时 state 流转）
+  - `pipeline.polish_chapters` / `rewrite_chapter` 上章原文 2000 → 500 字（中间硬扛），Writer prompt 加"严禁照抄"
+  - 测试 +51 例（`test_chapter_planner_prev_tail_summary.py` × 19 + `test_writer_no_raw_prev_chapter.py` × 9 + `test_p0_integration.py` × 14）
+
+- **C3 同源真修（commit `15095b3`，2026-04-26）** `NEW` — pipeline 三处通道走 summarizer
+  - 新增 `src/novel/services/prev_tail_summarizer.py` — `summarize_previous_tail()` + `has_long_verbatim_overlap()` 模块函数
+  - `ChapterPlanner._summarize_previous_tail` / `_has_long_verbatim_overlap` 改为 thin wrapper 委托给 service（19 个旧测试不破）
+  - `pipeline.polish_chapters` / `apply_feedback` / `rewrite_affected_chapters` 三处通道：先 `summarize_previous_tail()` 拿摘要再喂 `Writer.polish_chapter` / `Writer.rewrite_chapter`；摘要返空时 context 也置空，**绝不 fallback 塞生原文**
+  - **信息边界规则落地** — `polish_chapters` 的 Reviewer 拿原文末 500 字（评估侧需要原始字面量做 typo / 衔接 / 跨章伏笔判断），Writer 拿摘要（生成侧防 verbatim 复读）
+  - Writer 提示词文案：`【前文回顾 — 严禁照抄】` → `【前章状态摘要 — 仅供衔接参考，严禁照抄】`，propagation 分支 `【修改后的前文】` → `【修改后的前章状态摘要 — 严禁照抄】`
+  - `apply_feedback` 路径修 `truncate_text(..., 500)` (从开头切句子边界 friendly) → `[-500:]` (取末尾)
+  - 测试 +15 例 `test_pipeline_c3_prev_tail.py`（含端到端 backstop：不 patch summarizer 只 patch llm.chat，验证 Writer prompt 不含上章 15-char 子串）
+
+### 变更
+
+- 版本号从 1.2.0 升级至 2.0.0（标志 9 → 5 Agent 架构 break change）
+- pytest 总数从 3692 → **4630**（Phase 5 完工 4564 → P0 4615 → C3 4630）
+- 旧规划文档 `specs/novel-writing/`（requirements.md / design.md / tasks.md）转为历史参考
+
+### 沉淀的判读规则
+
+来自 P0 / C3 期间被 code-review 抓出的 CRITICAL（C1 死代码 / C2 持久化断链 / C3 同类路径漏修 + H1 信息边界违反）后总结的 4 条规则：
+
+1. **信息边界（生成侧 / 评估侧分流）** — Writer 用摘要避免 verbatim 复读；Reviewer 用原文做 typo / 衔接判断；不能混用
+2. **同类路径全 grep** — 修一处时 grep 整库找同模式（如 `chapter_texts[ch-1][-N:]` / `prev_text[-N:]`），避免漏改
+3. **生产 key 名集成测试** — 端到端测试不 mock 内部函数，只 mock 外部边界（LLM I/O），避免 import 路径迁移导致 spy 失效
+4. **架构修复优先于 prompt 警告** — 直接喂生原文 + "严禁照抄" prompt 警告 是反模式；正确做法是切断生原文通道，让 Writer 物理上看不到原文
+
+---
+
 ## [1.2.0] - 2026-04-08
 
 ### 新增 — 小说生成质量三层增强
