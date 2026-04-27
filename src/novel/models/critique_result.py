@@ -38,8 +38,9 @@ IssueType = Literal[
     "trope_overuse",
     "transition",
     "logic",
-    "consistency",       # 与 ledger 冲突
-    "style_overuse",     # 本书口头禅过密
+    "consistency",              # 与 ledger 冲突
+    "style_overuse",            # 本书口头禅过密
+    "cross_chapter_verbatim",   # 跨章 verbatim 复读（C 阶段 P2 兜底网，2026-04-28）
     "other",
 ]
 

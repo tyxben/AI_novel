@@ -24,6 +24,7 @@ LangGraph 节点：``reviewer_node`` 是 chapter graph 的唯一审稿节点，
 from __future__ import annotations
 
 import logging
+import re as _re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -103,6 +104,52 @@ def _build_system_prompt(watchlist: dict[str, int] | list[str] | None) -> str:
         items = list(watchlist)
         block = "、".join(items) if items else "（空）"
     return _SYSTEM_PROMPT_TEMPLATE.format(watchlist_block=block)
+
+
+# ---------------------------------------------------------------------------
+# 跨章 verbatim 兜底维度（C 阶段 P2，2026-04-28）
+# ---------------------------------------------------------------------------
+#
+# P0 (commit ffffda2) + C3 (commit 15095b3) 物理切断了 Writer 直读上章原文
+# 的所有路径，但万一未来有新通道把生原文塞进 Writer prompt（e.g. 新加的
+# pipeline 入口忘走 summarizer），本维度作为兜底网立刻报警。纯规则，零 LLM。
+#
+# 算法：char-level 5-gram Jaccard。比 sentence-level 更敏感——能抓"换标点
+# 改一字"的浅改写抄袭。计算量 O(N+M) 对 N=2500 章节 + M=500 prev_tail 不
+# 影响 review 性能（~ms 级）。
+
+_CROSS_CHAPTER_NGRAM = 5
+"""char n-gram length for cross-chapter verbatim detection."""
+
+_CROSS_CHAPTER_JACCARD_THRESHOLD = 0.6
+"""Jaccard ≥ 此值 → 视为跨章 verbatim 复读，加 high severity issue。
+
+阈值 0.6 经验值：normal 续写衔接（"他点了点头" 类微量重叠）远低于 0.1；
+P0 ch32 复读 ch31 末段 6000 字的事故 case 实测 5-gram Jaccard ≈ 0.85+。
+0.6 是清晰分界线，false-positive 风险低。
+"""
+
+
+def _char_ngrams(text: str, n: int = _CROSS_CHAPTER_NGRAM) -> set[str]:
+    """Char n-gram set。空白标准化后切，过滤 < n 字的输入。"""
+    if not text:
+        return set()
+    # 压缩连续空白：保留汉字/字母/数字 + 标点都按字符算
+    cleaned = _re.sub(r"\s+", "", text)
+    if len(cleaned) < n:
+        return set()
+    return {cleaned[i : i + n] for i in range(len(cleaned) - n + 1)}
+
+
+def _ngram_jaccard(a: str, b: str, n: int = _CROSS_CHAPTER_NGRAM) -> float:
+    """Char n-gram Jaccard 相似度。两侧任一 n-gram set 为空 → 0.0。"""
+    set_a = _char_ngrams(a, n)
+    set_b = _char_ngrams(b, n)
+    if not set_a or not set_b:
+        return 0.0
+    inter = set_a & set_b
+    union = set_a | set_b
+    return len(inter) / len(union) if union else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +274,16 @@ class Reviewer:
                     )
                 )
 
+        # ---- 4. 跨章 verbatim 兜底维度（纯规则，C 阶段 P2 加）----
+        # P0/C3 已物理切断 Writer 直读上章原文的所有通道。万一未来新加的
+        # pipeline 入口忘走 summarizer，本兜底网立刻报警。
+        cross_issue = self._check_cross_chapter_verbatim(
+            chapter_text=chapter_text,
+            previous_tail=previous_tail,
+        )
+        if cross_issue is not None:
+            llm_result.issues.append(cross_issue)
+
         llm_result.chapter_number = chapter_number
         llm_result.style_overuse_hits = overuse_hits
         llm_result.consistency_flags = consistency_flags
@@ -345,6 +402,51 @@ class Reviewer:
             except Exception:
                 continue
         return dense
+
+    # ------------------------------------------------------------------
+    # 跨章 verbatim 兜底（C 阶段 P2，2026-04-28）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_cross_chapter_verbatim(
+        chapter_text: str,
+        previous_tail: str,
+        threshold: float = _CROSS_CHAPTER_JACCARD_THRESHOLD,
+    ) -> CritiqueIssue | None:
+        """检查当前章节 vs 上一章末段的 char-5gram Jaccard 相似度。
+
+        C 阶段 P2 兜底网：P0/C3 已物理切断 Writer 直读上章原文的所有通道，
+        但万一未来新加的 pipeline 入口忘走 summarizer，本规则立刻报警。
+
+        Args:
+            chapter_text: 当前章节正文。
+            previous_tail: 上一章末尾若干字（C3 修复后是 500 字原文）。
+            threshold: Jaccard 阈值，默认 0.6。命中即报 high severity。
+
+        Returns:
+            ``CritiqueIssue`` 当 Jaccard >= threshold；否则 ``None``。
+
+            空文本 / previous_tail 为空 / 任一 n-gram set 为空 → 静默返回
+            ``None``（既不是问题也不是错误）。
+        """
+        if not chapter_text or not previous_tail:
+            return None
+        # 5-gram set 至少要有交集才计算（小输入早退）
+        score = _ngram_jaccard(
+            chapter_text, previous_tail, n=_CROSS_CHAPTER_NGRAM
+        )
+        if score < threshold:
+            return None
+        return CritiqueIssue(
+            type="cross_chapter_verbatim",
+            severity="high",
+            quote="",
+            reason=(
+                f"本章与上一章末段 char-5gram Jaccard={score:.2f}"
+                f"（阈值 {threshold:.2f}），疑似跨章 verbatim 复读。"
+                f"检查 ChapterPlanner / Writer 通道是否绕过 summarize_previous_tail。"
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Ledger consistency
