@@ -350,6 +350,307 @@ class TestGenerateVolumeOutline:
         assert len(result) == 30
         assert mock_llm.chat.call_count == 3
 
+    def test_d2_fallback_uses_volumes_not_polluted_chapters_max(self):
+        """D2 regression: 当 target_volume.chapters 空（被错误覆盖）+ outline.chapters
+        被污染（含远超本卷的幽灵章节号）时，必须从 outline.volumes 上一卷推断起点，
+        而不是从 outline.chapters max+1 算（事故源头：ch201-235 凭空冒出）。
+
+        场景模拟：
+        - outline.volumes 正常：vol1[1-30]、vol2[31-60]
+        - vol2.chapters 被某次 accept_proposal 错误清空 → []
+        - outline.chapters 被先前坏路径污染：含 ch200 的幽灵记录
+        - 调用 generate_volume_outline(volume_number=2)
+
+        预期：start_ch=31（从 vol1.chapters max+1 推断），不是 201。
+        """
+        from src.novel.agents.novel_director import NovelDirector
+
+        captured_prompts: list[str] = []
+
+        def _capture(messages, **kwargs):
+            captured_prompts.append(messages[1]["content"])
+            # 返回 31-60 章，让测试不会因 LLM 内容失败
+            return FakeLLMResponse(content=_make_volume_outline_response(31, 60))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _capture
+
+        # 构造受污染的 outline：vol1 正常，vol2.chapters 空，outline.chapters 含幽灵 ch200
+        outline = {
+            "template": "cyclic_upgrade",
+            "main_storyline": {"protagonist_goal": "G", "core_conflict": "C"},
+            "acts": [{"name": "幕1", "description": "开端", "start_chapter": 1, "end_chapter": 60}],
+            "volumes": [
+                {
+                    "volume_number": 1,
+                    "title": "第一卷",
+                    "core_conflict": "矛盾1",
+                    "resolution": "解决1",
+                    "chapters": list(range(1, 31)),
+                },
+                {
+                    "volume_number": 2,
+                    "title": "第二卷",
+                    "core_conflict": "矛盾2",
+                    "resolution": "解决2",
+                    "chapters": [],  # ← 被错误清空
+                },
+            ],
+            # outline.chapters 含 vol1 全部 30 章 + 一条 ch200 幽灵记录
+            "chapters": [
+                {
+                    "chapter_number": i,
+                    "title": f"第{i}章",
+                    "goal": f"G{i}",
+                    "key_events": [f"E{i}"],
+                    "estimated_words": 2500,
+                    "mood": "蓄力",
+                }
+                for i in list(range(1, 31)) + [200]
+            ],
+        }
+        director = NovelDirector(mock_llm)
+        novel_data = {
+            "genre": "玄幻",
+            "theme": "少年修炼",
+            "outline": outline,
+            "world_setting": {},
+            "characters": [],
+        }
+
+        director.generate_volume_outline(
+            novel_data=novel_data,
+            volume_number=2,
+            previous_summary="",
+        )
+
+        assert captured_prompts, "LLM 应被调用至少一次"
+        prompt = captured_prompts[0]
+        # 起点必须是 31（vol1 max+1），绝不是 201（污染 max+1）
+        # chapters_count 走 genre 推（玄幻 35 章/卷）→ end_ch=65
+        assert "第31章" in prompt, (
+            f"prompt 中卷起点应为 31（vol1 max+1），实际片段:\n{prompt[:1500]}"
+        )
+        assert "第201章" not in prompt and "第230章" not in prompt, (
+            "fallback 不该从 outline.chapters max+1=201 起算，应从 vol1 推断"
+        )
+        # 玄幻 35 章/卷 → vol2 范围 31-65
+        assert "第31章 - 第65章" in prompt, (
+            f"玄幻 vol2 应按 35 章/卷算 31-65，实际:\n{prompt[:1500]}"
+        )
+
+    def test_d2_fallback_volume1_uses_ordinal_when_no_prior_volume(self):
+        """D2 边界：volume_number=1 且 chapters 空时，上一卷不存在，
+        应按卷号序数从 ch1 起算（不从 outline.chapters max+1）。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        captured: list[str] = []
+
+        def _capture(messages, **kwargs):
+            captured.append(messages[1]["content"])
+            return FakeLLMResponse(content=_make_volume_outline_response(1, 30))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _capture
+
+        outline = {
+            "template": "cyclic_upgrade",
+            "main_storyline": {"protagonist_goal": "G", "core_conflict": "C"},
+            "acts": [{"name": "幕1", "description": "x", "start_chapter": 1, "end_chapter": 30}],
+            "volumes": [
+                {
+                    "volume_number": 1,
+                    "title": "第一卷",
+                    "core_conflict": "矛盾1",
+                    "resolution": "解决1",
+                    "chapters": [],  # ← 空
+                },
+            ],
+            # 即使 outline.chapters 含幽灵记录也不应影响 vol1 起点
+            "chapters": [
+                {
+                    "chapter_number": 999,
+                    "title": "幽灵",
+                    "goal": "G",
+                    "key_events": ["E"],
+                    "estimated_words": 2500,
+                    "mood": "蓄力",
+                }
+            ],
+        }
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={
+                "genre": "玄幻", "theme": "x", "outline": outline,
+                "world_setting": {}, "characters": [],
+            },
+            volume_number=1,
+            previous_summary="",
+        )
+
+        prompt = captured[0]
+        # 玄幻 35 章/卷 → vol1 范围 1-35
+        assert "第1章 - 第35章" in prompt, f"vol1 起点应为 1，prompt 片段:\n{prompt[:1500]}"
+        assert "第1000章" not in prompt and "第999章" not in prompt
+
+    def test_d2_fallback_strict_prev_volume_no_skip_over_empty(self):
+        """D2 H2: vol3 请求时，必须严格找 vol2 (volume_number-1)。
+        即使 vol2.chapters 空，也不应跨过 vol2 取 vol1.max+1=31 当作起点。
+        正确行为：走 ordinal fallback 算 (3-1)*30+1=61。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        captured: list[str] = []
+
+        def _capture(messages, **kwargs):
+            captured.append(messages[1]["content"])
+            return FakeLLMResponse(content=_make_volume_outline_response(61, 90))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _capture
+
+        outline = {
+            "template": "cyclic_upgrade",
+            "main_storyline": {"protagonist_goal": "G", "core_conflict": "C"},
+            "acts": [{"name": "幕1", "description": "x", "start_chapter": 1, "end_chapter": 90}],
+            "volumes": [
+                {"volume_number": 1, "title": "vol1", "core_conflict": "x",
+                 "resolution": "x", "chapters": list(range(1, 31))},
+                {"volume_number": 2, "title": "vol2", "core_conflict": "x",
+                 "resolution": "x", "chapters": []},  # 中间空卷
+                {"volume_number": 3, "title": "vol3", "core_conflict": "x",
+                 "resolution": "x", "chapters": []},
+            ],
+            "chapters": [
+                {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+                 "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+                for i in range(1, 31)
+            ],
+        }
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={"genre": "玄幻", "theme": "x", "outline": outline,
+                        "world_setting": {}, "characters": []},
+            volume_number=3,
+            previous_summary="",
+        )
+        prompt = captured[0]
+        # 玄幻 _GENRE_CHAPTERS_PER_VOLUME=35 → vol3 ordinal=(3-1)*35+1=71，不是 31
+        assert "第71章" in prompt, f"应按 genre 35 章/卷算 vol3=71-105，实际:\n{prompt[:1500]}"
+        assert "第31章 - 第60章" not in prompt, "vol3 不该挑 vol1 max+1=31 当起点"
+
+    def test_d2_fallback_uses_genre_chapters_per_volume(self):
+        """D2 H1: ordinal fallback 应按 genre 推 chapters_count，不是硬编码 30。
+        修仙 _GENRE_CHAPTERS_PER_VOLUME=40 → vol2 ordinal=(2-1)*40+1=41。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        captured: list[str] = []
+
+        def _capture(messages, **kwargs):
+            captured.append(messages[1]["content"])
+            return FakeLLMResponse(content=_make_volume_outline_response(41, 80))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _capture
+
+        # 全空 prior chapters → 走 ordinal
+        outline = {
+            "template": "cyclic_upgrade",
+            "main_storyline": {"protagonist_goal": "G", "core_conflict": "C"},
+            "acts": [{"name": "幕1", "description": "x", "start_chapter": 1, "end_chapter": 80}],
+            "volumes": [
+                {"volume_number": 1, "title": "vol1", "core_conflict": "x",
+                 "resolution": "x", "chapters": []},
+                {"volume_number": 2, "title": "vol2", "core_conflict": "x",
+                 "resolution": "x", "chapters": []},
+            ],
+            "chapters": [],
+        }
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={"genre": "修仙", "theme": "x", "outline": outline,
+                        "world_setting": {}, "characters": []},
+            volume_number=2,
+            previous_summary="",
+        )
+        prompt = captured[0]
+        assert "第41章" in prompt and "第80章" in prompt, (
+            f"修仙体裁 vol2 应用 40 章/卷算 41-80，实际:\n{prompt[:1500]}"
+        )
+
+    def test_d2_fallback_respects_outline_default_chapters_per_volume(self):
+        """D2 H1 优先级：outline.default_chapters_per_volume > genre 表 > 30。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        captured: list[str] = []
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = lambda messages, **kw: (
+            captured.append(messages[1]["content"])
+            or FakeLLMResponse(content=_make_volume_outline_response(16, 30))
+        )
+
+        outline = {
+            "template": "custom",
+            "default_chapters_per_volume": 15,  # outline 自带配置覆盖 genre 表
+            "main_storyline": {"protagonist_goal": "G", "core_conflict": "C"},
+            "acts": [{"name": "幕1", "description": "x", "start_chapter": 1, "end_chapter": 60}],
+            "volumes": [
+                {"volume_number": 1, "title": "vol1", "core_conflict": "x",
+                 "resolution": "x", "chapters": []},
+                {"volume_number": 2, "title": "vol2", "core_conflict": "x",
+                 "resolution": "x", "chapters": []},
+            ],
+            "chapters": [],
+        }
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={"genre": "修仙", "theme": "x", "outline": outline,
+                        "world_setting": {}, "characters": []},
+            volume_number=2,
+            previous_summary="",
+        )
+        prompt = captured[0]
+        # outline.default_chapters_per_volume=15 应胜过修仙 genre 的 40
+        assert "第16章 - 第30章" in prompt, (
+            f"应按 outline.default_chapters_per_volume=15 算 vol2=16-30，实际:\n{prompt[:1500]}"
+        )
+
+    def test_d2_fallback_warns_on_overlap_with_existing_volume(self, caplog):
+        """D2 H2 防御：fallback 推算范围若与现有卷 chapters 重叠，应告警。"""
+        import logging
+        from src.novel.agents.novel_director import NovelDirector
+
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = FakeLLMResponse(
+            content=_make_volume_outline_response(31, 60)
+        )
+
+        # 制造重叠：vol2.chapters 空 → fallback 算到 31-60；同时 vol3 已有 chapters [50..80]
+        outline = {
+            "template": "cyclic_upgrade",
+            "main_storyline": {"protagonist_goal": "G", "core_conflict": "C"},
+            "acts": [{"name": "幕1", "description": "x", "start_chapter": 1, "end_chapter": 80}],
+            "volumes": [
+                {"volume_number": 1, "title": "vol1", "core_conflict": "x",
+                 "resolution": "x", "chapters": list(range(1, 31))},
+                {"volume_number": 2, "title": "vol2", "core_conflict": "x",
+                 "resolution": "x", "chapters": []},
+                {"volume_number": 3, "title": "vol3", "core_conflict": "x",
+                 "resolution": "x", "chapters": list(range(50, 81))},
+            ],
+            "chapters": [],
+        }
+        director = NovelDirector(mock_llm)
+        with caplog.at_level(logging.WARNING, logger="novel"):
+            director.generate_volume_outline(
+                novel_data={"genre": "玄幻", "theme": "x", "outline": outline,
+                            "world_setting": {}, "characters": []},
+                volume_number=2,
+                previous_summary="",
+            )
+        assert any("重叠" in rec.message for rec in caplog.records), (
+            "重叠卷 chapters 应触发 warning"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Test: _extend_outline

@@ -21,7 +21,31 @@ from src.novel.utils.json_extract import extract_json_obj
 
 log = logging.getLogger("novel")
 
-_CHAPTERS_PER_VOLUME = 30  # 每卷约 30 章（pipeline 侧按此分卷）
+# pipeline 侧按此分卷的兜底常量；优先级低于 outline_templates 的
+# default_chapters_per_volume 和 volume_director 的 _GENRE_CHAPTERS_PER_VOLUME。
+_CHAPTERS_PER_VOLUME = 30
+
+
+def _resolve_chapters_per_volume(novel_data: dict, outline: dict) -> int:
+    """按优先级推导每卷章数：outline.default_chapters_per_volume → genre 表 → 30。
+
+    用于 fallback 路径（target_volume.chapters 为空时），让 ordinal 兜底
+    与项目实际配置对齐，避免 30 硬编码与修仙(40)/言情(20) 等体裁冲突。
+    """
+    # 1) outline 自带（来自 outline_templates 的 default_chapters_per_volume）
+    val = outline.get("default_chapters_per_volume")
+    if isinstance(val, int) and val > 0:
+        return val
+    # 2) 体裁推荐表（与 volume_director 同源）
+    try:
+        from src.novel.agents.volume_director import _GENRE_CHAPTERS_PER_VOLUME
+        genre = novel_data.get("genre", "")
+        if genre in _GENRE_CHAPTERS_PER_VOLUME:
+            return _GENRE_CHAPTERS_PER_VOLUME[genre]
+    except Exception:  # pragma: no cover - defensive
+        pass
+    # 3) 全局兜底
+    return _CHAPTERS_PER_VOLUME
 
 
 def _make_decision(
@@ -163,15 +187,51 @@ class NovelDirector:
             end_ch = max(vol_chapters)
             chapters_count = len(vol_chapters)
         else:
-            # 根据 volumes 列表推断章节范围
-            chapters_count = _CHAPTERS_PER_VOLUME
-            existing_max = 0
-            for ch in outline.get("chapters", []):
-                ch_num = ch.get("chapter_number", 0) if isinstance(ch, dict) else 0
-                if ch_num > existing_max:
-                    existing_max = ch_num
-            start_ch = existing_max + 1
+            # D2 修复：fallback 不再从 outline.chapters max+1 算起点（会被
+            # 幽灵章节污染，导致 ch201-235 类事故）。优先级：
+            #   1. outline.volumes 中"严格紧邻"上一卷 (volume_number-1) 的
+            #      chapters max+1 → 本卷起点；不允许跨过中间空卷取更早的卷
+            #   2. (volume_number-1) × chapters_count + 1 → 按卷号序数算
+            # chapters_count 也按 outline/genre 配置推，不再硬编码 30。
+            chapters_count = _resolve_chapters_per_volume(novel_data, outline)
+            prev_vol_max = 0
+            source = "卷号序数"
+            for vol in volumes:
+                if not isinstance(vol, dict):
+                    continue
+                if vol.get("volume_number") != volume_number - 1:
+                    continue
+                vc = vol.get("chapters") or []
+                ints = [int(c) for c in vc if isinstance(c, (int, str)) and str(c).lstrip("-").isdigit()]
+                if ints:
+                    prev_vol_max = max(ints)
+                    source = f"上一卷 vol{volume_number - 1} max+1"
+                break
+            if prev_vol_max > 0:
+                start_ch = prev_vol_max + 1
+            else:
+                start_ch = max(1, (volume_number - 1) * chapters_count + 1)
             end_ch = start_ch + chapters_count - 1
+            # 防御：扫现有卷检测重叠，不静默产冲突
+            for vol in volumes:
+                if not isinstance(vol, dict):
+                    continue
+                vn = vol.get("volume_number", 0)
+                if vn == volume_number:
+                    continue
+                other = vol.get("chapters") or []
+                other_ints = {int(c) for c in other if isinstance(c, (int, str)) and str(c).lstrip("-").isdigit()}
+                if other_ints and not other_ints.isdisjoint(range(start_ch, end_ch + 1)):
+                    log.warning(
+                        "卷%d fallback 推断范围 [%d, %d] 与卷%d 现有 chapters 重叠：%s",
+                        volume_number, start_ch, end_ch, vn,
+                        sorted(other_ints & set(range(start_ch, end_ch + 1)))[:5],
+                    )
+                    break
+            log.info(
+                "卷%d 章节范围 fallback 推断: 第%d-%d章 (来源: %s, 每卷章数=%d)",
+                volume_number, start_ch, end_ch, source, chapters_count,
+            )
 
         # 提取世界观和角色信息
         world_setting = novel_data.get("world_setting", {})
