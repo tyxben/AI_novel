@@ -614,6 +614,272 @@ class TestGenerateVolumeOutline:
             f"应按 outline.default_chapters_per_volume=15 算 vol2=16-30，实际:\n{prompt[:1500]}"
         )
 
+    def test_d3_batches_when_volume_exceeds_batch_size(self):
+        """D3: 单卷 50 章超过 BATCH_MAX_CHAPTERS=30 时，应分批 LLM call。
+
+        原 8192 max_tokens 单次 call 35+ 章会被 JSON 截断，丢失尾部章节。
+        分批后每批 ≤ 30 章，token 余量充裕；50 章近似均衡切 25+25。
+        """
+        from src.novel.agents.novel_director import NovelDirector
+
+        # vol1.chapters=[1..50] → 50 章，应分批 (20+20+10)
+        outline = _make_outline_dict(50)
+        outline["volumes"][0]["chapters"] = list(range(1, 51))
+        # outline.chapters 也补齐到 50
+        outline["chapters"] = [
+            {
+                "chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+                "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力",
+            }
+            for i in range(1, 51)
+        ]
+
+        # 每次 LLM call 模拟"按本批 chapter_number range 返回"
+        # NovelDirector 应在每次 call 里把 batch 的 start_ch/end_ch 写进 prompt
+        captured_ranges: list[tuple[int, int]] = []
+
+        def _by_batch(messages, **kwargs):
+            prompt = messages[1]["content"]
+            # 解析"章节号从 X 开始，到 Y 结束"
+            import re
+            m = re.search(r"章节号从\s*(\d+)\s*开始，到\s*(\d+)\s*结束", prompt)
+            if not m:
+                raise AssertionError(f"prompt 缺 batch range:\n{prompt[:600]}")
+            s, e = int(m.group(1)), int(m.group(2))
+            captured_ranges.append((s, e))
+            return FakeLLMResponse(content=_make_volume_outline_response(s, e))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _by_batch
+
+        director = NovelDirector(mock_llm)
+        result = director.generate_volume_outline(
+            novel_data={
+                "genre": "玄幻", "theme": "x", "outline": outline,
+                "world_setting": _make_world_setting_dict(),
+                "characters": [{"name": "张三", "role": "主角"}],
+            },
+            volume_number=1,
+            previous_summary="",
+        )
+
+        # 应至少 2 次 call（50 章按 ≤ 30/批切 → 30+20）
+        assert mock_llm.chat.call_count >= 2, (
+            f"50 章应分批至少 2 次 LLM call，实际 {mock_llm.chat.call_count}"
+        )
+        # 各批 range 应完整覆盖 1-50 且无重叠
+        covered = set()
+        for s, e in captured_ranges:
+            assert e - s + 1 <= 30, f"单批不应超 30 章（BATCH_MAX_CHAPTERS）实际 {s}-{e}"
+            for n in range(s, e + 1):
+                assert n not in covered, f"批次重叠：ch{n}"
+                covered.add(n)
+        assert covered == set(range(1, 51)), f"未覆盖完整 1-50，实际 {sorted(covered)}"
+        # 最终输出 50 章
+        assert len(result) == 50
+        nums = sorted(c["chapter_number"] for c in result)
+        assert nums == list(range(1, 51))
+
+    def test_d3_no_batching_when_below_threshold(self):
+        """D3 兼容：≤ BATCH_MAX_CHAPTERS 单次 call，保持原行为。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = FakeLLMResponse(
+            content=_make_volume_outline_response(1, 15)
+        )
+        outline = _make_outline_dict(15)
+        outline["volumes"][0]["chapters"] = list(range(1, 16))
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={
+                "genre": "玄幻", "theme": "x", "outline": outline,
+                "world_setting": {}, "characters": [],
+            },
+            volume_number=1,
+            previous_summary="",
+        )
+        assert mock_llm.chat.call_count == 1, (
+            f"15 章应单次 call，实际 {mock_llm.chat.call_count}"
+        )
+
+    def test_d3_batch_failure_only_retries_failing_batch(self, monkeypatch):
+        """D3：分批模式下某批失败 retry 不影响其他批。"""
+        import time as time_mod
+        from src.novel.agents.novel_director import NovelDirector
+
+        # L3：mock sleep 避免重试 backoff 真睡
+        monkeypatch.setattr(time_mod, "sleep", lambda *a, **kw: None)
+
+        outline = _make_outline_dict(40)
+        outline["volumes"][0]["chapters"] = list(range(1, 41))
+        outline["chapters"] = [
+            {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+             "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+            for i in range(1, 41)
+        ]
+
+        # 40 章近似均衡切 20+20。第一批成功，第二批前两次 fail，第三次成功
+        call_count = {"n": 0, "second_batch": 0}
+
+        def _flaky(messages, **kwargs):
+            call_count["n"] += 1
+            prompt = messages[1]["content"]
+            import re
+            m = re.search(r"章节号从\s*(\d+)\s*开始，到\s*(\d+)\s*结束", prompt)
+            s, e = int(m.group(1)), int(m.group(2))
+            if s >= 21:  # 40 章 → batches=(1,20)+(21,40)，第二批 s=21
+                call_count["second_batch"] += 1
+                if call_count["second_batch"] < 3:
+                    raise RuntimeError("API timeout")
+            return FakeLLMResponse(content=_make_volume_outline_response(s, e))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _flaky
+
+        director = NovelDirector(mock_llm)
+        result = director.generate_volume_outline(
+            novel_data={
+                "genre": "玄幻", "theme": "x", "outline": outline,
+                "world_setting": {}, "characters": [],
+            },
+            volume_number=1,
+            previous_summary="",
+        )
+        # 第一批 1 次 + 第二批 3 次 = 4 次
+        assert call_count["n"] == 4, f"实际 LLM call={call_count['n']}"
+        assert len(result) == 40
+
+    def test_d3_balanced_batch_split_avoids_singleton_tail(self):
+        """D3 H2：31 章应均衡切 16+15，不切 30+1（末批单章 prompt 质量差）。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        captured: list[tuple[int, int]] = []
+
+        def _by_batch(messages, **kwargs):
+            import re
+            prompt = messages[1]["content"]
+            m = re.search(r"章节号从\s*(\d+)\s*开始，到\s*(\d+)\s*结束", prompt)
+            s, e = int(m.group(1)), int(m.group(2))
+            captured.append((s, e))
+            return FakeLLMResponse(content=_make_volume_outline_response(s, e))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _by_batch
+
+        outline = _make_outline_dict(31)
+        outline["volumes"][0]["chapters"] = list(range(1, 32))
+        outline["chapters"] = [
+            {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+             "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+            for i in range(1, 32)
+        ]
+
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={
+                "genre": "玄幻", "theme": "x", "outline": outline,
+                "world_setting": {}, "characters": [],
+            },
+            volume_number=1,
+            previous_summary="",
+        )
+        # 31 章 → math.ceil(31/30)=2 批，divmod(31,2)=(15,1) → 16+15
+        assert len(captured) == 2, f"31 章应分 2 批，实际 {captured}"
+        sizes = sorted([e - s + 1 for s, e in captured])
+        assert sizes == [15, 16], f"近似均衡切分应为 15+16，实际 {sizes}"
+
+    def test_d3_injects_prev_batch_tail_into_next_batch_prompt(self):
+        """D3 H1：分批时下一批 prompt 必须包含上一批最后 2-3 章 summary 衔接。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        prompts: list[str] = []
+
+        def _by_batch(messages, **kwargs):
+            import re
+            prompt = messages[1]["content"]
+            prompts.append(prompt)
+            m = re.search(r"章节号从\s*(\d+)\s*开始，到\s*(\d+)\s*结束", prompt)
+            s, e = int(m.group(1)), int(m.group(2))
+            return FakeLLMResponse(content=_make_volume_outline_response(s, e))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _by_batch
+
+        outline = _make_outline_dict(50)
+        outline["volumes"][0]["chapters"] = list(range(1, 51))
+        outline["chapters"] = [
+            {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+             "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+            for i in range(1, 51)
+        ]
+
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={
+                "genre": "玄幻", "theme": "x", "outline": outline,
+                "world_setting": {}, "characters": [],
+            },
+            volume_number=1,
+            previous_summary="第0卷收尾",
+        )
+        # 至少 2 批
+        assert len(prompts) >= 2
+        first, *rest = prompts
+        # 第一批不该看到 "上一批已生成"
+        assert "上一批已生成章节" not in first
+        # 后续每批都应注入上一批 tail
+        for p in rest:
+            assert "上一批已生成章节" in p, (
+                f"分批模式后续批 prompt 缺 prev_batch_tail 注入:\n{p[:1000]}"
+            )
+
+    def test_d3_drops_out_of_range_chapter_numbers(self, caplog):
+        """D3 M2：LLM 越界返回 chapter_number 应被丢弃 + 触发 warning。"""
+        import logging
+        from src.novel.agents.novel_director import NovelDirector
+
+        # batch1 LLM 错回 ch1-5（应该是 ch1-25），batch2 正常返回 ch26-50
+        def _by_batch(messages, **kwargs):
+            import re
+            prompt = messages[1]["content"]
+            m = re.search(r"章节号从\s*(\d+)\s*开始，到\s*(\d+)\s*结束", prompt)
+            s, e = int(m.group(1)), int(m.group(2))
+            if s == 1:
+                # 故意越界：返回的 chapter_number 都是 100+ (越界)
+                return FakeLLMResponse(content=_make_volume_outline_response(100, 105))
+            return FakeLLMResponse(content=_make_volume_outline_response(s, e))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _by_batch
+
+        outline = _make_outline_dict(50)
+        outline["volumes"][0]["chapters"] = list(range(1, 51))
+        outline["chapters"] = [
+            {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+             "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+            for i in range(1, 51)
+        ]
+
+        director = NovelDirector(mock_llm)
+        with caplog.at_level(logging.WARNING, logger="novel"):
+            result = director.generate_volume_outline(
+                novel_data={
+                    "genre": "玄幻", "theme": "x", "outline": outline,
+                    "world_setting": {}, "characters": [],
+                },
+                volume_number=1,
+                previous_summary="",
+            )
+        # 越界章节应被丢弃 → batch1 章节全靠 placeholder 兜底
+        assert any("越界章号" in rec.message for rec in caplog.records), (
+            "越界章号应触发 warning"
+        )
+        # 总章数仍为 50（兜底 placeholder 补齐）
+        assert len(result) == 50
+        nums = sorted(c["chapter_number"] for c in result)
+        assert nums == list(range(1, 51))
+
     def test_d2_fallback_warns_on_overlap_with_existing_volume(self, caplog):
         """D2 H2 防御：fallback 推算范围若与现有卷 chapters 重叠，应告警。"""
         import logging

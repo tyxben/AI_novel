@@ -74,6 +74,9 @@ class NovelDirector:
     """卷级大纲 + 里程碑生成 Agent。"""
 
     MAX_OUTLINE_RETRIES = 3
+    # D3：单次 LLM call 最多生成的章数。30 章历史实测正常 (DeepSeek 8192
+    # max_tokens 边缘内)；35+ 章 JSON 会被截断。超过此阈值的卷分批生成。
+    BATCH_MAX_CHAPTERS = 30
 
     def __init__(self, llm_client: Any):
         """
@@ -291,96 +294,93 @@ class NovelDirector:
   - 赌注：{main_storyline.get('stakes', '未知')}
 """
 
-        prompt = f"""请为小说的第{volume_number}卷生成详细的章节大纲。
-
-题材：{genre}
-主题：{theme}
-{world_info}
-{char_info}
-{storyline_info}
-
-【整体故事框架】
-幕结构：
-{acts_info}
-卷结构：
-{volumes_info}
-
-【当前卷信息】
-卷号：第{volume_number}卷「{target_volume.get('title', '')}」
-核心矛盾：{target_volume.get('core_conflict', '')}
-解决方向：{target_volume.get('resolution', '')}
-章节范围：第{start_ch}章 - 第{end_ch}章（共{chapters_count}章）
-
-【前情摘要】
-{previous_summary if previous_summary else '（这是第一卷，无前情）'}
-
-请严格按以下 JSON 格式返回：
-{{
-  "chapters": [
-    {{
-      "chapter_number": {start_ch},
-      "title": "章节标题",
-      "goal": "本章目标",
-      "key_events": ["事件1", "事件2"],
-      "involved_characters": [],
-      "plot_threads": [],
-      "estimated_words": 2500,
-      "mood": "蓄力",
-      "storyline_progress": "本章如何推进主线",
-      "chapter_summary": "本章内容2-3句话摘要",
-      "chapter_brief": {{
-        "main_conflict": "本章主冲突",
-        "payoff": "本章爽点/情绪回报",
-        "character_arc_step": "主角变化",
-        "foreshadowing_plant": ["要埋的伏笔"],
-        "foreshadowing_collect": ["要回收的伏笔"],
-        "end_hook_type": "悬疑|危机|反转|情感|发现|无"
-      }}
-    }}
-  ]
-}}
-
-要求：
-1. 章节号从 {start_ch} 开始，到 {end_ch} 结束，共 {chapters_count} 章
-2. 承接前情，自然过渡
-3. 围绕本卷核心矛盾展开
-4. 每章必须推进主线
-5. 情节有起伏，节奏合理
-6. mood 可选：蓄力、小爽、大爽、过渡、虐心、反转、日常
-"""
-
-        # 调用 LLM
-        result_data: dict | None = None
-        last_error = ""
-
-        for attempt in range(self.MAX_OUTLINE_RETRIES):
-            try:
-                response = self.llm.chat(
-                    messages=[
-                        {"role": "system", "content": "你是一位资深网络小说策划编辑。请严格按照 JSON 格式返回章节大纲。"},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.8,
-                    json_mode=True,
-                    max_tokens=8192,
-                )
-                result_data = extract_json_obj(response.content)
-                if result_data is not None:
-                    break
-                last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"
-            except Exception as exc:
-                last_error = f"LLM 调用失败: {exc}"
-                log.warning("卷%d大纲生成第 %d 次尝试失败: %s", volume_number, attempt + 1, last_error)
-                if attempt < self.MAX_OUTLINE_RETRIES - 1:
-                    time.sleep(2 ** attempt)
-
-        if result_data is None:
-            raise RuntimeError(
-                f"卷{volume_number}大纲生成失败，已重试 {self.MAX_OUTLINE_RETRIES} 次。最后错误: {last_error}"
+        # D3 批处理：长卷分批 LLM call，避免 8192 max_tokens JSON 截断
+        # 用"近似均衡"切批避免末批畸形（H2）：31 章切 16+15 而非 30+1
+        batches: list[tuple[int, int]] = []
+        if chapters_count <= self.BATCH_MAX_CHAPTERS:
+            batches.append((start_ch, end_ch))
+        else:
+            import math
+            n_batches = math.ceil(chapters_count / self.BATCH_MAX_CHAPTERS)
+            base, extra = divmod(chapters_count, n_batches)
+            _cur = start_ch
+            for i in range(n_batches):
+                size = base + (1 if i < extra else 0)
+                batches.append((_cur, _cur + size - 1))
+                _cur += size
+        is_batched = len(batches) > 1
+        if is_batched:
+            log.info(
+                "卷%d 共%d章超过单批阈值 %d，分%d批生成: %s",
+                volume_number, chapters_count, self.BATCH_MAX_CHAPTERS,
+                len(batches), batches,
             )
 
+        # 全局上下文（每批共享）
+        ctx = {
+            "volume_number": volume_number,
+            "genre": genre,
+            "theme": theme,
+            "world_info": world_info,
+            "char_info": char_info,
+            "storyline_info": storyline_info,
+            "acts_info": acts_info,
+            "volumes_info": volumes_info,
+            "target_volume_title": target_volume.get("title", ""),
+            "target_volume_conflict": target_volume.get("core_conflict", ""),
+            "target_volume_resolution": target_volume.get("resolution", ""),
+            "vol_start_ch": start_ch,
+            "vol_end_ch": end_ch,
+            "vol_chapters_count": chapters_count,
+            "previous_summary": previous_summary,
+        }
+
+        all_chapters_data: list[dict] = []
+        for _b_start, _b_end in batches:
+            batch_count = _b_end - _b_start + 1
+            # H1：跨批衔接 — 把上一批已产出的最后 2-3 章 summary 注入下一批
+            ctx_for_batch = dict(ctx)
+            if all_chapters_data:
+                tail = sorted(
+                    all_chapters_data, key=lambda c: c.get("chapter_number", 0)
+                )[-3:]
+                tail_lines = []
+                for ch in tail:
+                    cn = ch.get("chapter_number", "?")
+                    title = ch.get("title", "")
+                    summary = (
+                        ch.get("chapter_summary", "")
+                        or ch.get("goal", "")
+                    )
+                    hook = (ch.get("chapter_brief") or {}).get("end_hook_type", "")
+                    tail_lines.append(
+                        f"  - 第{cn}章「{title}」: {summary[:80]}"
+                        + (f" [钩子: {hook}]" if hook else "")
+                    )
+                tail_block = "\n【上一批已生成章节（衔接此处）】\n" + "\n".join(tail_lines)
+                # 把 tail 拼到 previous_summary 后，让 LLM 看到分批边界
+                ctx_for_batch["previous_summary"] = (
+                    (ctx["previous_summary"] or "") + tail_block
+                ).strip()
+            prompt = self._render_volume_outline_prompt(
+                ctx_for_batch, _b_start, _b_end, batch_count, is_batched
+            )
+            batch_chapters = self._llm_chat_for_volume_batch(
+                prompt, volume_number, _b_start, _b_end
+            )
+            # M2：丢弃 LLM 越界返回的 chapter_number（防 batch1 LLM 错回 ch1-5 占位 batch2 真号）
+            for ch in batch_chapters:
+                cn = ch.get("chapter_number", 0)
+                if not isinstance(cn, int) or cn < _b_start or cn > _b_end:
+                    log.warning(
+                        "卷%d 批次 [%d-%d] LLM 返回越界章号 %s，已丢弃",
+                        volume_number, _b_start, _b_end, cn,
+                    )
+                    continue
+                all_chapters_data.append(ch)
+
         # 解析章节
-        chapters_data = result_data.get("chapters", [])
+        chapters_data = all_chapters_data
         parsed_chapters: list[dict] = []
 
         for ch_data in chapters_data:
@@ -411,6 +411,133 @@ class NovelDirector:
         parsed_chapters.sort(key=lambda c: c["chapter_number"])
         log.info("卷%d大纲生成完成: %d章 (第%d-%d章)", volume_number, len(parsed_chapters), start_ch, end_ch)
         return parsed_chapters
+
+    # ------------------------------------------------------------------
+    # 4a. D3 helpers — 分批 prompt 构建 + LLM 重试封装
+    # ------------------------------------------------------------------
+
+    def _render_volume_outline_prompt(
+        self,
+        ctx: dict,
+        batch_start: int,
+        batch_end: int,
+        batch_count: int,
+        is_batched: bool,
+    ) -> str:
+        """渲染单批 prompt。当卷被分批时，prompt 强调"本批章号范围"
+        且明确告知整卷范围，让 LLM 仍知道全局位置。"""
+        vol_n = ctx["volume_number"]
+        vol_total = ctx["vol_chapters_count"]
+        vol_start = ctx["vol_start_ch"]
+        vol_end = ctx["vol_end_ch"]
+        prev_summary = ctx["previous_summary"]
+        batch_note = ""
+        if is_batched:
+            batch_note = (
+                f"\n【批次说明】本卷共{vol_total}章 (第{vol_start}-{vol_end}章)，"
+                f"为避免单次响应被截断，按 ≤{self.BATCH_MAX_CHAPTERS} 章分批生成。"
+                f"本批仅生成第{batch_start}-{batch_end}章 (共{batch_count}章)。\n"
+            )
+        return f"""请为小说的第{vol_n}卷生成详细的章节大纲。
+
+题材：{ctx['genre']}
+主题：{ctx['theme']}
+{ctx['world_info']}
+{ctx['char_info']}
+{ctx['storyline_info']}
+
+【整体故事框架】
+幕结构：
+{ctx['acts_info']}
+卷结构：
+{ctx['volumes_info']}
+
+【当前卷信息】
+卷号：第{vol_n}卷「{ctx['target_volume_title']}」
+核心矛盾：{ctx['target_volume_conflict']}
+解决方向：{ctx['target_volume_resolution']}
+章节范围：第{vol_start}章 - 第{vol_end}章（共{vol_total}章）
+{batch_note}
+【前情摘要】
+{prev_summary if prev_summary else '（这是第一卷，无前情）'}
+
+请严格按以下 JSON 格式返回：
+{{
+  "chapters": [
+    {{
+      "chapter_number": {batch_start},
+      "title": "章节标题",
+      "goal": "本章目标",
+      "key_events": ["事件1", "事件2"],
+      "involved_characters": [],
+      "plot_threads": [],
+      "estimated_words": 2500,
+      "mood": "蓄力",
+      "storyline_progress": "本章如何推进主线",
+      "chapter_summary": "本章内容2-3句话摘要",
+      "chapter_brief": {{
+        "main_conflict": "本章主冲突",
+        "payoff": "本章爽点/情绪回报",
+        "character_arc_step": "主角变化",
+        "foreshadowing_plant": ["要埋的伏笔"],
+        "foreshadowing_collect": ["要回收的伏笔"],
+        "end_hook_type": "悬疑|危机|反转|情感|发现|无"
+      }}
+    }}
+  ]
+}}
+
+要求：
+1. 章节号从 {batch_start} 开始，到 {batch_end} 结束，共 {batch_count} 章
+2. 承接前情，自然过渡
+3. 围绕本卷核心矛盾展开
+4. 每章必须推进主线
+5. 情节有起伏，节奏合理
+6. mood 可选：蓄力、小爽、大爽、过渡、虐心、反转、日常
+"""
+
+    def _llm_chat_for_volume_batch(
+        self,
+        prompt: str,
+        volume_number: int,
+        batch_start: int,
+        batch_end: int,
+    ) -> list[dict]:
+        """单批 LLM 调用 + retry + JSON 解析，返回 chapter dict 列表。
+
+        失败 MAX_OUTLINE_RETRIES 次后 raise RuntimeError；不影响其他批。
+        """
+        result_data: dict | None = None
+        last_error = ""
+        for attempt in range(self.MAX_OUTLINE_RETRIES):
+            try:
+                response = self.llm.chat(
+                    messages=[
+                        {"role": "system", "content": "你是一位资深网络小说策划编辑。请严格按照 JSON 格式返回章节大纲。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.8,
+                    json_mode=True,
+                    max_tokens=8192,
+                )
+                result_data = extract_json_obj(response.content)
+                if result_data is not None:
+                    break
+                last_error = f"LLM 返回内容无法解析为 JSON: {response.content[:200]}"
+            except Exception as exc:
+                last_error = f"LLM 调用失败: {exc}"
+                log.warning(
+                    "卷%d 批次 [%d-%d] 第 %d 次尝试失败: %s",
+                    volume_number, batch_start, batch_end, attempt + 1, last_error,
+                )
+                if attempt < self.MAX_OUTLINE_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+        if result_data is None:
+            raise RuntimeError(
+                f"卷{volume_number} 批次 [{batch_start}-{batch_end}] 大纲生成失败，"
+                f"已重试 {self.MAX_OUTLINE_RETRIES} 次。最后错误: {last_error}"
+            )
+        return result_data.get("chapters", []) or []
 
     # ------------------------------------------------------------------
     # 4b. 里程碑自动生成（Intervention A 补全）
