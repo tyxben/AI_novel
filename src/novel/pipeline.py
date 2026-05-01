@@ -1837,19 +1837,10 @@ class NovelPipeline:
                     except Exception as exc:
                         log.debug("衔接验证失败 (非关键): %s", exc)
 
-                # Backfill actual_summary to outline for future planning
-                actual_summary = ""
-                try:
-                    actual_summary = self._generate_actual_summary(
-                        chapter_text, ch_num, ch_title, state=state
-                    )
-                    if actual_summary:
-                        for i, och in enumerate(outline.get("chapters", [])):
-                            if och.get("chapter_number") == ch_num:
-                                outline["chapters"][i]["actual_summary"] = actual_summary
-                                break
-                except Exception as exc:
-                    log.warning("第%d章实际摘要生成失败: %s", ch_num, exc)
+                # D4: 同步 actual_summary 到 state.outline + novel.json.outline
+                actual_summary = self._persist_chapter_actual_summary(
+                    fm, novel_id, ch_num, chapter_text, ch_title, state=state
+                )
 
                 # Update character arc tracker from this chapter's events
                 try:
@@ -2479,6 +2470,17 @@ class NovelPipeline:
                 # 更新内存中的章节文本（后续章节的上下文会用到）
                 chapter_texts[ch_num] = polished_text
 
+                # D4: 精修后内容已变，重新生成 actual_summary 同步到 outline
+                _ch_title = ""
+                for _co in outline_chapters:
+                    if isinstance(_co, dict) and _co.get("chapter_number") == ch_num:
+                        _ch_title = _co.get("title", "") or f"第{ch_num}章"
+                        break
+                self._persist_chapter_actual_summary(
+                    fm, novel_id, ch_num, polished_text,
+                    _ch_title or f"第{ch_num}章", state=state,
+                )
+
                 result["polished_chapters"].append({
                     "chapter_number": ch_num,
                     "original_chars": len(chapter_text),
@@ -2840,6 +2842,11 @@ class NovelPipeline:
                     ch_num=ch_num,
                     new_text=new_text,
                     new_title=ch_json["title"],
+                )
+
+                # D4: 重写后内容已变，刷新 actual_summary 到 outline
+                self._persist_chapter_actual_summary(
+                    fm, novel_id, ch_num, new_text, ch_json["title"], state=state,
                 )
 
                 result["rewritten_chapters"].append(
@@ -3263,6 +3270,14 @@ class NovelPipeline:
                 )
 
                 fm.save_chapter_text(novel_id, ch_num, new_text)
+
+                # D4: 设定传播重写后内容已变，刷新 actual_summary 到 outline
+                self._persist_chapter_actual_summary(
+                    fm, novel_id, ch_num, new_text,
+                    co_data.get("title", f"第{ch_num}章"),
+                    state=state,
+                )
+
                 rewritten.append(
                     {
                         "chapter_number": ch_num,
@@ -4149,6 +4164,70 @@ class NovelPipeline:
         except Exception:
             # Fallback
             return chapter_text[-200:].strip()
+
+    def _persist_chapter_actual_summary(
+        self,
+        fm: "FileManager",
+        novel_id: str,
+        ch_num: int,
+        chapter_text: str,
+        title: str,
+        state: dict | None = None,
+    ) -> str:
+        """生成 actual_summary 并同步到 state.outline + novel.json.outline 两处。
+
+        D4 修复：原主循环只写 state.outline，novel.json 持久化只同步
+        characters/world_setting，导致 novel.json.outline.actual_summary 永远空。
+        重写路径 (apply_feedback / rewrite_affected_chapters / polish_chapters)
+        完全跳过 actual_summary 回填。本 helper 提供统一入口，确保两处一致。
+
+        失败仅 log warning，不 raise — actual_summary 是辅助字段，缺失不阻塞主流程。
+        返回 summary 字符串（失败或跳过返回 ""）。
+        """
+        if not chapter_text or len(chapter_text) < 50:
+            return ""
+        try:
+            summary = self._generate_actual_summary(
+                chapter_text, ch_num, title, state=state
+            )
+        except Exception as exc:
+            log.warning("第%d章 actual_summary 生成失败: %s", ch_num, exc)
+            return ""
+        # 防御：_generate_actual_summary 在 mock/异常路径下可能返回非 str
+        # （比如测试里 LLM 是 MagicMock，response.content.strip() 也是 MagicMock）。
+        # 写入 outline 后 save_novel 会触发 JSON 序列化失败 → 直接拒绝。
+        if not isinstance(summary, str) or not summary:
+            return ""
+
+        # 同步到 state.outline
+        if state is not None:
+            outline = state.get("outline") or {}
+            if isinstance(outline, dict):
+                for ch in outline.get("chapters", []) or []:
+                    if isinstance(ch, dict) and ch.get("chapter_number") == ch_num:
+                        ch["actual_summary"] = summary
+                        break
+
+        # 同步到 novel.json.outline。fm.save_novel 内部用 _novel_lock 保护
+        # 单次写；这里不嵌套外层锁（同 fd 重申请会抛 BlockingIOError）。
+        # NOTE: load → mutate → save 仍非原子；与 fm 内其它单点写共享相同
+        # "best-effort 单线程" 假设（pipeline 模块本来就没保护过 outline 写）。
+        # 真并发场景由调用方（CLI / MCP / agent_chat）通过 session 串行规避。
+        try:
+            novel_data = fm.load_novel(novel_id) or {}
+            nd_outline = novel_data.get("outline")
+            if isinstance(nd_outline, dict):
+                for ch in nd_outline.get("chapters", []) or []:
+                    if isinstance(ch, dict) and ch.get("chapter_number") == ch_num:
+                        ch["actual_summary"] = summary
+                        break
+                novel_data["outline"] = nd_outline
+                fm.save_novel(novel_id, novel_data)
+        except Exception as exc:
+            log.warning(
+                "第%d章 actual_summary 持久化到 novel.json 失败: %s", ch_num, exc
+            )
+        return summary
 
     @staticmethod
     def _backfill_outline_entry(state: dict, ch_num: int, chapter_text: str) -> None:
