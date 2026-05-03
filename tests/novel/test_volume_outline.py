@@ -880,6 +880,214 @@ class TestGenerateVolumeOutline:
         nums = sorted(c["chapter_number"] for c in result)
         assert nums == list(range(1, 51))
 
+    def test_d3_batched_prompt_contains_batch_note(self):
+        """D3 L2: 分批模式下 prompt 应注入"批次说明"文本，让 LLM 知道全局位置。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        prompts: list[str] = []
+
+        def _by_batch(messages, **kwargs):
+            import re
+            prompt = messages[1]["content"]
+            prompts.append(prompt)
+            m = re.search(r"章节号从\s*(\d+)\s*开始，到\s*(\d+)\s*结束", prompt)
+            s, e = int(m.group(1)), int(m.group(2))
+            return FakeLLMResponse(content=_make_volume_outline_response(s, e))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _by_batch
+
+        outline = _make_outline_dict(50)
+        outline["volumes"][0]["chapters"] = list(range(1, 51))
+        outline["chapters"] = [
+            {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+             "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+            for i in range(1, 51)
+        ]
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={"genre": "玄幻", "theme": "x", "outline": outline,
+                        "world_setting": {}, "characters": []},
+            volume_number=1,
+            previous_summary="",
+        )
+        # 每批 prompt 必须含"批次说明"+"本卷共 50 章"+"按 ≤30 章分批"
+        for p in prompts:
+            assert "【批次说明】" in p, f"分批 prompt 缺批次说明:\n{p[:600]}"
+            assert "本卷共50章" in p, f"批次说明缺整卷章数:\n{p[:600]}"
+            assert "≤30 章" in p, f"批次说明缺批阈值:\n{p[:600]}"
+
+    def test_d3_no_batch_note_when_single_batch(self):
+        """D3 L2 反向：≤ BATCH_MAX_CHAPTERS 单批时 prompt 不应有批次说明（避免误导）。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        prompts: list[str] = []
+
+        def _capture(messages, **kwargs):
+            prompts.append(messages[1]["content"])
+            return FakeLLMResponse(content=_make_volume_outline_response(1, 20))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _capture
+
+        outline = _make_outline_dict(20)
+        outline["volumes"][0]["chapters"] = list(range(1, 21))
+        director = NovelDirector(mock_llm)
+        director.generate_volume_outline(
+            novel_data={"genre": "玄幻", "theme": "x", "outline": outline,
+                        "world_setting": {}, "characters": []},
+            volume_number=1,
+            previous_summary="",
+        )
+        assert len(prompts) == 1
+        assert "【批次说明】" not in prompts[0]
+
+    def test_d3_partial_recovery_logs_succeeded_batches_on_failure(
+        self, monkeypatch, caplog
+    ):
+        """D3 M1: 中间批失败时，error log 应记录已成功批章号区间，方便手术修复。"""
+        import logging
+        import time as time_mod
+        from src.novel.agents.novel_director import NovelDirector
+
+        # mock sleep 避免 retry backoff 真睡
+        monkeypatch.setattr(time_mod, "sleep", lambda *a, **kw: None)
+
+        # 60 章 → math.ceil(60/30)=2 → 30+30；让第二批连续 RuntimeError 直至 max retry
+        call_count = {"n": 0, "second_batch_fails": 0}
+
+        def _flaky(messages, **kwargs):
+            call_count["n"] += 1
+            import re
+            prompt = messages[1]["content"]
+            m = re.search(r"章节号从\s*(\d+)\s*开始，到\s*(\d+)\s*结束", prompt)
+            s, e = int(m.group(1)), int(m.group(2))
+            if s >= 31:  # 第二批
+                call_count["second_batch_fails"] += 1
+                raise RuntimeError("LLM API down")
+            return FakeLLMResponse(content=_make_volume_outline_response(s, e))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _flaky
+
+        outline = _make_outline_dict(60)
+        outline["volumes"][0]["chapters"] = list(range(1, 61))
+        outline["chapters"] = [
+            {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+             "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+            for i in range(1, 61)
+        ]
+
+        director = NovelDirector(mock_llm)
+        with caplog.at_level(logging.ERROR, logger="novel"):
+            with pytest.raises(RuntimeError):
+                director.generate_volume_outline(
+                    novel_data={"genre": "玄幻", "theme": "x", "outline": outline,
+                                "world_setting": {}, "characters": []},
+                    volume_number=1,
+                    previous_summary="",
+                )
+        # 必须在抛 RuntimeError 前打印已成功批列表 [(1, 30)]
+        partial_logs = [
+            rec.message for rec in caplog.records
+            if "已成功批" in rec.message and "(1, 30)" in rec.message
+        ]
+        assert partial_logs, (
+            f"M1 partial recovery 日志应记录 succeeded_batches=[(1,30)]；实际:\n"
+            + "\n".join(rec.message for rec in caplog.records)
+        )
+
+    def test_d3_first_batch_failure_logs_no_recoverable_data(
+        self, monkeypatch, caplog
+    ):
+        """D3 M1 反向：首批即失败时，应明确记录"无可恢复数据"。"""
+        import logging
+        import time as time_mod
+        from src.novel.agents.novel_director import NovelDirector
+
+        monkeypatch.setattr(time_mod, "sleep", lambda *a, **kw: None)
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = RuntimeError("LLM down")
+
+        outline = _make_outline_dict(50)
+        outline["volumes"][0]["chapters"] = list(range(1, 51))
+        director = NovelDirector(mock_llm)
+        with caplog.at_level(logging.ERROR, logger="novel"):
+            with pytest.raises(RuntimeError):
+                director.generate_volume_outline(
+                    novel_data={"genre": "玄幻", "theme": "x", "outline": outline,
+                                "world_setting": {}, "characters": []},
+                    volume_number=1,
+                    previous_summary="",
+                )
+        assert any(
+            "首批" in rec.message and "无可恢复数据" in rec.message
+            for rec in caplog.records
+        ), (
+            "首批失败应记录无可恢复数据；实际:\n"
+            + "\n".join(rec.message for rec in caplog.records)
+        )
+
+    def test_d3_milestone_generation_works_with_batched_outline(self):
+        """D3 L2 联动：分批生成的 chapter_outlines 喂给 generate_volume_milestones
+        应正常产出 milestone，验证两个 LLM call 链路无字段不兼容。"""
+        from src.novel.agents.novel_director import NovelDirector
+
+        # 阶段 1: 分批生成 50 章 outline
+        def _outline_by_batch(messages, **kwargs):
+            import re
+            prompt = messages[1]["content"]
+            m = re.search(r"章节号从\s*(\d+)\s*开始，到\s*(\d+)\s*结束", prompt)
+            if m:
+                s, e = int(m.group(1)), int(m.group(2))
+                return FakeLLMResponse(content=_make_volume_outline_response(s, e))
+            # 阶段 2: milestone 生成
+            return FakeLLMResponse(content=(
+                '{"milestones": [{"milestone_id": "vol1_m1", '
+                '"description": "主角觉醒灵根，进入修真界", '
+                '"target_chapter_range": [1, 25], '
+                '"verification_type": "auto_keyword", '
+                '"verification_criteria": ["觉醒", "灵根"], '
+                '"priority": "critical"}, {"milestone_id": "vol1_m2", '
+                '"description": "主角拜师入门，建立人脉", '
+                '"target_chapter_range": [25, 50], '
+                '"verification_type": "auto_keyword", '
+                '"verification_criteria": ["拜师"], "priority": "high"}]}'
+            ))
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = _outline_by_batch
+
+        outline = _make_outline_dict(50)
+        outline["volumes"][0]["chapters"] = list(range(1, 51))
+        outline["chapters"] = [
+            {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+             "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+            for i in range(1, 51)
+        ]
+        director = NovelDirector(mock_llm)
+        chapter_outlines = director.generate_volume_outline(
+            novel_data={"genre": "玄幻", "theme": "x", "outline": outline,
+                        "world_setting": {}, "characters": []},
+            volume_number=1,
+            previous_summary="",
+        )
+        assert len(chapter_outlines) == 50
+
+        # 直接喂分批结果给 milestone 生成
+        milestones = director.generate_volume_milestones(
+            volume={"volume_number": 1, "title": "vol1",
+                    "core_conflict": "x", "resolution": "x"},
+            chapter_outlines=chapter_outlines,
+            genre="玄幻",
+        )
+        assert len(milestones) >= 1, "milestone 生成不应空"
+        # critical milestone 章号范围应在卷 [1, 50] 内
+        for m in milestones:
+            tcr = m.get("target_chapter_range") or [1, 50]
+            assert 1 <= tcr[0] <= tcr[1] <= 50, f"milestone 章号越界: {m}"
+
     def test_d2_fallback_warns_on_overlap_with_existing_volume(self, caplog):
         """D2 H2 防御：fallback 推算范围若与现有卷 chapters 重叠，应告警。"""
         import logging

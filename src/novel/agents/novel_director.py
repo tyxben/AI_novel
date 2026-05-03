@@ -352,6 +352,7 @@ class NovelDirector:
         }
 
         all_chapters_data: list[dict] = []
+        succeeded_batches: list[tuple[int, int]] = []
         for _b_start, _b_end in batches:
             batch_count = _b_end - _b_start + 1
             # H1：跨批衔接 — 把上一批已产出的最后 2-3 章 summary 注入下一批
@@ -381,9 +382,26 @@ class NovelDirector:
             prompt = self._render_volume_outline_prompt(
                 ctx_for_batch, _b_start, _b_end, batch_count, is_batched
             )
-            batch_chapters = self._llm_chat_for_volume_batch(
-                prompt, volume_number, _b_start, _b_end
-            )
+            try:
+                batch_chapters = self._llm_chat_for_volume_batch(
+                    prompt, volume_number, _b_start, _b_end
+                )
+            except RuntimeError:
+                # M1 partial recovery 取证：批失败时打印已成功批章号区间
+                # 方便 caller 看 log 后做手术修复（例如 propose_volume_outline 单批补齐）
+                if succeeded_batches:
+                    log.error(
+                        "卷%d 批次 [%d-%d] 失败；已成功批 (%d 个): %s — "
+                        "可基于此区间用 propose_volume_outline 局部补齐",
+                        volume_number, _b_start, _b_end,
+                        len(succeeded_batches), succeeded_batches,
+                    )
+                else:
+                    log.error(
+                        "卷%d 首批 [%d-%d] 即失败，无可恢复数据",
+                        volume_number, _b_start, _b_end,
+                    )
+                raise
             # M2：丢弃 LLM 越界返回的 chapter_number（防 batch1 LLM 错回 ch1-5 占位 batch2 真号）
             for ch in batch_chapters:
                 cn = ch.get("chapter_number", 0)
@@ -394,6 +412,7 @@ class NovelDirector:
                     )
                     continue
                 all_chapters_data.append(ch)
+            succeeded_batches.append((_b_start, _b_end))
 
         # 解析章节
         chapters_data = all_chapters_data
