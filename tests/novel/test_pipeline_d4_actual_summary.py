@@ -359,3 +359,197 @@ class TestRewritePathsCallHelper:
         args = mock_persist.call_args.args
         assert args[2] == 1
         assert "反馈重写新文本" in args[3]
+
+
+# ---------------------------------------------------------------------------
+# Test: H2 cost optimization — previous_text 文本未变时跳过 LLM
+# ---------------------------------------------------------------------------
+
+
+class TestPersistActualSummaryH2CostOptimization:
+    """D4-H2 follow-up: helper 接 previous_text 参数；文本未变时复用现有 actual_summary。
+
+    polish 100 章场景：部分章 polish 实际未改字节（critique.issues 触发但
+    polish_chapter 返回原文）。这些章应跳过 LLM 重新生成，节省 LLM call。"""
+
+    def test_skips_llm_when_previous_text_equals_chapter_text(self, tmp_novel_dir):
+        """previous_text 与 chapter_text 字节相同 + outline 已有 summary →
+        跳过 LLM call，返回现值。"""
+        from src.novel.pipeline import NovelPipeline
+        from src.novel.storage.file_manager import FileManager
+
+        pipe = NovelPipeline(workspace=str(tmp_novel_dir))
+        fm = FileManager(str(tmp_novel_dir))
+        novel_id = "novel_d4_test"
+
+        # outline 已有 actual_summary（前次写入）
+        outline = _make_outline_with_chapter(1)
+        outline["chapters"][0]["actual_summary"] = "旧摘要：主角已觉醒"
+        state = {"outline": outline}
+        # novel.json 同步已有现值
+        novel_data = fm.load_novel(novel_id)
+        novel_data["outline"]["chapters"][0]["actual_summary"] = "旧摘要：主角已觉醒"
+        fm.save_novel(novel_id, novel_data)
+
+        chapter_text = "本章正文" * 30
+        with patch.object(pipe, "_generate_actual_summary") as mock_gen:
+            result = pipe._persist_chapter_actual_summary(
+                fm, novel_id, 1, chapter_text, "第1章·测试",
+                state=state, previous_text=chapter_text,
+            )
+
+        # H2 核心：未调 LLM
+        mock_gen.assert_not_called()
+        # 返回沿用现值
+        assert result == "旧摘要：主角已觉醒"
+        # outline 未被改写
+        assert state["outline"]["chapters"][0]["actual_summary"] == "旧摘要：主角已觉醒"
+
+    def test_calls_llm_when_previous_text_differs(self, tmp_novel_dir):
+        """previous_text 与 chapter_text 不同 → 仍调 LLM 生成新 summary。"""
+        from src.novel.pipeline import NovelPipeline
+        from src.novel.storage.file_manager import FileManager
+
+        pipe = NovelPipeline(workspace=str(tmp_novel_dir))
+        fm = FileManager(str(tmp_novel_dir))
+        state = {"outline": _make_outline_with_chapter(1)}
+
+        with patch.object(
+            pipe, "_generate_actual_summary",
+            return_value="新摘要：主角拜师入门",
+        ) as mock_gen:
+            result = pipe._persist_chapter_actual_summary(
+                fm, "novel_d4_test", 1, "新文本" * 50,
+                "第1章·测试",
+                state=state, previous_text="原文" * 50,
+            )
+
+        mock_gen.assert_called_once()
+        assert result == "新摘要：主角拜师入门"
+        assert state["outline"]["chapters"][0]["actual_summary"] == "新摘要：主角拜师入门"
+
+    def test_calls_llm_when_previous_text_equal_but_no_existing_summary(
+        self, tmp_novel_dir
+    ):
+        """previous_text == chapter_text 但 outline 无现值 → 仍走 LLM 兜底首次回填。"""
+        from src.novel.pipeline import NovelPipeline
+        from src.novel.storage.file_manager import FileManager
+
+        pipe = NovelPipeline(workspace=str(tmp_novel_dir))
+        fm = FileManager(str(tmp_novel_dir))
+        state = {"outline": _make_outline_with_chapter(1)}  # 无 actual_summary
+
+        chapter_text = "本章正文" * 30
+        with patch.object(
+            pipe, "_generate_actual_summary",
+            return_value="首次摘要",
+        ) as mock_gen:
+            result = pipe._persist_chapter_actual_summary(
+                fm, "novel_d4_test", 1, chapter_text, "第1章·测试",
+                state=state, previous_text=chapter_text,
+            )
+
+        # 无现值时仍生成（避免永远空白）
+        mock_gen.assert_called_once()
+        assert result == "首次摘要"
+
+    def test_omitting_previous_text_always_generates(self, tmp_novel_dir):
+        """主循环新章路径：未传 previous_text → 永远调 LLM 生成（D4 主修行为不变）。"""
+        from src.novel.pipeline import NovelPipeline
+        from src.novel.storage.file_manager import FileManager
+
+        pipe = NovelPipeline(workspace=str(tmp_novel_dir))
+        fm = FileManager(str(tmp_novel_dir))
+        # outline 已有现值，但未传 previous_text → 不该跳过
+        outline = _make_outline_with_chapter(1)
+        outline["chapters"][0]["actual_summary"] = "旧值"
+        state = {"outline": outline}
+
+        with patch.object(
+            pipe, "_generate_actual_summary",
+            return_value="新主循环摘要",
+        ) as mock_gen:
+            pipe._persist_chapter_actual_summary(
+                fm, "novel_d4_test", 1, "正文" * 30,
+                "第1章·测试", state=state,
+            )
+
+        # 默认行为：永远生成（兼容 D4 主修原契约）
+        mock_gen.assert_called_once()
+        assert state["outline"]["chapters"][0]["actual_summary"] == "新主循环摘要"
+
+
+class TestPolishPathPassesPreviousText:
+    """D4-H2 接入点回归：polish/apply_feedback/rewrite_affected 三路径必须显式传
+    previous_text，否则 H2 优化失效。"""
+
+    def test_polish_chapters_passes_previous_text(self, tmp_novel_dir):
+        """polish_chapters 路径下，helper 调用必须带 previous_text=原 chapter_text。"""
+        from src.novel.pipeline import NovelPipeline
+        from src.novel.storage.file_manager import FileManager
+
+        pipe = NovelPipeline(workspace=str(tmp_novel_dir))
+        fm = FileManager(str(tmp_novel_dir))
+        novel_id = "novel_d4_test"
+
+        original_text = "原文" * 200
+        fm.save_chapter_text(novel_id, 1, original_text)
+        outline = _make_outline_with_chapter(1)
+        checkpoint = {
+            "outline": outline,
+            "chapters": [{"chapter_number": 1, "title": "第1章·测试", "full_text": original_text}],
+            "characters": [],
+            "world_setting": {"era": "古代", "location": "九州"},
+            "config": {"llm": {}},
+        }
+        (Path(tmp_novel_dir) / "novels" / novel_id / "checkpoint.json").write_text(
+            json.dumps(checkpoint, ensure_ascii=False), encoding="utf-8"
+        )
+
+        with patch("src.llm.llm_client.create_llm_client") as mock_create_llm, \
+             patch("src.novel.agents.writer.Writer") as MockWriter, \
+             patch("src.novel.agents.reviewer.Reviewer") as MockReviewer, \
+             patch.object(pipe, "_persist_chapter_actual_summary") as mock_persist:
+            mock_create_llm.return_value = MagicMock()
+            mock_writer = MockWriter.return_value
+            mock_writer.polish_chapter.return_value = "精修后" * 200
+            mock_issue = MagicMock(type="style", severity="low", quote="x", reason="y")
+            mock_reviewer = MockReviewer.return_value
+            mock_crit = MagicMock(issues=[mock_issue], overall_assessment="x")
+            mock_crit.to_writer_prompt.return_value = "改"
+            mock_reviewer.review.return_value = mock_crit
+
+            pipe.polish_chapters(
+                project_path=str(Path(tmp_novel_dir) / "novels" / novel_id),
+                start_chapter=1, end_chapter=1,
+            )
+
+        assert mock_persist.call_count == 1
+        kwargs = mock_persist.call_args.kwargs
+        assert kwargs.get("previous_text") == original_text, (
+            f"polish 必须传 previous_text=原文以触发 H2 跳过，实际 kwargs: {kwargs}"
+        )
+
+    def test_main_loop_backfill_uses_helper_not_inline_llm(self):
+        """M2 静态契约：generate_chapters backfill 块应调 _persist_chapter_actual_summary
+        helper，不应再直接调 _generate_actual_summary（旧路径会绕过类型校验/失败 log
+        统一行为）。验证主循环 backfill 节点重构到 helper 路径。"""
+        import inspect
+        from src.novel.pipeline import NovelPipeline
+
+        src = inspect.getsource(NovelPipeline.generate_chapters)
+        # 找到 backfill 段落（"自动补全 actual_summary" 注释或 log）
+        backfill_idx = src.find("发现 %d 章需要补全 actual_summary")
+        assert backfill_idx > 0, "找不到 backfill 块标记"
+        # 取该段落 +/- 1500 字符为 backfill 上下文（避免误命中主循环 helper 调用）
+        start = max(0, backfill_idx - 200)
+        end = min(len(src), backfill_idx + 1500)
+        backfill_block = src[start:end]
+        # 必须调 helper（M2 修复后行为）
+        assert "_persist_chapter_actual_summary" in backfill_block, (
+            "M2 backfill 块应调用 _persist_chapter_actual_summary helper"
+        )
+        # 不应再写 ch["actual_summary"] = summary inline（旧路径已被 helper 取代）
+        assert 'ch["actual_summary"] = summary' not in backfill_block, (
+            "M2: backfill 块不应再 inline 写 outline；应交由 helper 统一处理"
+        )

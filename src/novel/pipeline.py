@@ -1371,39 +1371,33 @@ class NovelPipeline:
         except Exception as e:
             log.warning("Narrative control initialization failed (non-critical): %s", e)
 
-        # Auto-backfill actual_summary for chapters that don't have it yet
+        # Auto-backfill actual_summary for chapters that don't have it yet.
+        # M2: 与 _persist_chapter_actual_summary helper 合流，统一走类型校验/失败 log。
+        # 此路径下 chapter_text 来自磁盘历史章（首次回填），不传 previous_text，
+        # helper 永远调 LLM 生成（无现值可复用）。
         try:
             from src.novel.storage.file_manager import FileManager
             fm_bf = FileManager(self.workspace)
             outline_chapters = outline.get("chapters", [])
-            chapters_needing_summary = []
+            backfill_targets: list[tuple[int, str, str]] = []
             for ch in outline_chapters:
                 ch_n = ch.get("chapter_number", 0)
                 if ch_n < 1 or ch_n >= start_chapter:
                     continue
                 if ch.get("actual_summary"):
                     continue
-                # Check if chapter text exists on disk
                 txt = fm_bf.load_chapter_text(novel_id, ch_n)
                 if txt and len(txt) > 100:
-                    chapters_needing_summary.append((ch_n, ch, txt))
+                    backfill_targets.append((ch_n, ch.get("title", f"第{ch_n}章"), txt))
 
-            if chapters_needing_summary:
-                log.info("发现 %d 章需要补全 actual_summary", len(chapters_needing_summary))
-                for ch_n, ch, txt in chapters_needing_summary:
-                    try:
-                        title = ch.get("title", f"第{ch_n}章")
-                        summary = self._generate_actual_summary(txt, ch_n, title, state=state)
-                        if summary:
-                            ch["actual_summary"] = summary
-                            log.info("第%d章 actual_summary 已补全", ch_n)
-                    except Exception as exc:
-                        log.warning("第%d章 actual_summary 补全失败: %s", ch_n, exc)
-
-                # Save back to novel.json
-                novel_data = fm_bf.load_novel(novel_id) or {}
-                novel_data["outline"] = outline
-                fm_bf.save_novel(novel_id, novel_data)
+            if backfill_targets:
+                log.info("发现 %d 章需要补全 actual_summary", len(backfill_targets))
+                for ch_n, title, txt in backfill_targets:
+                    summary = self._persist_chapter_actual_summary(
+                        fm_bf, novel_id, ch_n, txt, title, state=state,
+                    )
+                    if summary:
+                        log.info("第%d章 actual_summary 已补全", ch_n)
         except Exception as exc:
             log.warning("自动补全 actual_summary 失败: %s", exc)
 
@@ -2471,6 +2465,7 @@ class NovelPipeline:
                 chapter_texts[ch_num] = polished_text
 
                 # D4: 精修后内容已变，重新生成 actual_summary 同步到 outline
+                # H2: 传 previous_text=原 chapter_text；polish 实际未改字节时跳过 LLM
                 _ch_title = ""
                 for _co in outline_chapters:
                     if isinstance(_co, dict) and _co.get("chapter_number") == ch_num:
@@ -2479,6 +2474,7 @@ class NovelPipeline:
                 self._persist_chapter_actual_summary(
                     fm, novel_id, ch_num, polished_text,
                     _ch_title or f"第{ch_num}章", state=state,
+                    previous_text=chapter_text,
                 )
 
                 result["polished_chapters"].append({
@@ -2845,8 +2841,10 @@ class NovelPipeline:
                 )
 
                 # D4: 重写后内容已变，刷新 actual_summary 到 outline
+                # H2: 传 previous_text=重写前原文；rewrite 失败/无改动时跳过 LLM
                 self._persist_chapter_actual_summary(
                     fm, novel_id, ch_num, new_text, ch_json["title"], state=state,
+                    previous_text=original_text,
                 )
 
                 result["rewritten_chapters"].append(
@@ -3272,10 +3270,12 @@ class NovelPipeline:
                 fm.save_chapter_text(novel_id, ch_num, new_text)
 
                 # D4: 设定传播重写后内容已变，刷新 actual_summary 到 outline
+                # H2: 传 previous_text=old_text；rewrite 实际未改字节时跳过 LLM
                 self._persist_chapter_actual_summary(
                     fm, novel_id, ch_num, new_text,
                     co_data.get("title", f"第{ch_num}章"),
                     state=state,
+                    previous_text=old_text,
                 )
 
                 rewritten.append(
@@ -4173,6 +4173,7 @@ class NovelPipeline:
         chapter_text: str,
         title: str,
         state: dict | None = None,
+        previous_text: str | None = None,
     ) -> str:
         """生成 actual_summary 并同步到 state.outline + novel.json.outline 两处。
 
@@ -4181,11 +4182,31 @@ class NovelPipeline:
         重写路径 (apply_feedback / rewrite_affected_chapters / polish_chapters)
         完全跳过 actual_summary 回填。本 helper 提供统一入口，确保两处一致。
 
+        H2 成本优化（D4 follow-up）：``previous_text`` 显式传入"重写前的原文"。
+        如与 ``chapter_text`` 字节完全相同，跳过 LLM 调用 + outline 写入（沿用
+        现有 actual_summary）。polish 100 章中部分章未实质改动时省 LLM call。
+        主循环新章不传 previous_text，永远生成。
+
+        L1 关于 ``state.outline``：本 helper 仅 in-memory 修改 state.outline；
+        polish/rewrite 路径不会显式 checkpoint state.outline 到磁盘。一致性靠
+        novel.json 的同步写入承担（保存到 ``novel.json.outline``）。callers
+        重启后从 novel.json 重建 state 即可拿到最新 actual_summary。
+
         失败仅 log warning，不 raise — actual_summary 是辅助字段，缺失不阻塞主流程。
-        返回 summary 字符串（失败或跳过返回 ""）。
+        返回 summary 字符串（失败或跳过 LLM 返回沿用值；无值时 ""）。
         """
         if not chapter_text or len(chapter_text) < 50:
             return ""
+        # H2 成本优化：文本未变时不重新生成 LLM summary（直接复用 outline 现值）
+        if previous_text is not None and previous_text == chapter_text:
+            existing = self._lookup_actual_summary(state, fm, novel_id, ch_num)
+            if existing:
+                log.debug(
+                    "第%d章文本未变，跳过 actual_summary 重新生成（沿用现有 %d 字摘要）",
+                    ch_num, len(existing),
+                )
+                return existing
+            # 无现值：仍走 LLM 生成兜底（首次回填路径）
         try:
             summary = self._generate_actual_summary(
                 chapter_text, ch_num, title, state=state
@@ -4228,6 +4249,41 @@ class NovelPipeline:
                 "第%d章 actual_summary 持久化到 novel.json 失败: %s", ch_num, exc
             )
         return summary
+
+    @staticmethod
+    def _lookup_actual_summary(
+        state: dict | None,
+        fm: "FileManager",
+        novel_id: str,
+        ch_num: int,
+    ) -> str:
+        """查 state.outline → novel.json.outline 顺序找已有 actual_summary。
+
+        H2 成本优化：``_persist_chapter_actual_summary`` 在 previous_text 与
+        chapter_text 相同时调用本方法复用旧值，避免重新调 LLM。
+        """
+        if state is not None:
+            outline = state.get("outline") or {}
+            if isinstance(outline, dict):
+                for ch in outline.get("chapters", []) or []:
+                    if isinstance(ch, dict) and ch.get("chapter_number") == ch_num:
+                        s = ch.get("actual_summary")
+                        if isinstance(s, str) and s:
+                            return s
+                        break
+        try:
+            novel_data = fm.load_novel(novel_id) or {}
+            outline = novel_data.get("outline") or {}
+            if isinstance(outline, dict):
+                for ch in outline.get("chapters", []) or []:
+                    if isinstance(ch, dict) and ch.get("chapter_number") == ch_num:
+                        s = ch.get("actual_summary")
+                        if isinstance(s, str) and s:
+                            return s
+                        break
+        except Exception:
+            pass
+        return ""
 
     @staticmethod
     def _backfill_outline_entry(state: dict, ch_num: int, chapter_text: str) -> None:
