@@ -917,6 +917,54 @@ class TestGenerateVolumeOutline:
             "重叠卷 chapters 应触发 warning"
         )
 
+    def test_d2_fallback_logs_polluted_outline_chapters_max(self, caplog):
+        """L2 取证：fallback 路径下日志应记录原 D2 修前会作起点的污染值。"""
+        import logging
+        from src.novel.agents.novel_director import NovelDirector
+
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = FakeLLMResponse(
+            content=_make_volume_outline_response(31, 60)
+        )
+
+        # vol2 空 → fallback；outline.chapters 含幽灵 ch201（D2 修前会拿来作起点）
+        outline = {
+            "template": "cyclic_upgrade",
+            "main_storyline": {"protagonist_goal": "G", "core_conflict": "C"},
+            "acts": [{"name": "幕1", "description": "x", "start_chapter": 1, "end_chapter": 60}],
+            "volumes": [
+                {"volume_number": 1, "title": "vol1", "core_conflict": "x",
+                 "resolution": "x", "chapters": list(range(1, 31))},
+                {"volume_number": 2, "title": "vol2", "core_conflict": "x",
+                 "resolution": "x", "chapters": []},
+            ],
+            "chapters": [
+                {"chapter_number": i, "title": f"第{i}章", "goal": f"G{i}",
+                 "key_events": [f"E{i}"], "estimated_words": 2500, "mood": "蓄力"}
+                for i in range(1, 31)
+            ] + [
+                # 幽灵高号章节（来自先前坏路径）
+                {"chapter_number": 201, "title": "幽灵章", "goal": "幽灵",
+                 "key_events": ["x"], "estimated_words": 2500, "mood": "蓄力"}
+            ],
+        }
+        director = NovelDirector(mock_llm)
+        with caplog.at_level(logging.INFO, logger="novel"):
+            director.generate_volume_outline(
+                novel_data={"genre": "玄幻", "theme": "x", "outline": outline,
+                            "world_setting": {}, "characters": []},
+                volume_number=2,
+                previous_summary="",
+            )
+        # 取证日志必须含 polluted max=201（明确表明 D2 已忽略它）
+        assert any(
+            "polluted" in rec.message.lower() and "201" in rec.message
+            for rec in caplog.records
+        ), (
+            f"fallback 日志应记录 polluted outline.chapters max=201；实际:\n"
+            + "\n".join(rec.message for rec in caplog.records)
+        )
+
 
 # ---------------------------------------------------------------------------
 # Test: _extend_outline

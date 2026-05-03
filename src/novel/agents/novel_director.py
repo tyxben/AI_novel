@@ -21,8 +21,13 @@ from src.novel.utils.json_extract import extract_json_obj
 
 log = logging.getLogger("novel")
 
-# pipeline 侧按此分卷的兜底常量；优先级低于 outline_templates 的
-# default_chapters_per_volume 和 volume_director 的 _GENRE_CHAPTERS_PER_VOLUME。
+# 全局兜底（终极 fallback）。两个独立用法：
+# 1) ``_resolve_chapters_per_volume`` 在 outline.default_chapters_per_volume 与
+#    _GENRE_CHAPTERS_PER_VOLUME 都不可用时使用（最低优先级）
+# 2) ``pipeline._extend_outline_to_chapter`` 直接导入此常量推 volume 边界（不走
+#    resolver 链；当前对所有体裁固定 30，与 ProjectArchitect 的
+#    _OUTLINE_CHAPTERS_PER_VOLUME 同步）
+# 修改此值时务必同步检查 grep ``_CHAPTERS_PER_VOLUME``。
 _CHAPTERS_PER_VOLUME = 30
 
 
@@ -33,9 +38,9 @@ def _resolve_chapters_per_volume(novel_data: dict, outline: dict) -> int:
     与项目实际配置对齐，避免 30 硬编码与修仙(40)/言情(20) 等体裁冲突。
     """
     # 1) outline 自带（来自 outline_templates 的 default_chapters_per_volume）
-    val = outline.get("default_chapters_per_volume")
-    if isinstance(val, int) and val > 0:
-        return val
+    outline_default = outline.get("default_chapters_per_volume")
+    if isinstance(outline_default, int) and outline_default > 0:
+        return outline_default
     # 2) 体裁推荐表（与 volume_director 同源）
     try:
         from src.novel.agents.volume_director import _GENRE_CHAPTERS_PER_VOLUME
@@ -194,9 +199,18 @@ class NovelDirector:
             # 幽灵章节污染，导致 ch201-235 类事故）。优先级：
             #   1. outline.volumes 中"严格紧邻"上一卷 (volume_number-1) 的
             #      chapters max+1 → 本卷起点；不允许跨过中间空卷取更早的卷
-            #   2. (volume_number-1) × chapters_count + 1 → 按卷号序数算
-            # chapters_count 也按 outline/genre 配置推，不再硬编码 30。
-            chapters_count = _resolve_chapters_per_volume(novel_data, outline)
+            #   2. (volume_number-1) × chapters_per_volume + 1 → 按卷号序数算
+            # chapters_per_volume 按 outline/genre 配置推，不再硬编码 30；fallback
+            # 路径下"本卷推断章数" chapters_count 直接等于 chapters_per_volume。
+            chapters_per_volume = _resolve_chapters_per_volume(novel_data, outline)
+            chapters_count = chapters_per_volume
+            # L2 取证：记录"D2 修前会作起点"的污染值，方便事后回溯事故根因
+            polluted_outline_max = 0
+            for ch in outline.get("chapters", []) or []:
+                if isinstance(ch, dict):
+                    cn_raw = ch.get("chapter_number", 0) or 0
+                    if isinstance(cn_raw, (int, str)) and str(cn_raw).lstrip("-").isdigit():
+                        polluted_outline_max = max(polluted_outline_max, int(cn_raw))
             prev_vol_max = 0
             source = "卷号序数"
             for vol in volumes:
@@ -213,7 +227,7 @@ class NovelDirector:
             if prev_vol_max > 0:
                 start_ch = prev_vol_max + 1
             else:
-                start_ch = max(1, (volume_number - 1) * chapters_count + 1)
+                start_ch = max(1, (volume_number - 1) * chapters_per_volume + 1)
             end_ch = start_ch + chapters_count - 1
             # 防御：扫现有卷检测重叠，不静默产冲突
             for vol in volumes:
@@ -232,8 +246,10 @@ class NovelDirector:
                     )
                     break
             log.info(
-                "卷%d 章节范围 fallback 推断: 第%d-%d章 (来源: %s, 每卷章数=%d)",
-                volume_number, start_ch, end_ch, source, chapters_count,
+                "卷%d 章节范围 fallback 推断: 第%d-%d章 (来源: %s, 每卷章数=%d, "
+                "polluted outline.chapters max=%d 已忽略)",
+                volume_number, start_ch, end_ch, source, chapters_per_volume,
+                polluted_outline_max,
             )
 
         # 提取世界观和角色信息
