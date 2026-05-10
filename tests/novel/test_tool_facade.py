@@ -1004,6 +1004,142 @@ class TestAcceptProposal:
                 data={"title": "no number"},
             )
 
+    def test_volume_outline_partial_chapter_numbers_does_not_lose_existing(
+        self, facade
+    ):
+        """D1 fix: 既有 chapters=[1..30]，propose 局部补齐 [31..35]，
+        accept 后 chapters 应为 [1..35]（merge），不被覆盖丢失 1-30。
+        """
+        novel = _novel_data_stub(with_outline=True)
+        novel["outline"]["volumes"] = [
+            {
+                "volume_number": 1,
+                "title": "第一卷",
+                "core_conflict": "入门",
+                "resolution": "站稳",
+                "chapters": list(range(1, 31)),  # 已 accept 1-30
+            }
+        ]
+        facade._fm.load_novel.return_value = novel
+        result = facade.accept_proposal(
+            "workspace/novels/novel_xyz",
+            proposal_id="pid-vo-partial",
+            proposal_type="volume_outline",
+            data={
+                "volume_number": 1,
+                "chapter_numbers": list(range(31, 36)),  # 局部补齐 31-35
+            },
+        )
+        assert result.status == "accepted"
+        _, saved = facade._fm.save_novel.call_args.args
+        v1 = saved["outline"]["volumes"][0]
+        assert v1["chapters"] == list(range(1, 36))  # merge: 1-35
+        assert v1["volume_outline"] == list(range(1, 36))
+
+    def test_volume_outline_repeated_propose_dedupes_chapters(self, facade):
+        """同卷重复 propose 整卷不应产生重复章节号。"""
+        novel = _novel_data_stub(with_outline=True)
+        novel["outline"]["volumes"] = [
+            {
+                "volume_number": 1,
+                "title": "第一卷",
+                "chapters": [1, 2, 3],
+            }
+        ]
+        facade._fm.load_novel.return_value = novel
+        result = facade.accept_proposal(
+            "workspace/novels/novel_xyz",
+            proposal_id="pid-vo-repeat",
+            proposal_type="volume_outline",
+            data={"volume_number": 1, "chapter_numbers": [1, 2, 3]},
+        )
+        assert result.status == "accepted"
+        _, saved = facade._fm.save_novel.call_args.args
+        assert saved["outline"]["volumes"][0]["chapters"] == [1, 2, 3]
+
+    def test_volume_outline_dirty_existing_chapters_skipped(self, facade):
+        """既有 chapters 含脏数据（None / 非数字）→ 跳过脏值，不崩。"""
+        novel = _novel_data_stub(with_outline=True)
+        novel["outline"]["volumes"] = [
+            {
+                "volume_number": 1,
+                "title": "第一卷",
+                "chapters": [1, 2, None, "bad", 3],  # 脏数据
+            }
+        ]
+        facade._fm.load_novel.return_value = novel
+        result = facade.accept_proposal(
+            "workspace/novels/novel_xyz",
+            proposal_id="pid-vo-dirty",
+            proposal_type="volume_outline",
+            data={"volume_number": 1, "chapter_numbers": [4, 5]},
+        )
+        assert result.status == "accepted"
+        _, saved = facade._fm.save_novel.call_args.args
+        # 脏数据被跳过，干净的 1/2/3 + 新加 4/5 → [1,2,3,4,5]
+        assert saved["outline"]["volumes"][0]["chapters"] == [1, 2, 3, 4, 5]
+
+    def test_volume_outline_first_accept_empty_chapters(self, facade):
+        """首次 accept 一卷（chapters 为空 list）→ 直接采用 proposal 的 chapter_numbers。"""
+        novel = _novel_data_stub(with_outline=True)
+        novel["outline"]["volumes"] = [
+            {"volume_number": 1, "title": "第一卷", "chapters": []}
+        ]
+        facade._fm.load_novel.return_value = novel
+        result = facade.accept_proposal(
+            "workspace/novels/novel_xyz",
+            proposal_id="pid-vo-empty",
+            proposal_type="volume_outline",
+            data={"volume_number": 1, "chapter_numbers": [1, 2, 3, 4, 5]},
+        )
+        assert result.status == "accepted"
+        _, saved = facade._fm.save_novel.call_args.args
+        assert saved["outline"]["volumes"][0]["chapters"] == [1, 2, 3, 4, 5]
+
+    def test_volume_outline_dirty_proposal_chapter_numbers_raises(self, facade):
+        """proposal 端 chapter_numbers 含非整数 → fail-fast 而非静默跳过。
+        Why: VolumeOutlineProposal 契约规定 list[int]，脏值是 caller bug。
+        """
+        novel = _novel_data_stub(with_outline=True, with_volumes=True)
+        facade._fm.load_novel.return_value = novel
+        with pytest.raises(ValueError, match="chapter_numbers 含非整数值"):
+            facade.accept_proposal(
+                "workspace/novels/novel_xyz",
+                proposal_id="pid-vo-dirty-prop",
+                proposal_type="volume_outline",
+                data={"volume_number": 1, "chapter_numbers": [1, None, "bad", 3]},
+            )
+
+    def test_volume_outline_drift_between_chapters_and_outline_repaired(
+        self, facade
+    ):
+        """既有 chapters / volume_outline 字段不同步（drift）→ accept 后两者归一。
+        Why: D1 merge 写入两个字段统一为 sorted union，顺手修复历史 drift。
+        """
+        novel = _novel_data_stub(with_outline=True)
+        novel["outline"]["volumes"] = [
+            {
+                "volume_number": 1,
+                "title": "第一卷",
+                "chapters": [1, 2, 3, 4, 5],
+                "volume_outline": [1, 2, 3],  # drift: 比 chapters 少 4-5
+            }
+        ]
+        facade._fm.load_novel.return_value = novel
+        result = facade.accept_proposal(
+            "workspace/novels/novel_xyz",
+            proposal_id="pid-vo-drift",
+            proposal_type="volume_outline",
+            data={"volume_number": 1, "chapter_numbers": [6, 7]},
+        )
+        assert result.status == "accepted"
+        _, saved = facade._fm.save_novel.call_args.args
+        v1 = saved["outline"]["volumes"][0]
+        # merge 以 chapters 为基（既有完整列表）+ proposal → [1..7]
+        # volume_outline 字段被 D1 fix 归一到同一个 merged 值
+        assert v1["chapters"] == [1, 2, 3, 4, 5, 6, 7]
+        assert v1["volume_outline"] == [1, 2, 3, 4, 5, 6, 7]
+
     def test_chapter_brief_dispatch_merges_legacy_fields(self, facade):
         novel = _novel_data_stub(
             with_outline=True, with_volumes=True, with_chapters=True

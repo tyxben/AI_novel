@@ -997,8 +997,30 @@ class NovelToolFacade:
             if data.get("volume_goal"):
                 vol_dict["volume_goal"] = data["volume_goal"]
             if data.get("chapter_numbers"):
-                vol_dict["chapters"] = list(data["chapter_numbers"])
-                vol_dict["volume_outline"] = list(data["chapter_numbers"])
+                # D1 fix: merge 而非覆盖。partial recovery 场景（novel_director.py:395
+                # "可基于此区间用 propose_volume_outline 局部补齐"）或同卷多次 accept 时，
+                # 覆盖会丢失既有章节号。union + sort + dedup 确保已 accept 的章不丢。
+                # 注意：merge 语义意味着无法通过 accept "shrink" 一卷（删除已有章节）。
+                # 要 retract 章节须用 `novel edit` / regenerate 通道，不走 accept_proposal。
+                existing = vol_dict.get("chapters") or []
+                existing_set: set[int] = set()
+                for c in existing:
+                    try:
+                        existing_set.add(int(c))
+                    except (TypeError, ValueError):
+                        continue  # 跳过脏数据（None / 非数字字符串等）
+                # proposal 端数据应当干净（VolumeOutlineProposal.chapter_numbers: list[int]）。
+                # 脏值是 caller 契约违规，fail-fast 而非静默跳过。
+                try:
+                    new_set = {int(c) for c in data["chapter_numbers"]}
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"volume_outline proposal 的 chapter_numbers 含非整数值: "
+                        f"{data['chapter_numbers']!r} ({exc})"
+                    ) from exc
+                merged = sorted(existing_set | new_set)
+                vol_dict["chapters"] = merged
+                vol_dict["volume_outline"] = merged
             if data.get("chapter_type_dist"):
                 vol_dict["chapter_type_dist"] = dict(data["chapter_type_dist"])
             if data.get("foreshadowing_plan"):

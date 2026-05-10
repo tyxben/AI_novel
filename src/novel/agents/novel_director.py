@@ -389,6 +389,8 @@ class NovelDirector:
             except RuntimeError:
                 # M1 partial recovery 取证：批失败时打印已成功批章号区间
                 # 方便 caller 看 log 后做手术修复（例如 propose_volume_outline 单批补齐）
+                # D1 fix 后 accept_proposal 是 merge 语义，partial proposal 不会丢已 accept 的章；
+                # 但 merge 不支持 shrink（不能通过 accept 删除既有章），retract 走 novel edit / regenerate。
                 if succeeded_batches:
                     log.error(
                         "卷%d 批次 [%d-%d] 失败；已成功批 (%d 个): %s — "
